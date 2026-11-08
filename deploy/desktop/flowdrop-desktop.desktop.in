@@ -1,0 +1,14 @@
+[Desktop Entry]
+Type=Application
+Version=1.0
+Name=FlowDrop 流转
+GenericName=Cross-device inbox
+Comment=Send text, links, images and files between this computer and your phone
+Exec=@BINARY@
+TryExec=@BINARY@
+Icon=@APP_ID@
+Terminal=false
+Categories=Network;FileTransfer;
+Keywords=flowdrop;inbox;share;transfer;clipboard;airdrop;
+StartupWMClass=flowdrop-desktop
+StartupNotify=true

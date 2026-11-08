@@ -1,0 +1,26 @@
+# build output
+/dist/
+/web/node_modules/
+/tests/node_modules/
+/tests/test-results/
+/tests/playwright-report/
+/server/internal/webui/dist/*
+!/server/internal/webui/dist/.placeholder
+
+# local data & config
+/data/
+*.db
+*.db-wal
+*.db-shm
+/config.json
+
+# editor / OS
+.DS_Store
+*.swp
+
+# typescript incremental build info
+/web/*.tsbuildinfo
+/tests/test-results/.last-run.json
+
+# generated Vite config output
+/web/vite.config.js

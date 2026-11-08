@@ -1,0 +1,96 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+
+    <!--
+      Network access is the only broad capability the app needs. There is no
+      storage permission: uploads use SAF content URIs and downloads go
+      through MediaStore. REQUEST_INSTALL_PACKAGES is required by Android 8+
+      for the *system* package installer to accept an APK handed to it; the app
+      never installs silently, it only starts the OS confirmation UI.
+    -->
+    <uses-permission android:name="android.permission.INTERNET" />
+    <uses-permission android:name="android.permission.REQUEST_INSTALL_PACKAGES" />
+
+    <!--
+      Nearby-Hub discovery uses Android NSD (mDNS/DNS-SD). Receiving mDNS
+      multicast on Android 12 and older (and Android 13 without the T
+      extension) requires a Wi-Fi multicast lock. This is a normal permission,
+      granted at install time: no location permission is requested, no Wi-Fi
+      scan is performed, and the lock is held only while the foreground login
+      screen is searching.
+    -->
+    <uses-permission android:name="android.permission.CHANGE_WIFI_MULTICAST_STATE" />
+
+    <!-- Android 11+ package visibility: needed to hand an APK to the system
+         installer and to open http(s) links in a browser. -->
+    <queries>
+        <intent>
+            <action android:name="android.intent.action.VIEW" />
+            <data android:mimeType="application/vnd.android.package-archive" />
+        </intent>
+        <intent>
+            <action android:name="android.intent.action.VIEW" />
+            <data android:scheme="http" />
+        </intent>
+        <intent>
+            <action android:name="android.intent.action.VIEW" />
+            <data android:scheme="https" />
+        </intent>
+    </queries>
+
+    <application
+        android:name=".FlowDropApp"
+        android:allowBackup="false"
+        android:dataExtractionRules="@xml/data_extraction_rules"
+        android:fullBackupContent="false"
+        android:icon="@mipmap/ic_launcher"
+        android:label="@string/app_name"
+        android:networkSecurityConfig="@xml/network_security_config"
+        android:supportsRtl="true"
+        android:theme="@style/Theme.FlowDrop">
+
+        <activity
+            android:name=".MainActivity"
+            android:exported="true"
+            android:launchMode="singleTask"
+            android:windowSoftInputMode="adjustResize">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+
+            <!-- System share sheet: single text/link/file/image. -->
+            <intent-filter>
+                <action android:name="android.intent.action.SEND" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <data android:mimeType="text/*" />
+                <data android:mimeType="image/*" />
+                <data android:mimeType="application/*" />
+                <data android:mimeType="audio/*" />
+                <data android:mimeType="video/*" />
+            </intent-filter>
+
+            <!-- System share sheet: multiple files/images. -->
+            <intent-filter>
+                <action android:name="android.intent.action.SEND_MULTIPLE" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <data android:mimeType="image/*" />
+                <data android:mimeType="application/*" />
+                <data android:mimeType="audio/*" />
+                <data android:mimeType="video/*" />
+                <data android:mimeType="text/*" />
+            </intent-filter>
+        </activity>
+
+        <provider
+            android:name="androidx.core.content.FileProvider"
+            android:authorities="${applicationId}.files"
+            android:exported="false"
+            android:grantUriPermissions="true">
+            <meta-data
+                android:name="android.support.FILE_PROVIDER_PATHS"
+                android:resource="@xml/file_paths" />
+        </provider>
+    </application>
+
+</manifest>

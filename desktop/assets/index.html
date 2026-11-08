@@ -1,0 +1,142 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>FlowDrop 设置</title>
+  <link rel="stylesheet" href="/style.css" />
+</head>
+<body>
+  <main class="app">
+    <header class="head">
+      <div class="brand">
+        <img src="/icon.png" alt="" width="40" height="40" />
+        <div>
+          <h1>FlowDrop 流转</h1>
+          <p class="sub">本机桌面 Hub 设置</p>
+        </div>
+      </div>
+      <span id="status-badge" class="badge badge-off">未运行</span>
+    </header>
+
+    <p id="startup-error" class="banner banner-error" hidden></p>
+    <p id="proxy-warning" class="banner banner-warn" hidden></p>
+
+    <section class="card">
+      <h2>运行状态</h2>
+      <dl class="kv">
+        <dt>可供手机访问的地址</dt>
+        <dd><code id="hub-url">—</code>
+          <button id="copy-url" class="ghost" type="button">复制</button>
+          <button id="open-browser" class="ghost" type="button">在浏览器打开</button>
+        </dd>
+        <dt>实际绑定</dt>
+        <dd><code id="listen">—</code></dd>
+        <dt>管理员密码</dt>
+        <dd id="admin-state">—</dd>
+        <dt>系统托盘</dt>
+        <dd id="tray-state">—</dd>
+      </dl>
+      <p id="last-error" class="banner banner-error" hidden></p>
+      <p class="hint">
+        关闭窗口只会把它收进托盘，Hub 继续运行；请使用托盘菜单的「退出 FlowDrop（停止 Hub）」彻底退出并释放端口。
+      </p>
+    </section>
+
+    <section id="admin-card" class="card" hidden>
+      <h2>首次设置管理员密码</h2>
+      <p class="hint">密码只保存在本机 Hub 数据库中（Argon2id 哈希），不会写进桌面配置文件。</p>
+      <div class="row">
+        <label for="admin-user">用户名</label>
+        <input id="admin-user" type="text" value="admin" autocomplete="username" />
+      </div>
+      <div class="row">
+        <label for="admin-pass">密码（至少 10 位）</label>
+        <input id="admin-pass" type="password" autocomplete="new-password" />
+      </div>
+      <div class="row">
+        <label for="admin-pass2">再次输入</label>
+        <input id="admin-pass2" type="password" autocomplete="new-password" />
+      </div>
+      <button id="set-admin" class="primary" type="button">设置管理员密码</button>
+      <p id="admin-error" class="banner banner-error" hidden></p>
+      <p id="admin-ok" class="banner banner-ok" hidden></p>
+    </section>
+
+    <section class="card">
+      <h2>网络绑定</h2>
+      <p class="hint">
+        选择 Hub 监听的<b>具体本机 IPv4 地址</b>（不监听 0.0.0.0）。单地址是旧方式；
+        需要手机在家用 Wi-Fi 和 Tailscale 下都能直接访问时，选择「同时使用内网和 Tailscale」，
+        同一个 Hub 会在两个地址的<b>同一端口</b>上提供服务，数据与登录完全共享。
+      </p>
+
+      <div class="mode-list" role="radiogroup" aria-label="网络绑定方式">
+        <label class="mode">
+          <input id="mode-single" type="radio" name="bind-mode" value="single" />
+          <span class="mode-body">
+            <span class="mode-title">只使用一个地址（旧方式）</span>
+            <span class="mode-desc">下面任选一个本机地址：内网、Tailscale 或回环。</span>
+          </span>
+        </label>
+        <label id="mode-dual-label" class="mode">
+          <input id="mode-dual" type="radio" name="bind-mode" value="dual" />
+          <span class="mode-body">
+            <span class="mode-title">同时使用内网和 Tailscale</span>
+            <span class="mode-desc">一个内网地址 + 一个 Tailscale 地址，同端口、同一 Hub、同一数据库。</span>
+          </span>
+        </label>
+      </div>
+      <p id="dual-hint" class="hint hint-warn" hidden></p>
+
+      <div id="single-pane">
+        <p class="hint">在这个列表中选择一个要绑定的地址：</p>
+        <div id="iface-list" class="iface-list"></div>
+        <p id="tailscale-hint" class="hint hint-warn" hidden>
+          未检测到 Tailscale 网卡：不能选择双模式，但仍可使用内网单地址模式正常收发。
+          跨网络访问需要你在系统里自行安装并登录 Tailscale；本应用不会要求或自动安装它。
+        </p>
+      </div>
+
+      <div id="dual-pane" hidden>
+        <div class="row">
+          <label for="dual-lan">内网（LAN）地址</label>
+          <select id="dual-lan"></select>
+        </div>
+        <div class="row">
+          <label for="dual-ts">Tailscale 地址</label>
+          <select id="dual-ts"></select>
+        </div>
+        <p class="hint">
+          两处必须是本机当前真实存在的地址，且不能相同。保存后 Hub 会同时绑定这两个 IP 的同一端口；
+          任一地址绑定失败则整体失败并恢复原配置，不会只启动一半。
+        </p>
+      </div>
+
+      <div class="row">
+        <label for="port">端口（两个地址共用）</label>
+        <input id="port" type="number" min="1" max="65535" step="1" value="8080" />
+        <button id="apply" class="primary" type="button">保存并重启 Hub</button>
+      </div>
+      <p id="apply-error" class="banner banner-error" hidden></p>
+      <p id="apply-ok" class="banner banner-ok" hidden></p>
+      <p class="hint">
+        更换地址/端口会先停止旧 Hub（撤回 mDNS、释放全部端口），再以同一数据目录启动新实例。
+        若新地址失效、端口被占用或只绑定成功一部分，会明确报错并自动尝试恢复原配置。
+      </p>
+
+      <h3 class="subhead">当前实际绑定（仅列出真正监听的地址）</h3>
+      <ul id="url-list" class="url-list"></ul>
+      <p id="url-empty" class="hint" hidden>Hub 未运行：上方显示的是已保存的设置，不是当前可用地址。</p>
+    </section>
+
+
+    <footer class="foot">
+      <button id="open-inbox" class="primary" type="button">打开收件箱</button>
+      <button id="quit" class="danger" type="button">退出 FlowDrop（停止 Hub）</button>
+      <span id="cfg-path" class="cfg"></span>
+    </footer>
+  </main>
+  <script type="module" src="/app.js"></script>
+</body>
+</html>

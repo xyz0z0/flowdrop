@@ -1,0 +1,75 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">FlowDrop</string>
+
+    <string name="login_title">FlowDrop</string>
+    <string name="login_subtitle">登录你的私有共享收件箱</string>
+    <string name="label_hub_address">Hub 地址</string>
+    <string name="label_username">用户名</string>
+    <string name="label_password">管理员密码</string>
+    <string name="action_login">登录</string>
+    <string name="login_busy">登录中…</string>
+    <string name="hub_address_hint">例如：http://192.168.1.50:8080</string>
+    <string name="login_http_warning">家庭局域网 HTTP 为明文传输，仅用于可信网络；跨网请使用 Tailscale 地址。密码仅用于换取会话，随后立即丢弃。</string>
+    <string name="not_initialized_hint">在 Hub 电脑终端执行 flowdrop admin init 设置管理员密码后再登录。</string>
+
+    <string name="inbox_title">收件箱</string>
+    <string name="action_logout">退出</string>
+    <string name="action_retry">重试</string>
+    <string name="action_cancel">取消</string>
+    <string name="action_delete">删除</string>
+    <string name="action_confirm_delete">确认删除</string>
+    <string name="action_copy">复制</string>
+    <string name="action_copied">已复制</string>
+    <string name="action_open_link">打开链接</string>
+    <string name="action_download">下载</string>
+    <string name="action_install_apk">安装</string>
+    <string name="action_load_more">加载更早的内容</string>
+    <string name="action_refresh">刷新</string>
+
+    <string name="composer_hint">输入文字或粘贴链接…</string>
+    <string name="composer_send">发送</string>
+    <string name="composer_pick_file">选择文件</string>
+    <string name="composer_pick_image">选择图片</string>
+    <string name="composer_empty_hint">收件箱是空的。发送文字、链接、图片或文件，登录同一 Hub 的其他设备即可看到。</string>
+    <string name="device_name_label">本机名称</string>
+
+    <string name="empty_inbox">收件箱是空的</string>
+    <string name="loading">正在加载…</string>
+    <string name="conn_open">实时同步中</string>
+    <string name="conn_connecting">连接中…</string>
+    <string name="conn_closed">已离线，重连中</string>
+    <string name="conn_paused">后台已暂停</string>
+
+    <string name="tag_text">文字</string>
+    <string name="tag_link">链接</string>
+    <string name="tag_image">图片</string>
+    <string name="tag_file">文件</string>
+    <string name="tag_apk">Android 安装包</string>
+    <string name="share_done">已发送到收件箱</string>
+    <string name="error_network">无法连接 Hub，请检查地址、网络与 Hub 是否运行</string>
+    <string name="error_unauthorized">会话已失效，请重新登录</string>
+    <string name="error_bad_address">Hub 地址格式不正确</string>
+    <string name="error_upload_too_large">文件超过 Hub 允许的大小上限</string>
+    <string name="error_save_failed">保存失败</string>
+    <string name="error_download_failed">下载失败</string>
+    <string name="error_apk_install">无法启动系统安装程序</string>
+
+    <string name="discovery_title">附近的 Hub</string>
+    <string name="discovery_search">搜索</string>
+    <string name="discovery_refresh">刷新</string>
+    <string name="discovery_stop">停止</string>
+    <string name="discovery_searching">正在搜索附近的 Hub…</string>
+    <string name="discovery_idle">可搜索同一 Wi-Fi 下的 Hub，或手动输入地址。</string>
+    <string name="discovery_empty">未发现 Hub。部分 Wi-Fi 会限制组播或开启 AP 隔离，Android 模拟器也不转发 mDNS；请手动输入地址。</string>
+    <string name="discovery_found">发现 %1$d 个 Hub</string>
+    <string name="discovery_error">自动发现不可用：%1$s。仍可手动输入地址。</string>
+    <string name="discovery_hint">点选只填写地址，不会自动登录；发现结果不代表 Hub 已通过验证。</string>
+
+    <string name="clear_password_hint">应用不保存密码；仅保存会话 Cookie（可随时退出吊销）。</string>
+    <string name="address_change_clears_session">更改 Hub 地址会清除当前会话，需要重新登录。</string>
+
+    <string name="download_progress">下载中 %1$d%%</string>
+    <string name="upload_progress">上传中 %1$d%%</string>
+    <string name="saved_to_downloads">已保存到 Downloads：%1$s</string>
+</resources>

@@ -1,0 +1,96 @@
+#!/usr/bin/env bash
+# Build the FlowDrop Linux desktop app (Wails v3 + GTK3/WebKitGTK 4.1).
+#
+# Output: dist/flowdrop-desktop
+#
+# System build dependencies (pkg-config names):
+#   gtk+-3.0, webkit2gtk-4.1, libsoup-3.0, gio-unix-2.0, gdk-3.0
+# On Debian/Ubuntu these come from:
+#   sudo apt install build-essential pkg-config libgtk-3-dev libwebkit2gtk-4.1-dev
+#
+# No root here: if the system dev packages are missing, this script falls back
+# to a user-local sysroot at $FLOWDROP_DESKTOP_SYSROOT (default
+# ~/.local/share/flowdrop-desktop/sysroot). Provision it with
+# scripts/desktop-dev-sysroot.sh — it only downloads/extracts .deb files into
+# your home directory and never touches the host package database.
+#
+# Usage:
+#   scripts/build-desktop.sh            # release build (production tags)
+#   scripts/build-desktop.sh --dev      # debug build (devtools enabled)
+set -euo pipefail
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+cd "$ROOT"
+
+MODE="release"
+for arg in "$@"; do
+  case "$arg" in
+    --dev) MODE="dev" ;;
+    -h|--help) sed -n '2,26p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+    *) echo "unknown argument: $arg" >&2; exit 2 ;;
+  esac
+done
+
+need() {
+  command -v "$1" >/dev/null 2>&1 || { echo "missing required tool: $1" >&2; exit 1; }
+}
+need go
+need npm
+need pkg-config
+
+# --- web assets: the Hub embeds them, the desktop shows the Hub ------------
+if [ ! -d web/node_modules ]; then
+  echo "==> installing web dependencies"
+  (cd web && npm ci --no-audit --no-fund)
+fi
+echo "==> building web frontend"
+(cd web && npm run build)
+
+# --- GTK3/WebKit dev environment ------------------------------------------
+SYSROOT="${FLOWDROP_DESKTOP_SYSROOT:-$HOME/.local/share/flowdrop-desktop/sysroot}"
+export PKG_CONFIG_PATH="${PKG_CONFIG_PATH:-}"
+export CGO_CFLAGS="${CGO_CFLAGS:-}"
+export CGO_LDFLAGS="${CGO_LDFLAGS:-}"
+
+if ! pkg-config --exists gtk+-3.0 webkit2gtk-4.1 gio-unix-2.0 gdk-3.0; then
+  if [ -d "$SYSROOT/usr/lib/x86_64-linux-gnu/pkgconfig" ]; then
+    echo "==> using user-local sysroot: $SYSROOT"
+    export PKG_CONFIG_PATH="$SYSROOT/usr/lib/x86_64-linux-gnu/pkgconfig:$SYSROOT/usr/share/pkgconfig:$PKG_CONFIG_PATH"
+    export CGO_CFLAGS="-I$SYSROOT/usr/include -I$SYSROOT/usr/include/x86_64-linux-gnu $CGO_CFLAGS"
+    export CGO_LDFLAGS="-L$SYSROOT/usr/lib/x86_64-linux-gnu $CGO_LDFLAGS"
+  else
+    cat >&2 <<'MSG'
+error: GTK3/WebKitGTK development files are missing.
+
+Install them system-wide (recommended):
+  sudo apt install build-essential pkg-config libgtk-3-dev libwebkit2gtk-4.1-dev
+
+Or provision a user-local sysroot without root:
+  scripts/desktop-dev-sysroot.sh
+MSG
+    exit 1
+  fi
+fi
+
+if ! pkg-config --exists gtk+-3.0 webkit2gtk-4.1 gio-unix-2.0 gdk-3.0; then
+  echo "error: pkg-config still cannot find the GTK3/WebKitGTK dev packages" >&2
+  exit 1
+fi
+
+# --- the desktop module ----------------------------------------------------
+VERSION="${FLOWDROP_VERSION:-0.1.0-desktop}"
+TAGS="gtk3"
+if [ "$MODE" = "release" ]; then
+  TAGS="gtk3 production"
+fi
+
+echo "==> building desktop binary ($MODE, tags: $TAGS)"
+mkdir -p dist
+(cd desktop && go build -tags "$TAGS" \
+  -ldflags "-s -w -X flowdrop/internal/api.Version=$VERSION" \
+  -o "$ROOT/dist/flowdrop-desktop" .)
+
+echo
+echo "built: $ROOT/dist/flowdrop-desktop"
+echo "run:   $ROOT/dist/flowdrop-desktop"
+echo "install the launcher (user-level, no sudo): scripts/install-desktop.sh"
