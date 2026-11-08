@@ -48,6 +48,37 @@ class AppContainer(context: Context) {
         return client
     }
 
+    /**
+     * Builds the client for an address of the *already paired* Hub after
+     * [SessionStore.switchToPaired] moved the stored record to that origin.
+     *
+     * This never switches or clears the session store: dropping the cookies for
+     * the previous origin is [SessionStore.switchToPaired]'s job, and a stale
+     * client must never be able to erase the pairing by switching addresses.
+     * The Hub ID is re-checked so a programming error cannot bind a client to
+     * another Hub's address; the restore call enforces it again over the wire.
+     */
+    @Synchronized
+    fun activatePaired(
+        endpoint: HubEndpoint,
+        expectedHubId: String,
+        onUnauthorized: () -> Unit,
+    ): ApiClient {
+        val storedHubId = sessionStore.load()?.hubId.orEmpty()
+        check(storedHubId == expectedHubId) { "paired Hub mismatch" }
+        val client = ApiClient(endpoint, sessionStore, cookieJar).also {
+            it.onUnauthorized = onUnauthorized
+        }
+        activeClient = client
+        return client
+    }
+
+    /** Releases the active client without touching the stored pairing. */
+    @Synchronized
+    fun dropActiveClient() {
+        activeClient = null
+    }
+
     fun currentClient(): ApiClient? = activeClient
 
     /**
@@ -64,8 +95,9 @@ class AppContainer(context: Context) {
 }
 
 /**
- * Non-sensitive UI preferences: last Hub address, username and device nickname.
- * The password is never written anywhere.
+ * Non-sensitive UI preferences: last Hub address, its display name and the
+ * device nickname. Pairing codes, device tokens and cookies live in the
+ * Keystore-backed session record instead; nothing here is a credential.
  */
 class AppPreferences(context: Context) {
     private val prefs = context.getSharedPreferences("flowdrop.prefs", Context.MODE_PRIVATE)
@@ -74,9 +106,9 @@ class AppPreferences(context: Context) {
         get() = prefs.getString(KEY_HUB, "").orEmpty()
         set(value) = prefs.edit().putString(KEY_HUB, value).apply()
 
-    var username: String
-        get() = prefs.getString(KEY_USER, "admin").orEmpty()
-        set(value) = prefs.edit().putString(KEY_USER, value).apply()
+    var hubName: String
+        get() = prefs.getString(KEY_HUB_NAME, "").orEmpty()
+        set(value) = prefs.edit().putString(KEY_HUB_NAME, value.take(120)).apply()
 
     var deviceName: String
         get() = prefs.getString(KEY_DEVICE, null) ?: defaultDeviceName()
@@ -91,7 +123,7 @@ class AppPreferences(context: Context) {
 
     private companion object {
         const val KEY_HUB = "hub_address"
-        const val KEY_USER = "username"
+        const val KEY_HUB_NAME = "hub_name"
         const val KEY_DEVICE = "device_name"
     }
 }

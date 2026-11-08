@@ -8,11 +8,17 @@ import (
 	"strings"
 )
 
-// ProxyWarning explains an environment problem the desktop cannot fix for the
-// user: if the machine routes HTTP through a proxy that does not exempt the
-// Hub's own address, the WebView's traffic (notably the WebSocket upgrade) is
-// proxied too. The Hub never edits the host's proxy configuration; it only
-// reports the exact address to exempt.
+// ProxyWarning reports a proxy configuration worth knowing about: the machine
+// routes HTTP through a proxy whose bypass list does not exempt the Hub's own
+// address. That is a risk, not proof of failure: a proxy that forwards
+// WebSocket upgrades works fine, while one that does not (for example by
+// answering the handshake with HTTP 426) leaves the inbox offline.
+//
+// The desktop no longer depends on this warning to make its own Hub traffic
+// work: the WebView is configured for a direct connection separately. The
+// warning is useful when that in-process fix could not be applied. The Hub
+// never edits the host's proxy configuration; it only names the address that
+// could be exempted.
 //
 // It returns "" when no proxy is configured or the Hub host is already exempt.
 func ProxyWarning(hubHost string) string {
@@ -39,9 +45,11 @@ func ProxyWarning(hubHost string) string {
 	if exemptByKDENoProxy(host) {
 		return ""
 	}
-	return "当前系统配置了 HTTP 代理（" + shortenProxy(p) + "），但代理绕过列表未包含 " + host + "。\n" +
-		"WebView 的 WebSocket 会经过代理并被改写握手，收件箱将一直显示「已离线，重连中」。\n" +
-		"请把 " + host + " 加入系统代理的「忽略主机 / no_proxy」后重启 FlowDrop；本应用不会修改你的代理设置。"
+	return "检测到系统配置了 HTTP 代理（" + shortenProxy(p) + "），代理绕过列表未包含 " + host + "。\n" +
+		"这是风险提示，不是断言：只有当该代理不支持或拒绝 WebSocket 升级（例如握手返回 HTTP 426）时，" +
+		"收件箱才会一直显示「已离线，重连中」；代理若允许 WebSocket 通过则不受影响。\n" +
+		"FlowDrop 不会修改你的代理设置，并会优先让应用内 Hub 流量直连。若仍出现 WebSocket 握手失败，" +
+		"可把 " + host + " 加入系统代理的「忽略主机 / no_proxy」后重启 FlowDrop。"
 }
 
 func shortenProxy(p string) string {

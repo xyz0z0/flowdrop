@@ -63,8 +63,6 @@ type Status struct {
 	AdditionalAddresses []string `json:"additional_addresses"`
 	// LastError is the last start/stop failure shown to the user, or "".
 	LastError string `json:"last_error"`
-	// AdminConfigured reports whether a Hub admin password exists.
-	AdminConfigured bool `json:"admin_configured"`
 }
 
 // Manager serialises Hub start/stop/restart. Exactly one Hub instance exists at
@@ -216,25 +214,39 @@ func (m *Manager) Handler() (*hub.Hub, bool) {
 	return m.hub, m.hub != nil
 }
 
-// HasAdmin reports whether an admin password exists.
-func (m *Manager) HasAdmin() (bool, error) {
+// CreatePairingCode generates a new local 4-digit pairing code (leading zeros
+// kept) on the running Hub. The code is only returned here for local display;
+// it is never logged and never exposed over HTTP. A manager without a running
+// Hub reports hub.ErrClosed instead of inventing a code.
+func (m *Manager) CreatePairingCode() (hub.PairingCode, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if m.hub == nil {
-		return false, errors.New("hub is not running")
+		return hub.PairingCode{}, hub.ErrClosed
 	}
-	return m.hub.HasAdmin()
+	return m.hub.CreatePairingCode()
 }
 
-// InitializeAdmin creates the first admin password. It refuses to overwrite an
-// existing one (the Hub enforces that too).
-func (m *Manager) InitializeAdmin(username, password string) error {
+// ListPairedDevices returns the devices paired with the running Hub, with their
+// names and created/last-seen timestamps (never the raw tokens).
+func (m *Manager) ListPairedDevices() ([]hub.PairedDevice, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if m.hub == nil {
-		return errors.New("hub is not running")
+		return nil, hub.ErrClosed
 	}
-	return m.hub.InitializeAdmin(username, password)
+	return m.hub.ListPairedDevices()
+}
+
+// RevokePairedDevice revokes one paired device: the Hub drops its HTTP session
+// and any open WebSocket, so the stored token stops working immediately.
+func (m *Manager) RevokePairedDevice(id string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.hub == nil {
+		return hub.ErrClosed
+	}
+	return m.hub.RevokePairedDevice(id)
 }
 
 // Status snapshots the manager for the settings window.
@@ -252,9 +264,6 @@ func (m *Manager) Status() Status {
 		st.Running = true
 		st.URL = m.hub.URL()
 		st.URLs = m.URLsLocked()
-		if ok, err := m.hub.HasAdmin(); err == nil {
-			st.AdminConfigured = ok
-		}
 	}
 	return st
 }

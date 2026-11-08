@@ -53,6 +53,6 @@ VITE_PID=$!
 
 echo
 echo "开发地址： http://127.0.0.1:5173"
-echo "首次使用： flowdrop admin init       （或：go run ./cmd/flowdrop admin init）"
+echo "首次配对：桌面设置点「添加设备」生成四位码；CLI 用 flowdrop pair（与 Hub 同一 data_dir，Hub 运行中才有客户端入口）"
 echo "按 Ctrl+C 停止。"
 wait

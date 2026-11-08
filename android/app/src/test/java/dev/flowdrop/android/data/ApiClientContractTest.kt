@@ -16,9 +16,13 @@ import java.io.ByteArrayOutputStream
 import java.util.concurrent.TimeUnit
 
 /**
- * Pins the frozen Hub contract from the client side: CSRF double submit,
- * matching Origin header, cookie session, pagination, streaming upload and
- * streaming download with SHA-256 verification.
+ * Pins the frozen Hub contract from the client side: native pairing, CSRF double
+ * submit, matching Origin header, cookie session, pagination, streaming upload
+ * and streaming download with SHA-256 verification.
+ *
+ * The session is always established through POST /auth/pair (`native=true`)
+ * with a fixture shaped like the real frozen payload: `hub` (id/name/endpoints),
+ * `device_id`, the once-only `device_token` and the session/CSRF cookies.
  */
 class ApiClientContractTest {
 
@@ -44,7 +48,7 @@ class ApiClientContractTest {
         server.shutdown()
     }
 
-    private fun loginResponse() = MockResponse()
+    private fun pairResponse() = MockResponse()
         .setResponseCode(200)
         .addHeader("Content-Type", "application/json")
         .addHeader(
@@ -56,43 +60,94 @@ class ApiClientContractTest {
             "flowdrop_csrf=csrf-1; Path=/; SameSite=Strict",
         )
         .setBody(
-            """{"authenticated":true,"csrf_token":"csrf-1","username":"admin",
-               "expires_at":9999999999999,"limits":{"max_upload_bytes":1048576}}""",
+            """{"authenticated":true,"csrf_token":"csrf-1",
+               "expires_at":9999999999999,"limits":{"max_upload_bytes":1048576},
+               "device_id":"dev-1","device_token":"tok-1",
+               "hub":{"id":"hub-1","name":"Home",
+                      "endpoints":[{"url":"${endpoint.origin}","kind":"lan"}]}}""",
         )
+
+    /** Pairs the fixture device; the pair request itself is the first recorded one. */
+    private suspend fun pairDevice(code: String = "0123") = client.pair(code, "Pixel 9")
 
     private fun RecordedRequest.isWrite(method: String) = this.method == method && path?.startsWith("/api/") == true
 
     @Test
-    fun `login stores csrf token and session cookies`() = runBlocking {
-        server.enqueue(loginResponse())
+    fun `pair stores csrf token, cookies and the device pairing`() = runBlocking {
+        server.enqueue(pairResponse())
 
-        val info = client.login("admin", "hunter2")
+        val info = pairDevice()
 
         assertTrue(info.authenticated)
         assertEquals("csrf-1", client.csrfToken)
         assertEquals(1_048_576L, client.maxUploadBytes)
 
         val recorded = server.takeRequest(1, TimeUnit.SECONDS)!!
-        assertEquals("/api/v1/auth/login", recorded.path)
+        assertEquals("/api/v1/auth/pair", recorded.path)
         assertEquals("POST", recorded.method)
         // The Hub requires the Origin to match its own scheme://host:port.
         assertEquals(endpoint.origin, recorded.getHeader("Origin"))
         val body = recorded.body.readUtf8()
-        assertTrue(body.contains("\"username\":\"admin\""))
-        assertTrue(body.contains("\"password\":\"hunter2\""))
+        assertTrue(body.contains("\"code\":\"0123\""))
+        assertTrue(body.contains("\"device_name\":\"Pixel 9\""))
+        assertTrue(body.contains("\"native\":true"))
 
-        // Nothing but cookies/token is persisted; the password is gone.
+        // Nothing but cookies/token/pairing is persisted; the code is gone.
         val stored = store.load()!!
         assertEquals("csrf-1", stored.csrfToken)
-        assertEquals("admin", stored.username)
+        assertEquals("hub-1", stored.hubId)
+        assertEquals("dev-1", stored.deviceId)
+        assertEquals("tok-1", stored.deviceToken)
         assertTrue(stored.cookies.any { it.name == "flowdrop_session" })
-        assertFalse(stored.toString().contains("hunter2"))
+        assertFalse(stored.toString().contains("0123"))
+    }
+
+    @Test
+    fun `pairing errors surface pairing_invalid and pairing_locked without dropping the pairing`() = runBlocking {
+        server.enqueue(pairResponse())
+        pairDevice()
+        val paired = store.load()!!
+        var unauthorized = 0
+        client.onUnauthorized = { unauthorized++ }
+
+        server.enqueue(
+            MockResponse().setResponseCode(401)
+                .addHeader("Content-Type", "application/json")
+                .setBody("""{"error":{"code":"pairing_invalid","message":"invalid code"}}"""),
+        )
+        try {
+            pairDevice("0000")
+            fail("expected a rejected pairing to throw")
+        } catch (e: ApiException) {
+            assertEquals(401, e.status)
+            assertEquals("pairing_invalid", e.code)
+        }
+
+        server.enqueue(
+            MockResponse().setResponseCode(429)
+                .addHeader("Content-Type", "application/json")
+                .setBody("""{"error":{"code":"pairing_locked","message":"too many attempts"}}"""),
+        )
+        try {
+            pairDevice("0000")
+            fail("expected a locked pairing to throw")
+        } catch (e: ApiException) {
+            assertEquals(429, e.status)
+            assertEquals("pairing_locked", e.code)
+        }
+
+        // A mistyped code is not an expired session: no global logout, and the
+        // existing pairing (Hub ID + device token) survives.
+        assertEquals("pairing failures must not trigger the global unauthorized path", 0, unauthorized)
+        val after = store.load()!!
+        assertEquals(paired.hubId, after.hubId)
+        assertEquals(paired.deviceToken, after.deviceToken)
     }
 
     @Test
     fun `create text sends csrf header, origin and json body`() = runBlocking {
-        server.enqueue(loginResponse())
-        client.login("admin", "pw")
+        server.enqueue(pairResponse())
+        pairDevice()
         server.enqueue(
             MockResponse().setResponseCode(201)
                 .addHeader("Content-Type", "application/json")
@@ -107,7 +162,7 @@ class ApiClientContractTest {
         assertEquals("item-1", item.id)
         assertTrue(item.isLink)
 
-        server.takeRequest(1, TimeUnit.SECONDS) // login
+        server.takeRequest(1, TimeUnit.SECONDS) // pairing
         val write = server.takeRequest(1, TimeUnit.SECONDS)!!
         assertEquals("/api/v1/items/text", write.path)
         assertEquals("csrf-1", write.getHeader("X-FlowDrop-CSRF"))
@@ -120,8 +175,8 @@ class ApiClientContractTest {
 
     @Test
     fun `list sends cursor and limit and parses next_cursor`() = runBlocking {
-        server.enqueue(loginResponse())
-        client.login("admin", "pw")
+        server.enqueue(pairResponse())
+        pairDevice()
         server.enqueue(
             MockResponse().setResponseCode(200)
                 .addHeader("Content-Type", "application/json")
@@ -142,13 +197,15 @@ class ApiClientContractTest {
         assertTrue(list.path!!.contains("cursor=prev"))
         // Reads never carry the CSRF header (the Hub only requires it on writes).
         assertEquals(null, list.getHeader("X-FlowDrop-CSRF"))
+        // The device token is a restore credential only: it never rides along.
+        assertEquals(null, list.getHeader("Authorization"))
         assertEquals(endpoint.origin, list.getHeader("Origin"))
     }
 
     @Test
     fun `upload streams the file with multipart and csrf`() = runBlocking {
-        server.enqueue(loginResponse())
-        client.login("admin", "pw")
+        server.enqueue(pairResponse())
+        pairDevice()
         server.enqueue(
             MockResponse().setResponseCode(201)
                 .addHeader("Content-Type", "application/json")
@@ -188,8 +245,8 @@ class ApiClientContractTest {
 
     @Test
     fun `download streams bytes and verifies sha256 header`() = runBlocking {
-        server.enqueue(loginResponse())
-        client.login("admin", "pw")
+        server.enqueue(pairResponse())
+        pairDevice()
 
         val content = "attachment-bytes".toByteArray()
         val digest = java.security.MessageDigest.getInstance("SHA-256")
@@ -219,8 +276,8 @@ class ApiClientContractTest {
 
     @Test
     fun `checksum mismatch fails the download`() = runBlocking {
-        server.enqueue(loginResponse())
-        client.login("admin", "pw")
+        server.enqueue(pairResponse())
+        pairDevice()
         server.enqueue(
             MockResponse().setResponseCode(200)
                 .addHeader("Content-Type", "application/octet-stream")
@@ -236,15 +293,15 @@ class ApiClientContractTest {
     }
 
     @Test
-    fun `401 triggers the unauthorized callback and carries the server code`() = runBlocking {
-        server.enqueue(loginResponse())
-        client.login("admin", "pw")
+    fun `401 on a protected request triggers the unauthorized callback and carries the server code`() = runBlocking {
+        server.enqueue(pairResponse())
+        pairDevice()
         var unauthorized = false
         client.onUnauthorized = { unauthorized = true }
         server.enqueue(
             MockResponse().setResponseCode(401)
                 .addHeader("Content-Type", "application/json")
-                .setBody("""{"error":{"code":"unauthenticated","message":"login required"}}"""),
+                .setBody("""{"error":{"code":"unauthenticated","message":"pairing required"}}"""),
         )
         try {
             client.list()
@@ -258,8 +315,8 @@ class ApiClientContractTest {
 
     @Test
     fun `session restore reissues csrf when the cookie was lost`() = runBlocking {
-        server.enqueue(loginResponse())
-        client.login("admin", "pw")
+        server.enqueue(pairResponse())
+        pairDevice()
         server.enqueue(
             MockResponse().setResponseCode(200)
                 .addHeader("Content-Type", "application/json")
@@ -278,12 +335,14 @@ class ApiClientContractTest {
         // The stored session cookie is sent so the Hub can recognize us.
         val cookieHeader = restore.getHeader("Cookie").orEmpty()
         assertTrue("expected session cookie, got: $cookieHeader", cookieHeader.contains("flowdrop_session=sess-1"))
+        // GET /auth/session never echoes the token, so the stored one must survive.
+        assertEquals("tok-1", store.load()!!.deviceToken)
     }
 
     @Test
     fun `logout clears local cookies and token`() = runBlocking {
-        server.enqueue(loginResponse())
-        client.login("admin", "pw")
+        server.enqueue(pairResponse())
+        pairDevice()
         server.enqueue(MockResponse().setResponseCode(204))
 
         client.logout()
@@ -299,27 +358,9 @@ class ApiClientContractTest {
     }
 
     @Test
-    fun `not_initialized error is surfaced from the login response`() = runBlocking {
-        server.enqueue(
-            MockResponse().setResponseCode(403)
-                .addHeader("Content-Type", "application/json")
-                .setBody(
-                    """{"error":{"code":"not_initialized","message":"no admin password set"}}""",
-                ),
-        )
-        try {
-            client.login("admin", "pw")
-            fail("expected ApiException")
-        } catch (e: ApiException) {
-            assertTrue(e.isNotInitialized)
-            assertEquals(403, e.status)
-        }
-    }
-
-    @Test
     fun `upload 413 maps to too large`() = runBlocking {
-        server.enqueue(loginResponse())
-        client.login("admin", "pw")
+        server.enqueue(pairResponse())
+        pairDevice()
         server.enqueue(
             MockResponse().setResponseCode(413)
                 .addHeader("Content-Type", "application/json")

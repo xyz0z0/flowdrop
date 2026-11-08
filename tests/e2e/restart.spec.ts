@@ -2,7 +2,7 @@ import { test, expect } from '@playwright/test';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { startHub, ADMIN_PASSWORD, type Hub } from './hub';
+import { createPairingCode, startHub, type Hub } from './hub';
 
 const PORT = Number(process.env.FLOWDROP_TEST_PORT ?? 8098);
 
@@ -19,8 +19,10 @@ test('content and session survive a Hub restart', async ({ browser, page }) => {
 
     // This spec boots its own Hub on a different port than the shared baseURL.
     await page.goto(hub.baseURL + '/');
-    await page.getByLabel('管理员密码').fill(ADMIN_PASSWORD);
-    await page.getByRole('button', { name: '登录' }).click();
+    // Pairing is per browser context, so this spec asks the local CLI for its
+    // own one-time code instead of relying on a shared one.
+    await page.getByLabel('配对码').fill(createPairingCode(dataDir));
+    await page.getByRole('button', { name: '配对', exact: true }).click();
     await expect(page.getByText('实时同步中')).toBeVisible({ timeout: 15_000 });
 
     const stamp = Date.now();
@@ -30,7 +32,7 @@ test('content and session survive a Hub restart', async ({ browser, page }) => {
     await expect(page.locator('.item', { hasText: text })).toHaveCount(1);
 
     const fileName = `persisted-${stamp}.txt`;
-    await page.setInputFiles('input[type=file]', {
+    await page.setInputFiles('.composer input[type=file]', {
       name: fileName,
       mimeType: 'text/plain',
       buffer: Buffer.from('survives restart'),
@@ -44,7 +46,8 @@ test('content and session survive a Hub restart', async ({ browser, page }) => {
     await hub.stop();
     hub = await startHub(PORT, { dataDir });
 
-    // Cookies persist across the restart, and the session row is still valid.
+    // The restart must not revoke the paired device: the same data dir still
+    // holds the cookie session row, so a reload stays inside the inbox.
     await page.reload();
     await expect(page.getByPlaceholder(/输入或粘贴文字/)).toBeVisible({ timeout: 15_000 });
     await expect(page.locator('.item', { hasText: text })).toHaveCount(1);

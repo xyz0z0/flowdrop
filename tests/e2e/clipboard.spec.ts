@@ -3,7 +3,7 @@ import { spawn, type ChildProcess } from 'node:child_process';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { networkInterfaces, tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { startHub, ADMIN_PASSWORD, HUB_BIN, type Hub } from './hub';
+import { createPairingCode, hubEnv, HUB_BIN, startHub, type Hub } from './hub';
 
 /**
  * Clipboard behaviour on a plain-HTTP home LAN.
@@ -42,8 +42,10 @@ function trackErrors(page: Page): string[] {
 
 async function login(page: Page, device = 'clipboard-tester'): Promise<void> {
   await page.goto('/');
-  await page.getByLabel('管理员密码').fill(ADMIN_PASSWORD);
-  await page.getByRole('button', { name: '登录' }).click();
+  // Each browser context needs its own single-use code: pairing codes are
+  // global to the hub, and generating a new one voids the previous code.
+  await page.getByLabel('配对码').fill(createPairingCode(hub.dataDir));
+  await page.getByRole('button', { name: '配对', exact: true }).click();
   await expect(page.getByRole('heading', { name: 'FlowDrop' })).toBeVisible();
   await page.getByLabel('本机名称').fill(device);
   await expect(page.getByText('实时同步中')).toBeVisible({ timeout: 15_000 });
@@ -129,7 +131,7 @@ test.describe('clipboard degradation', () => {
 
     await login(page, 'hash-tester');
     const name = `hash-${Date.now()}.txt`;
-    await page.setInputFiles('input[type=file]', {
+    await page.setInputFiles('.composer input[type=file]', {
       name,
       mimeType: 'text/plain',
       buffer: Buffer.from('checksum me'),
@@ -252,24 +254,15 @@ interface LanHub {
  * this exercises the real insecure-context branch rather than a mocked one.
  */
 async function startLanHub(ip: string, port: number, dataDir: string): Promise<LanHub> {
-  const { spawnSync } = await import('node:child_process');
-  const init = spawnSync(HUB_BIN, ['admin', 'init', '--password-stdin'], {
-    env: { ...process.env, FLOWDROP_DATA_DIR: dataDir },
-    input: `${ADMIN_PASSWORD}\n${ADMIN_PASSWORD}\n`,
-    encoding: 'utf8',
-  });
-  if (init.status !== 0) throw new Error(`admin init failed: ${init.stderr}`);
-
   const child: ChildProcess = spawn(HUB_BIN, ['serve'], {
-    env: {
-      ...process.env,
-      FLOWDROP_DATA_DIR: dataDir,
+    // Inherited FLOWDROP_* variables are stripped so the LAN hub can only use
+    // this temp data dir and this listener.
+    env: hubEnv(dataDir, {
       FLOWDROP_LISTEN: `${ip}:${port}`,
       FLOWDROP_ALLOWED_HOSTS: ip,
       FLOWDROP_COOKIE_SECURE: 'false',
-      FLOWDROP_LOGIN_LIMIT_PER_MINUTE: '50',
       FLOWDROP_LOG_LEVEL: 'warn',
-    },
+    }),
     stdio: ['ignore', 'pipe', 'pipe'],
   });
 
@@ -341,8 +334,8 @@ test.describe('plain HTTP LAN origin', () => {
       // The browser itself confirms the plain-HTTP origin is not secure.
       expect(await page.evaluate(() => window.isSecureContext)).toBe(false);
 
-      await page.getByLabel('管理员密码').fill(ADMIN_PASSWORD);
-      await page.getByRole('button', { name: '登录' }).click();
+      await page.getByLabel('配对码').fill(createPairingCode(dataDir));
+      await page.getByRole('button', { name: '配对', exact: true }).click();
       await expect(page.getByText('实时同步中')).toBeVisible({ timeout: 15_000 });
 
       // The one-time HTTP notice tells the user what may be degraded.

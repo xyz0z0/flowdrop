@@ -13,12 +13,19 @@ type ctxKey int
 const sessionKey ctxKey = 1
 
 type reqSession struct {
+	// Session is only a carrier for the request's identity: ID is the SHA-256
+	// hash of the device token and UserID is the paired device ID. It is never
+	// a password-derived session.
 	Session auth.Session
-	Token   string
+	// DeviceID is the paired device the request is authenticated as.
+	DeviceID string
+	// Token is the raw device token used for this request (cookie or Bearer).
+	// It is never logged or echoed back.
+	Token string
 }
 
-func withSession(ctx context.Context, s auth.Session, token string) context.Context {
-	return context.WithValue(ctx, sessionKey, reqSession{Session: s, Token: token})
+func withSession(ctx context.Context, s reqSession) context.Context {
+	return context.WithValue(ctx, sessionKey, s)
 }
 
 func sessionFrom(ctx context.Context) (reqSession, bool) {

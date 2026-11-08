@@ -19,6 +19,11 @@ enum class ConnState { CONNECTING, OPEN, CLOSED, PAUSED }
  * a REST resync so a dropped socket can never leave stale state behind. The
  * handshake carries the same session Cookie (via the shared CookieJar) and the
  * Hub-matching Origin header required by the server.
+ *
+ * A dropped socket is *not* an authorization failure: [onUnavailable] lets the
+ * caller rate-limit a route reselection, while only a 401 handshake or a
+ * `1008 policy violation` close (the Hub's device-revocation signal) calls
+ * [onUnauthorized].
  */
 class EventStream(
     private val scope: CoroutineScope,
@@ -26,6 +31,7 @@ class EventStream(
     private val onEvent: (type: String, id: String) -> Unit,
     private val onState: (ConnState) -> Unit,
     private val onUnauthorized: () -> Unit,
+    private val onUnavailable: () -> Unit = {},
 ) {
     private var socket: WebSocket? = null
     private var reconnectJob: Job? = null
@@ -80,6 +86,8 @@ class EventStream(
         attempts = (attempts + 1).coerceAtMost(6)
         val backoff = (500L shl (attempts - 1)).coerceAtMost(15_000L)
         onState(ConnState.CLOSED)
+        // One hint per failed link; the caller throttles the actual reselection.
+        onUnavailable()
         reconnectJob?.cancel()
         reconnectJob = scope.launch {
             delay(backoff)
@@ -89,6 +97,9 @@ class EventStream(
 
     private inner class Listener(private val gen: Int) : WebSocketListener() {
         private val settled = AtomicBoolean(false)
+
+        /** Set by a `1008 policy violation` close: the Hub revoked this device. */
+        private val revoked = AtomicBoolean(false)
 
         override fun onOpen(webSocket: WebSocket, response: Response) {
             if (gen != generation) {
@@ -111,6 +122,7 @@ class EventStream(
         }
 
         override fun onClosing(webSocket: WebSocket, code: Int, reason: String) {
+            if (code == POLICY_VIOLATION) revoked.set(true)
             webSocket.close(NORMAL_CLOSURE, null)
         }
 
@@ -118,6 +130,11 @@ class EventStream(
             if (gen != generation) return
             if (socket === webSocket) socket = null
             if (!settled.compareAndSet(false, true)) return
+            if (revoked.get() || code == POLICY_VIOLATION) {
+                onUnauthorized()
+                onState(ConnState.CLOSED)
+                return
+            }
             if (running) scheduleReconnect(gen)
         }
 
@@ -125,7 +142,9 @@ class EventStream(
             if (gen != generation) return
             if (socket === webSocket) socket = null
             if (!settled.compareAndSet(false, true)) return
-            if (response?.code == 401) {
+            // Only an explicit authorization rejection tears the session down;
+            // a plain network failure just asks for a (throttled) reselection.
+            if (response?.code == 401 || revoked.get()) {
                 onUnauthorized()
                 onState(ConnState.CLOSED)
                 return
@@ -153,5 +172,8 @@ class EventStream(
 
     private companion object {
         const val NORMAL_CLOSURE = 1000
+
+        /** RFC 6455 policy violation; the Hub uses it for device revocation. */
+        const val POLICY_VIOLATION = 1008
     }
 }

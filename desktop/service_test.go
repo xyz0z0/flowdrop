@@ -85,9 +85,6 @@ func TestServiceStateReflectsHub(t *testing.T) {
 	if !st.Running || st.URL != m.URL() {
 		t.Fatalf("GetState = %+v, want running at %s", st, m.URL())
 	}
-	if st.AdminConfigured {
-		t.Fatal("AdminConfigured = true on a fresh data dir")
-	}
 	if len(st.Interfaces) == 0 {
 		t.Fatal("Interfaces is empty; the settings window needs real choices")
 	}
@@ -95,24 +92,6 @@ func TestServiceStateReflectsHub(t *testing.T) {
 		if i.Address == "" || i.Label == "" || i.Kind == "" {
 			t.Fatalf("interface entry %+v is incomplete", i)
 		}
-	}
-}
-
-func TestServiceInitializeAdminCannotOverwrite(t *testing.T) {
-	svc, _, _ := newTestService(t)
-	if _, err := svc.InitializeAdmin("admin", "short"); err == nil {
-		t.Fatal("InitializeAdmin accepted a short password")
-	}
-	st, err := svc.InitializeAdmin("admin", "correct-horse-battery")
-	if err != nil {
-		t.Fatalf("InitializeAdmin: %v", err)
-	}
-	if !st.AdminConfigured {
-		t.Fatal("AdminConfigured = false after InitializeAdmin")
-	}
-	_, err = svc.InitializeAdmin("admin", "another-password-123")
-	if err == nil || !strings.Contains(err.Error(), "已经设置过管理员密码") {
-		t.Fatalf("second InitializeAdmin = %v, want the no-overwrite message", err)
 	}
 }
 

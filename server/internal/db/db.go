@@ -83,6 +83,36 @@ CREATE TABLE inbox_items (
 CREATE INDEX idx_inbox_items_order ON inbox_items(created_at DESC, id DESC);
 CREATE INDEX idx_inbox_items_blob ON inbox_items(blob_id);
 `,
+	// v2: device pairing (see internal/pairing and docs/PAIRING.md).
+	`
+CREATE TABLE pairing_meta (
+  key   TEXT PRIMARY KEY,
+  value TEXT NOT NULL
+);
+
+CREATE TABLE pairing_state (
+  id              INTEGER PRIMARY KEY CHECK (id = 1),
+  failed_attempts INTEGER NOT NULL DEFAULT 0
+);
+INSERT INTO pairing_state(id, failed_attempts) VALUES (1, 0);
+
+CREATE TABLE pairing_codes (
+  code_hash  TEXT PRIMARY KEY,            -- sha256(pairing code) hex; raw code is never stored
+  created_at INTEGER NOT NULL,
+  expires_at INTEGER NOT NULL,
+  used_at    INTEGER
+);
+
+CREATE TABLE paired_devices (
+  id           TEXT PRIMARY KEY,
+  name         TEXT NOT NULL,
+  token_hash   TEXT NOT NULL UNIQUE,      -- sha256(device token) hex; raw token is never stored
+  created_at   INTEGER NOT NULL,
+  last_seen_at INTEGER NOT NULL,
+  revoked_at   INTEGER
+);
+CREATE INDEX idx_paired_devices_created ON paired_devices(created_at, id);
+`,
 }
 
 func migrate(conn *sql.DB) error {

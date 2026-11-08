@@ -1,5 +1,5 @@
 import { test, expect, type Page } from '@playwright/test';
-import { startHub, ADMIN_PASSWORD, type Hub } from './hub';
+import { createPairingCode, startHub, type Hub } from './hub';
 import { makePNG } from './fixtures';
 import { createHash } from 'node:crypto';
 
@@ -17,8 +17,10 @@ test.afterAll(async () => {
 
 async function login(page: Page, device: string): Promise<void> {
   await page.goto('/');
-  await page.getByLabel('管理员密码').fill(ADMIN_PASSWORD);
-  await page.getByRole('button', { name: '登录' }).click();
+  // Every browser context pairs with its own single-use code; a new code voids
+  // the previous one, so contexts must pair one after another.
+  await page.getByLabel('配对码').fill(createPairingCode(hub.dataDir));
+  await page.getByRole('button', { name: '配对', exact: true }).click();
   await expect(page.getByRole('heading', { name: 'FlowDrop' })).toBeVisible();
   // Every browser session identifies itself so the inbox can label the sender.
   const field = page.getByLabel('本机名称');
@@ -27,11 +29,28 @@ async function login(page: Page, device: string): Promise<void> {
 }
 
 test.describe('FlowDrop MVP end-to-end', () => {
-  test('unauthenticated visitor sees only the login form', async ({ page }) => {
+  test('unpaired visitor sees only the pairing form', async ({ page }) => {
     await page.goto('/');
-    await expect(page.getByRole('button', { name: '登录' })).toBeVisible();
+    await expect(page.getByLabel('配对码')).toBeVisible();
+    await expect(page.getByRole('button', { name: '配对', exact: true })).toBeVisible();
+    // The retired password entry point must be gone from the page.
+    await expect(page.locator('input[type=password]')).toHaveCount(0);
     await expect(page.locator('.composer')).toHaveCount(0);
 
+    const res = await page.request.get('/api/v1/items');
+    expect(res.status()).toBe(401);
+  });
+
+  test('a wrong pairing code is rejected and grants no session', async ({ page }) => {
+    await page.goto('/');
+    // A fresh code exists, so a different four-digit value is simply wrong.
+    const current = createPairingCode(hub.dataDir);
+    const wrong = current === '0000' ? '0001' : '0000';
+    await page.getByLabel('配对码').fill(wrong);
+    await page.getByRole('button', { name: '配对', exact: true }).click();
+
+    await expect(page.getByRole('alert')).toContainText('配对码错误或已失效');
+    await expect(page.locator('.composer')).toHaveCount(0);
     const res = await page.request.get('/api/v1/items');
     expect(res.status()).toBe(401);
   });
@@ -104,7 +123,7 @@ test.describe('FlowDrop MVP end-to-end', () => {
 
     const png = makePNG(6, 6);
     const name = `screenshot-${Date.now()}.png`;
-    await page.setInputFiles('input[type=file]', {
+    await page.setInputFiles('.composer input[type=file]', {
       name,
       mimeType: 'image/png',
       buffer: png,
@@ -152,7 +171,7 @@ test.describe('FlowDrop MVP end-to-end', () => {
 
     const apk = Buffer.from('PK\x03\x04' + 'A'.repeat(4000));
     const name = `app-debug-${Date.now()}.apk`;
-    await pageA.setInputFiles('input[type=file]', {
+    await pageA.setInputFiles('.composer input[type=file]', {
       name,
       mimeType: 'application/vnd.android.package-archive',
       buffer: apk,
@@ -195,7 +214,7 @@ test.describe('FlowDrop MVP end-to-end', () => {
       { name: `two-${stamp}.txt`, mimeType: 'text/plain', buffer: Buffer.from('second') },
       { name: `three-${stamp}.txt`, mimeType: 'text/plain', buffer: Buffer.from('third') },
     ];
-    await page.setInputFiles('input[type=file]', files);
+    await page.setInputFiles('.composer input[type=file]', files);
 
     for (const f of files) {
       await expect(page.locator('.item', { hasText: f.name }).first()).toBeVisible({
@@ -215,7 +234,7 @@ test.describe('FlowDrop MVP end-to-end', () => {
 
     // The test hub is configured with a 2 MiB per-file limit.
     const name = `huge-${Date.now()}.bin`;
-    await page.setInputFiles('input[type=file]', {
+    await page.setInputFiles('.composer input[type=file]', {
       name,
       mimeType: 'application/octet-stream',
       buffer: Buffer.alloc(3 * 1024 * 1024, 1),
@@ -287,16 +306,18 @@ test.describe('FlowDrop MVP end-to-end', () => {
     await ctxB.close();
   });
 
-  test('session survives a page reload; logout revokes it', async ({ browser }) => {
+  test('pairing survives a page reload; unpairing revokes it', async ({ browser }) => {
     const ctx = await browser.newContext();
     const page = await ctx.newPage();
     await login(page, 'reload');
+    // A reload reuses the HttpOnly cookie instead of asking for a new code.
     await page.reload();
     await expect(page.getByPlaceholder(/输入或粘贴文字/)).toBeVisible();
-    await page.getByRole('button', { name: '退出' }).click();
-    await expect(page.getByRole('button', { name: '登录' })).toBeVisible();
+    await expect(page.getByLabel('配对码')).toHaveCount(0);
+    await page.getByRole('button', { name: '解除配对' }).click();
+    await expect(page.getByLabel('配对码')).toBeVisible();
 
-    // The old cookie is useless after logout.
+    // The old cookie is useless after unpairing.
     const res = await page.request.get('/api/v1/items');
     expect(res.status()).toBe(401);
     await ctx.close();

@@ -17,6 +17,7 @@ import (
 	"flowdrop/internal/auth"
 	"flowdrop/internal/config"
 	"flowdrop/internal/events"
+	"flowdrop/internal/pairing"
 	"flowdrop/internal/storage"
 	"flowdrop/internal/store"
 )
@@ -30,8 +31,13 @@ const (
 )
 
 type Server struct {
-	cfg     config.Config
+	cfg config.Config
+	// sess is legacy password-session state that only the Janitor and the
+	// pre-pairing tests still compile against. It is never used to authenticate
+	// a request; PA-07 retires it together with the old password tests.
 	sess    *auth.Store
+	pairing *pairing.Store
+	hubInfo func() HubInfo
 	store   *store.Store
 	files   *storage.Store
 	broker  *events.Broker
@@ -50,8 +56,14 @@ type Server struct {
 }
 
 type Deps struct {
-	Config         config.Config
-	Sessions       *auth.Store
+	Config   config.Config
+	Sessions *auth.Store
+	// Pairing is the device-pairing store; it is the only authentication
+	// source for API, WS, preview and download requests.
+	Pairing *pairing.Store
+	// HubInfo may be nil: without it the Hub reports its persistent ID and an
+	// empty endpoint list, never an address it has not actually bound.
+	HubInfo        func() HubInfo
 	Store          *store.Store
 	Storage        *storage.Store
 	Broker         *events.Broker
@@ -68,6 +80,8 @@ func New(d Deps) *Server {
 	s := &Server{
 		cfg:           d.Config,
 		sess:          d.Sessions,
+		pairing:       d.Pairing,
+		hubInfo:       d.HubInfo,
 		store:         d.Store,
 		files:         d.Storage,
 		broker:        d.Broker,
@@ -114,8 +128,8 @@ func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
 
 	mux.HandleFunc("GET /api/v1/health", s.handleHealth)
+	mux.HandleFunc("POST /api/v1/auth/pair", s.handlePair)
 	mux.HandleFunc("GET /api/v1/auth/session", s.handleSessionInfo)
-	mux.HandleFunc("POST /api/v1/auth/login", s.handleLogin)
 	mux.HandleFunc("POST /api/v1/auth/logout", s.withAuth(s.withCSRF(s.handleLogout)))
 	mux.HandleFunc("GET /api/v1/items", s.withAuth(s.handleListItems))
 	mux.HandleFunc("POST /api/v1/items/text", s.withAuth(s.withCSRF(s.handleCreateText)))
@@ -233,25 +247,25 @@ func (r *statusRecorder) Hijack() (net.Conn, *bufio.ReadWriter, error) {
 // Unwrap lets http.ResponseController reach the underlying writer.
 func (r *statusRecorder) Unwrap() http.ResponseWriter { return r.ResponseWriter }
 
-// withAuth requires a valid session cookie and rate-limits per session.
+// withAuth requires a valid paired-device token, presented as the session
+// cookie or as an Authorization Bearer token, and rate-limits per device.
 func (s *Server) withAuth(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		c, err := r.Cookie(sessionCookie)
-		if err != nil || c.Value == "" {
-			writeError(w, http.StatusUnauthorized, "unauthenticated", "login required")
+		rs, _, ok := s.authenticate(r)
+		if !ok {
+			// Only drop cookies that were actually presented and rejected, so a
+			// failed Bearer restore cannot clear another device's cookie.
+			if c, err := r.Cookie(sessionCookie); err == nil && c.Value != "" {
+				s.clearSessionCookies(w, r)
+			}
+			writeError(w, http.StatusUnauthorized, "unauthenticated", "pairing required")
 			return
 		}
-		sess, err := s.sess.LookupSession(c.Value)
-		if err != nil {
-			s.clearSessionCookies(w, r)
-			writeError(w, http.StatusUnauthorized, "unauthenticated", "session expired, login required")
-			return
-		}
-		if !s.limiter.allow(sess.ID) {
+		if !s.limiter.allow(rs.Session.ID) {
 			writeError(w, http.StatusTooManyRequests, "rate_limited", "too many requests")
 			return
 		}
-		next(w, r.WithContext(withSession(r.Context(), sess, c.Value)))
+		next(w, r.WithContext(withSession(r.Context(), rs)))
 	}
 }
 

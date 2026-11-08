@@ -58,32 +58,51 @@ install -m 0755 dist/flowdrop ~/.local/bin/flowdrop
 flowdrop doctor
 ```
 
-期望输出（首次会提示 admin password missing，属正常）：
+期望输出（首次 `paired devices` 为 0 属正常，此时还没有设备配对）：
 
 ```
 FlowDrop doctor 0.1.0
 listen                 ok   127.0.0.1:8080
 data_dir               ok   /home/bob/.local/share/flowdrop
-database               ok   schema v1
-admin password         WARN missing — run 'flowdrop admin init'
+database               ok   schema v2
+pairing                ok   hub id <稳定ID>
+paired devices         ok   0 paired (normal until a device pairs)
 free space             ok   ...
 port available         ok   can bind 127.0.0.1:8080
 ```
 
-## 3. 初始化管理员密码
+## 3. 配对第一台设备（没有账号密码）
 
-**必须在 Hub 本机执行**，不接受远程初始化：
+FlowDrop 不再使用账号/密码，也没有 `admin init` 或登录接口。**配对码只在 Hub 本机产生**：
+
+- **桌面 App（推荐）**：启动后打开设置窗口 →「添加设备」→ 生成四位码。
+  码 120 秒有效、成功一次即失效；全 Hub 累计输错 5 次会锁定，在本机重新生成即解锁
+  并废弃旧码。码只在这个窗口显示，不经网络传递、不写日志。
+- **CLI**（Hub 已作为服务/桌面进程运行时同样可用，因为两者用同一 `data_dir`）：
 
 ```bash
-flowdrop admin init
-# New admin password: **********      （至少 10 字符）
-# Repeat password: **********
-# Admin password set for user "admin" in /home/bob/.local/share/flowdrop
+flowdrop pair                 # 或：flowdrop pair -config /path/to/config.json
+# Pairing code: 0427
+# Valid for two minutes (until 14:03:12), single use.
 ```
 
-- 密码使用 Argon2id（m=64 MiB, t=3, p=2）哈希后存 SQLite，不落日志、不写配置文件。
-- 忘记密码：重新执行 `flowdrop admin init --force`，会同时吊销所有会话。
-- 脚本/自动化可用 `flowdrop admin init --password-stdin`（两行：密码、确认）。
+  该命令只在本终端打印码；它不会启动第二个 Hub，也不会写日志文件。
+  **只有 Hub 已运行，客户端才有可用入口**（否则拿到码也连不上）。
+
+然后在手机 / 浏览器上输入这四位数完成配对：
+
+- 浏览器：打开 `http://<Hub-IP>:8080`，在配对页输入码。成功后 Hub 下发
+  `flowdrop_session`（HttpOnly）与 `flowdrop_csrf` Cookie，设备被记住。
+- Android：见第 6 节；设备令牌保存在 Android Keystore。
+
+设备管理：桌面设置窗口列出已配对设备的名称、创建时间与最近使用时间，可**在本机撤销**。
+撤销会立刻让该设备的 HTTP 会话与 WebSocket 失效。没有远程设备管理端点，
+也没有“通过 HTTP 生成配对码”的接口。
+
+> 说明：配对码不是加密，它只是在可信局域网内的一次性凭据；`hub_id` 也不是明文 HTTP
+> 的身份认证，只是防误连。可信 LAN 明文边界与 Tailscale 前置要求不变。
+> 桌面偏好（`desktop.json`）不保存任何凭据；旧版本留下的 `admin_users`/`sessions` 表
+> 只作为历史数据保留，不参与认证。
 
 手动前台启动验证：
 
@@ -116,7 +135,7 @@ sudo loginctl enable-linger "$USER"
 > 明文 LAN 主路径，请按 §5.6 用 drop-in 覆盖 `FLOWDROP_LISTEN` / `FLOWDROP_ALLOWED_HOSTS` /
 > `FLOWDROP_COOKIE_SECURE`（同一变量在 drop-in 中的值会覆盖主单元）。
 
-日志中不会出现内容原文、密码或会话令牌；如需调试可临时
+日志中不会出现内容原文、配对码或设备令牌；如需调试可临时
 `systemctl --user set-environment FLOWDROP_LOG_LEVEL=debug`。
 
 ---
@@ -167,15 +186,15 @@ FLOWDROP_ALLOWED_HOSTS=flowdrop.local,my-host.tailnet.ts.net,localhost,127.0.0.1
 ### 5.3 客户端访问
 
 - 电脑浏览器：`http://192.168.31.184:8080`
-- Android 原生 App：Hub 地址填 `http://192.168.31.184:8080`，用同一管理员密码登录。
-  协议与 Web 完全相同（Cookie + CSRF + Origin），没有单独的配对或令牌端点。
+- Android 原生 App：发现列表或手填 `http://192.168.31.184:8080`，输入**本机生成的
+  四位配对码**。配对后设备令牌存 Android Keystore；请求/WS 仍用 Cookie + CSRF + Origin。
 - 手机浏览器也可以直接用同一地址（能力受限见下）。
 
 ### 5.4 明文 HTTP 下的能力边界
 
 | 能力 | LAN HTTP 下的实际情况 |
 |---|---|
-| 登录 / 收发文字、链接 | 正常 |
+| 配对 / 收发文字、链接 | 正常 |
 | 上传 / 下载 / 预览 | 正常 |
 | 复制到剪贴板 | **可能不可用**。失败时 Web 会展开可手动选择（全选）的文本框，并说明原因 |
 | Paste 截图上传 | 取决于浏览器；不支持时用“选择文件” |
@@ -224,7 +243,7 @@ flowdrop doctor      # 会提示“明文 HTTP 模式”风险，那是本模式
 | A | **仅** `listen` 绑定的那个 RFC1918 IPv4，且只从对应网卡发出 |
 | TXT | `v=1`、`scheme=http`、`path=/` |
 
-记录中**不包含**密码、会话令牌、条目正文、文件路径或机器名以外的隐私信息。
+记录中**不包含**设备令牌、会话令牌、条目正文、文件路径或机器名以外的隐私信息。
 
 **不会发布**的情形（即使 `discovery_enabled=true`）：
 
@@ -232,7 +251,7 @@ flowdrop doctor      # 会提示“明文 HTTP 模式”风险，那是本模式
 - 通配地址（`0.0.0.0` / `::` / 空 host）——避免在所有网卡泄露。
 - Tailscale `100.64.0.0/10`——跨网地址不冒充同一 LAN。
 - 链路本地 `169.254.0.0/16`、公网地址、IPv6 地址。
-- `cookie_secure=true`（Tailscale Serve / Caddy HTTPS 反代入口）——只发布可直接登录的明文 HTTP LAN 入口。
+- `cookie_secure=true`（Tailscale Serve / Caddy HTTPS 反代入口）——只发布可直接配对的明文 HTTP LAN 入口。
 
 **配置**：
 
@@ -314,7 +333,7 @@ flowdrop serve
 | 启动原子性 | 先绑定主地址，再绑定全部附加地址；任一失败则关闭已绑定监听、释放数据目录锁并返回错误，**不会只启动一半** |
 | 停止 | 释放全部监听端口，只撤回本实例发布的 mDNS 记录 |
 | mDNS | 只对符合条件的 **RFC1918 LAN** 监听地址发布；Tailscale `100.64/10` 监听不广播 |
-| 会话/Cookie | 浏览器按 host 隔离 Cookie；不同地址之间**不承诺**自动共享登录态，需各自登录。数据本身共享 |
+| 会话/Cookie | 浏览器按 origin 隔离 Cookie；不同地址之间**不承诺**自动共享登录态，Web 需各自配对。Android 单 Hub 客户端才按候选地址自动选路。数据本身共享 |
 | 主地址 | `FLOWDROP_LISTEN` 仍是主地址；日志、`URL()`、桌面收件箱优先使用它 |
 
 systemd drop-in 示例：
@@ -358,9 +377,17 @@ lint/assemble 通过。实际 Hub 在 `192.168.31.184:18099` 广播，但 API 36
 安装后：
 
 1. 打开 App，Hub 地址填 `http://<Hub-IP>:8080`（与第 5 节一致）。
-2. 用 `flowdrop admin init` 设置的管理员密码登录（**初始化仍只在 Hub 本机 CLI**）。
-3. 登录后 App 持有服务端会话 Cookie，并对写操作带 `X-FlowDrop-CSRF`；
-   `Origin` 由 App 声明的 Hub 地址决定，需落在 `allowed_hosts` 内。
+2. 输入本机生成的**四位配对码**（桌面设置「添加设备」或 `flowdrop pair`）。
+   码 120 秒有效、一次成功、全 Hub 错 5 次锁定；本机重新生成即解锁。
+3. 配对后 App 保存 Hub 稳定 ID、设备令牌（Keystore）与候选地址；写操作带
+   `X-FlowDrop-CSRF`，`Origin` 由 App 当前活动地址决定，需落在 `allowed_hosts` 内。
+4. **自动连接**：启动/回到前台/连接中断时先探测 LAN、再探测 Tailscale，
+   只在无凭据 `health` 的 `hub_id` 匹配后才用 `Authorization: Bearer <device_token>`
+   调用 `GET /api/v1/auth/session` 恢复 Cookie/CSRF，然后恢复事件流。切地址只重试连接，
+   **不重放**上传/删除等写操作，中断的传输需手动重试。
+5. **首次异地访问**需手填 Tailscale 地址（`100.x.y.z`），或使用已加入
+   `FLOWDROP_ALLOWED_HOSTS` 的 MagicDNS 名。不会自动枚举 tailnet 设备，
+   也没有扫码配对，不调用 Tailscale 管理 API，不扫描整个网段。
 
 局域网自动发现协议已冻结（`_flowdrop._tcp`、`FlowDrop-<昵称>`、SRV 真实端口、
 TXT `v=1,scheme=http,path=/`、A 仅绑定 LAN IPv4）。Android 客户端按同一协议实现；
@@ -369,7 +396,7 @@ TXT `v=1,scheme=http,path=/`、A 仅绑定 LAN IPv4）。Android 客户端按同
 诊断建议（仅在真机实测时使用）：
 
 - `421 host_not_allowed` → App 里配置的 Host 不在 `FLOWDROP_ALLOWED_HOSTS`。
-- 登录后立刻回登录页 → 把 `FLOWDROP_COOKIE_SECURE` 与访问协议保持一致（HTTP 用 `false`）。
+- 配对后立刻回登录页 → 把 `FLOWDROP_COOKIE_SECURE` 与访问协议保持一致（HTTP 用 `false`）。
 - 实时不更新 → 确认 App 侧 WebSocket 连的是 `ws://` 而非 `wss://`。
 
 ---
@@ -395,7 +422,8 @@ flowdrop serve
 scripts/lan-http.sh --host 100.125.168.63 --port 8080
 ```
 
-- 手机/电脑在同一 tailnet 内访问 `http://100.125.168.63:8080`，用同一管理员密码登录。
+- 手机/电脑在同一 tailnet 内访问 `http://100.125.168.63:8080`，输入本机生成的四位配对码。
+  设备令牌/会话 Cookie 在同一 tailnet 内是明文，Tailscale 只保证链路两端与 ACL，不替代应用配对。
 - 若用 MagicDNS 名（`http://hub.tailnet-name.ts.net:8080`），把该名字加入
   `FLOWDROP_ALLOWED_HOSTS`；监听 IP 本身会自动允许。
 - **mDNS 发现不会广播 Tailscale 地址**：`100.64/10` 是跨网地址，不是同一 LAN 入口；
@@ -439,7 +467,8 @@ Hub 侧建议配置（Tailscale 反代来源为回环，故信任回环作为代
 
 - `tailscale serve` 默认只对 tailnet 内可见，**不暴露公网**（不要用
   `tailscale funnel`；本项目的安全模型不以公网暴露为前提）。
-- 应用层仍强制密码登录：Tailscale ACL 不替代应用鉴权。
+- 应用层仍强制设备配对/设备令牌：Tailscale ACL 不替代应用侧鉴权；
+  同时配对码**不是加密**，`hub_id` 也不认证对端。
 
 关闭：
 
@@ -564,12 +593,12 @@ sudo ufw allow 443/tcp
 | `session_ttl_hours` | `FLOWDROP_SESSION_TTL_HOURS` | `168` (7 天) | 会话有效期（滑动续期） |
 | `cookie_secure` | `FLOWDROP_COOKIE_SECURE` | `true` | Cookie 仅 HTTPS 发送 |
 | `discovery_enabled` | `FLOWDROP_DISCOVERY_ENABLED` | 空 = 自动（满足 §5.7 条件时发布） | mDNS/DNS-SD 局域网自动发现；`false` 明确关闭 |
-| `login_limit_per_minute` | `FLOWDROP_LOGIN_LIMIT_PER_MINUTE` | `5` | 每 IP 登录尝试 |
+| `login_limit_per_minute` | `FLOWDROP_LOGIN_LIMIT_PER_MINUTE` | `5` | 每个来源 IP 的配对请求限制（固定窗口，非令牌桶；与全 Hub 5 次错误上限是两件事） |
 | `api_limit_per_minute` | `FLOWDROP_API_LIMIT_PER_MINUTE` | `600` | 每会话 API 请求 |
 
 > 明文 HTTP 局域网部署（主路径）需要 `FLOWDROP_COOKIE_SECURE=false`；
 > 经 Tailscale/Caddy 的 HTTPS 部署应保持 `true`。两者必须与实际访问协议一致，
-> 否则会出现“登录成功但立即回登录页”。
+> 否则会出现“配对成功但立即回配对页”。
 
 ## 10. 备份
 
@@ -590,7 +619,7 @@ tar -czf ~/backups/flowdrop-$(date +%F).tar.gz \
 systemctl --user start flowdrop
 ```
 
-**不要把包含密码/会话的数据库放进未加密的云同步目录。**
+**不要把包含设备令牌哈希/会话的数据库放进未加密的云同步目录。**
 
 ## 11. 恢复
 
@@ -603,8 +632,8 @@ systemctl --user start flowdrop
 flowdrop doctor
 ```
 
-恢复后旧会话仍然有效（会话表随库恢复）。若不希望保留，重新执行
-`flowdrop admin init --force` 即可吊销全部会话。
+恢复后旧设备配对仍然有效（`paired_devices` 随库恢复）。若不希望保留，
+在恢复后的本机设置窗口逐台撤销设备，或删除数据目录重新配对（会丢弃历史条目）。
 
 ## 12. 升级
 
@@ -646,8 +675,12 @@ sudo rm -f /etc/caddy/Caddyfile.d/flowdrop.caddy && sudo systemctl reload caddy
 | 现象 | 原因与处理 |
 |---|---|
 | `421 Host not allowed` | 访问用的 Host 不在 `allowed_hosts`。把地址栏里的主机名加入配置并重启。明文 HTTP 局域网路径也要把 Hub 的局域网 IP 加进去。 |
-| 登录后立刻又回到登录页 | 用了 HTTPS 访问但 `cookie_secure=false`，或反之。让对方匹配实际协议（LAN HTTP 用 `false`）。 |
-| `no admin password set` | 还没执行 `flowdrop admin init`。 |
+| 配对后立刻又回到登录页/配对页 | 用了 HTTPS 访问但 `cookie_secure=false`，或反之。让对方匹配实际协议（LAN HTTP 用 `false`）。 |
+| `pairing_unavailable` | Hub 未正确装配配对存储；看 `flowdrop doctor` 的 `pairing` 行。 |
+| `pairing_invalid`（401） | 码错误、已过期（>120 秒）、已被使用，或本机没有有效码。在**本机**重新生成。 |
+| `pairing_locked`（429） | 全 Hub 累计输错 5 次已锁定；在本机重新生成配对码即解锁（旧码同时作废）。 |
+| 拿到 CLI 码但手机连不上 | 确认 Hub 正在运行，且 `flowdrop pair` 与 Hub 使用同一 `data_dir`/`-config`。 |
+| 设备被撤销后仍在收消息 | 已撤销设备的 HTTP 与 WS 会失效；客户端需重新配对，不能凭旧令牌恢复。 |
 | 手机图片上传失败 | 常是反向代理的请求体上限/超时；确认 `flush_interval -1` 和较长的 `read_timeout`。 |
 | 复制按钮无效 / 只能手动复制 | **明文 HTTP 下预期行为**（非 secure context）。Web 会展开可手动选择的文本框；若希望自动复制，用 Tailscale 或 Caddy HTTPS。 |
 | 手机浏览器没有通知 / 不能装 PWA | 明文 HTTP 非 secure context，属预期；不承诺这些 API 可用。 |
@@ -674,7 +707,9 @@ curl -sI http://<Hub-IP>:8080/ | grep -iE 'content-security|x-frame|x-content-ty
 
 浏览器侧：
 
-- [ ] 登录后刷新仍保持会话（说明 `cookie_secure` 与协议一致）。
+- [ ] 配对后刷新仍保持会话（说明 `cookie_secure` 与协议一致；Cookie 仍是 7 天 TTL）。
+- [ ] `curl -s http://<Hub-IP>:8080/api/v1/health` 返回稳定的 `hub_id`。
+- [ ] 在本机撤销一台设备后，该设备刷新即失效（401/回到配对页）。
 - [ ] 两台设备互发文字实时可见（WS 正常）。
 - [ ] 上传图片/APK 可下载且 SHA-256 一致。
 - [ ] 在非安全上下文下点“复制”：要么真实成功，要么展开可选文本框且**不**提示已复制。
@@ -687,7 +722,7 @@ curl -fsS http://<Hub-Tailscale-IP>:8080/api/v1/health
 ```
 
 - [ ] 两个地址都返回 200，且日志只有**一个** Hub 实例、一个数据目录。
-- [ ] 在任一地址登录并新建条目，另一地址（重新登录后）能看到同一条目。
+- [ ] 在任一地址配对并新建条目，另一地址（重新配对后）能看到同一条目；Web 不自动跨 origin 沿用 Cookie，Android 才自动选路。
 - [ ] 把一个地址改成当前不存在的 IP 或占用端口后重启：明确失败，不出现“一半可用”。
 - [ ] 桌面版设置窗口只把实际绑定的 URL 列为可用，类型标注正确。
 - [ ] `flowdrop doctor` 的 `mdns discovery` 行符合预期；客户端能发现 `_flowdrop._tcp`，且解析出的端口/IP 与实际监听一致。
@@ -764,6 +799,23 @@ scripts/install-desktop.sh --uninstall      # 卸载启动器（保留数据）
 从应用菜单「FlowDrop 流转」双击，或运行 `~/.local/bin/flowdrop-desktop`。
 脚本**不**创建开机自启/autostart，也**不会**自动启动。
 
+**升级到包含主窗口设置入口/应用内代理直连的版本：**
+
+1. 先**完全退出正在运行的 FlowDrop**：托盘菜单 →「退出 FlowDrop（停止 Hub）」。
+   仅关闭窗口只会收进托盘，进程还在；桌面版的 SingleInstance 会复用旧进程，
+   直接启动新二进制可能仍看到旧窗口。
+2. 重新构建（或使用已交付的 `dist/flowdrop-desktop`）：
+   ```bash
+   scripts/build-desktop.sh
+   ```
+3. 安装新二进制：
+   ```bash
+   scripts/install-desktop.sh
+   ```
+4. 再从应用菜单或 `~/.local/bin/flowdrop-desktop` 启动。
+
+脚本只复制文件，不会替你结束正在运行的实例；确认旧进程已退出后再启动即可。
+
 ### 16.4 运行时依赖
 
 | 依赖 | 说明 |
@@ -781,16 +833,24 @@ scripts/install-desktop.sh --uninstall      # 卸载启动器（保留数据）
 | 窗口 | 加载的 origin | 能做什么 |
 |---|---|---|
 | 收件箱 | Hub 的真实 URL，如 `http://192.168.1.10:8080/` | 现有 React + `/api/v1/*`；Cookie/CSRF/Origin/WS/下载与浏览器一致；**不能**调用原生管理桥 |
-| 设置 | Wails 资产服务器 `wails://localhost`（进程内，不监听 TCP 端口） | 绑定地址/端口、首次管理员密码、打开收件箱/浏览器、退出 |
+| 设置 | Wails 资产服务器 `wails://localhost`（进程内，不监听 TCP 端口） | 绑定地址/端口、**添加设备（生成四位配对码）/设备列表/撤销**、打开收件箱/浏览器、退出 |
 
 关键点：Wails 的 JS 运行时按 `location.origin + "/wails/runtime"` 解析绑定调用，
 因此 Hub 来源的页面请求的是 Hub 自身而不是资产服务器；实测从 Hub 页面 `import
 "/wails/runtime.js"` 直接失败，`fetch('wails://localhost/wails/runtime')` 也无法完成
 原生调用（见 VERIFICATION §13.4）。所以**不会**把管理 bridge 开放给局域网页面。
 
-外链：收件箱窗口只接受一种窄消息 `flowdrop:openurl:<http(s) URL>`，且校验来源
+外链：收件箱窗口只接受窄消息 `flowdrop:openurl:<http(s) URL>`，且校验来源
 origin 必须等于当前 Hub origin、只允许 http/https、限速 500ms，然后交给系统浏览器。
 下载保持 WebKit 原生行为（保存到 `~/Downloads`）。
+
+设置入口：同一个收件箱窗口还接受一条固定的 `flowdrop:opensettings` 消息（无参数、
+无 URL、无方法名），同样要求消息来自本实例的收件箱窗口且 origin 仍等于当前 Hub
+origin；其它窗口、其它 origin、未知动作一律忽略。收件箱登录前后都会注入「设置」
+按钮（登录页右上角；登录后位于顶部栏「退出」旁），窗口原生菜单有「设置…」，
+快捷键 `Ctrl+,`。这些入口只打开并聚焦进程内的 `wails://` 设置窗口，**不会**把
+管理 bridge 暴露给 Hub 页面。脚本只由桌面进程通过 `WebviewWindowOptions.JS` 注入，
+普通浏览器和手机加载的 React 页面没有该按钮。
 
 ### 16.6 网络与配置
 
@@ -810,7 +870,7 @@ origin 必须等于当前 Hub origin、只允许 http/https、限速 500ms，然
 - 双模式要求两个地址当前都存在于本机网卡上且类型正确（LAN + Tailscale）；
   没有 Tailscale 网卡时双模式不可选，窗口提示仍可使用内网单地址，
   不要求也不自动安装 Tailscale。
-- 保存：`~/.config/flowdrop/desktop.json`，**不含密码**。
+- 保存：`~/.config/flowdrop/desktop.json`，**不含任何凭据**；设备令牌哈希在 Hub 数据库。
   单地址写旧的 `bind_address` + `port`；双模式额外写
   `additional_bind_addresses: ["100.x.y.z"]`。旧版文件（无该字段）原样兼容。
 - Hub 配置：`desktop` 传 `hub.Options{ConfigPath: hub.DefaultConfigPath(),
@@ -824,21 +884,34 @@ origin 必须等于当前 Hub origin、只允许 http/https、限速 500ms，然
   不会静默半启动，也不会自动改用其它地址。
 - 收件箱窗口优先加载 LAN 地址（双模式下即主地址）；跨 origin 时沿用浏览器/WebView
   的现有 Cookie 规则，不承诺不同 host 自动共享登录态。
-- 系统代理提示按收件箱实际使用的地址判断，仍然只提示、不修改代理设置。
+- 设置入口不依赖托盘：登录前后主窗口都有「设置」按钮，原生菜单与 `Ctrl+,` 也可
+  打开同一个设置窗口；托盘菜单的「设置…」继续保留。
+- 应用内代理：桌面在 `application.New` 之后、创建窗口之前把本进程 WebKitGTK 的
+  网络代理设为直连（`WEBKIT_NETWORK_PROXY_MODE_NO_PROXY`），不修改系统代理、
+  KDE `kioslaverc`、GSettings 或 `http_proxy`/`no_proxy` 环境变量。设置窗口的代理
+  提示按实际配置结果处理：应用内直连成功则不再要求修改 `no_proxy`；失败才显示
+  风险诊断。
 - mDNS：只发布符合条件的 RFC1918 LAN 监听（`cookie_secure=false` 时）；
   Tailscale 监听不广播。退出（托盘「退出 FlowDrop」）会撤回记录并释放全部端口。
 
 ### 16.7 系统代理（重要）
 
 如果主机配置了系统级 HTTP 代理（`http_proxy` 环境变量，或 KDE `kioslaverc` /
-GNOME 代理设置），且代理绕过列表没有包含 Hub 的局域网 IP，WebView 的 WebSocket 会被
-代理改写握手，收件箱会一直显示「已离线，重连中」（HTTP 请求仍可能正常）。
+GNOME 代理设置），桌面版**不需要**你先改代理，也不会修改你的代理设置：
 
-桌面版**不会**修改你的代理设置；设置窗口会检测并在这种情况下显示黄色提示，指出需要
-加入「忽略主机 / `no_proxy`」的具体 IP。处理方法：
+- 桌面在创建窗口前把本进程的 WebKitGTK 网络栈设为**直连**
+  （`WEBKIT_NETWORK_PROXY_MODE_NO_PROXY`）。只有收件箱/设置窗口的 WebView 受影响；
+  系统浏览器打开外链时仍使用你原来的系统代理。
+- 直连同时覆盖 HTTP 和 WebSocket（`ws://`/`wss://`），所以切换 LAN/Tailscale 地址
+  不需要重启应用或改 `no_proxy`。
+- 设置窗口仅在**应用内直连配置失败**且检测到代理绕过列表未包含 Hub 地址时显示黄色
+  风险提示。提示是风险说明，不是断言：代理允许 WebSocket 升级时不会离线；只有代理
+  拒绝/改写升级（例如返回 HTTP 426）时才可能一直显示「已离线，重连中」。
+- 如果确实遇到 WebSocket 握手失败，仍可把 Hub 的绑定 IP 加入系统代理的
+  「忽略主机 / `no_proxy`」后重启 FlowDrop：
 
 ```bash
-# 环境变量方式
+# 环境变量方式（仅作为应用内直连不可用时的后备方案）
 export no_proxy="$no_proxy,192.168.1.10"   # 换成你的 Hub 绑定 IP
 # KDE：系统设置 → 网络 → 代理 → 忽略主机，加入该 IP
 ```
@@ -859,6 +932,84 @@ export no_proxy="$no_proxy,192.168.1.10"   # 换成你的 Hub 绑定 IP
   Web 端已有「展开可选文本」降级（实测在 WebKitGTK 中 `navigator.clipboard` 可用，
   见 VERIFICATION §13.6）。
 - 托盘依赖 `StatusNotifierWatcher`；不满足时关闭窗口会改为「确认退出」。
+  无托盘不再影响进入设置：主窗口的「设置」按钮、原生菜单「设置…」和 `Ctrl+,`
+  都可打开设置窗口。
+- 应用内 WebKit 直连只在 Linux + cgo + GTK3/WebKitGTK 4.1 构建中设置成功；其它构建
+  会明确报告未应用，并保留代理风险提示，不会假装已修复。
+- 收件箱整窗拖拽上传只覆盖登录后的 inbox 窗口；目录不递归。GTK 原生拖拽已在独立
+  Docker 的 Wayland/X11 核心验收，用户随后确认真实 KDE/Dolphin 拖拽可用（见 §16.11）。
 - 支持同一 Hub 同时绑定一个内网地址 + 一个 Tailscale 地址（同端口）；更复杂的多地址
   组合未做成产品选项。地址失效、端口冲突时仍需用户修改设置并重启 Hub（窗口会先
   Stop 再 Start，并在失败时尝试恢复原配置）；不会自动重绑定。
+
+### 16.10 启动即崩溃：AT-SPI 无障碍总线损坏（2026-11-08 定位）
+
+症状：启动约 1 秒内原生 `SIGSEGV`，`PC` 落在系统
+`libatk-bridge-2.0.so.0` 的 `spi_register_object_to_path+0x28`
+（`addr=0x18`、`rax=0`），前面通常有
+`Couldn't register with accessibility bus: Did not receive a reply`。
+这不是 FlowDrop 的托盘/菜单/代理代码问题：同样的 C 探针（不包含任何 FlowDrop
+代码）在故障会话里 3/3 复现，换成隔离的新会话总线 3/3 正常。
+
+桌面版从 2026-11-08 起在 `main()` 最前面做一次无障碍总线健康检查（真实 D-Bus
+往返，上限约 2 秒），只在探测失败时对**本进程**设置 `NO_AT_BRIDGE=1`：
+
+- 正常会话：不改变任何设置，无障碍桥照常加载；启动只多几毫秒。
+- 故障会话：跳过损坏的 `libatk-bridge` 初始化，避免 WebKitGTK 创建首个 WebView
+  时触发空指针崩溃；设置窗口显示黄色说明并提示恢复方法。屏幕阅读器本次读不到
+  FlowDrop，但其它应用和系统无障碍设置不受影响。
+- 日志关键字：`accessibility bridge: AT-SPI bus responsive` 或
+  `accessibility bridge disabled for this launch: <原因>`。
+
+显式开关（仅影响 FlowDrop 进程）：
+
+```bash
+FLOWDROP_DESKTOP_A11Y=off ~/.local/bin/flowdrop-desktop   # 强制关闭无障碍桥
+FLOWDROP_DESKTOP_A11Y=on  ~/.local/bin/flowdrop-desktop   # 强制保留（有崩溃风险）
+NO_AT_BRIDGE=1            ~/.local/bin/flowdrop-desktop   # 临时兼容启动，等同关闭
+```
+
+恢复无障碍（不需要改 FlowDrop 配置）：**注销并重新登录** KDE 会话，让会话的
+`at-spi-bus-launcher`/`at-spi2-registryd` 重新启动；之后正常启动会自动探测到
+健康总线并恢复无障碍。确认当前状态可以看：
+
+```bash
+ls -l /run/user/$UID/at-spi/        # bus_0 不存在 = 总线已损坏
+gdbus call --session --dest org.a11y.Bus --object-path /org/a11y/bus \
+  --method org.a11y.Bus.GetAddress
+```
+
+如果 `GetAddress` 返回的路径连不上（或重复的 `at-spi-bus-launcher` 很多），就是
+本问题。不要手动 `kill` 这些系统无障碍进程来“修复”；注销重登最稳妥，也避免影响
+屏幕阅读器。真正的修复在系统侧（at-spi2-core 2.60.4 的 `spi_register_object_to_path`
+缺少 `spi_global_app_data` 空指针保护），FlowDrop 只能做上述进程级兜底。
+
+### 16.11 收件箱整窗拖拽上传（2026-11-08）
+
+适用于 Linux 桌面 App（GTK3/WebKitGTK 4.1 构建）**登录后**的收件箱窗口。
+
+- 把一张或多张图片/普通文件拖到内容窗口**任意位置**，松开鼠标即上传；进度、取消、
+  大小上限（默认 512 MiB）全部沿用既有上传流程，没有新的上传通道。
+- 同时拖入多个文件时逐个顺序上传，中文名/空格名原样保留。
+- **目录会被跳过**并在页面提示，不递归展开；目录与普通文件混合拖入时只上传文件。
+- 只在登录后的收件箱窗口生效：登录页拖入文件不会上传，也不会把文件当页面打开。
+- 不需要运行任何 shell 脚本，也不需要额外启动 Hub：直接运行 `dist/flowdrop-desktop`
+  就是完整应用；`scripts/build-desktop.sh` / `scripts/install-desktop.sh` 只是构建
+  与安装工具，不会自动安装或替换你已有的二进制。
+- 升级旧实例：先从托盘菜单「退出 FlowDrop（停止 Hub）」完全退出旧进程，再手动运行
+  新二进制（或安装后的 `~/.local/bin/flowdrop-desktop`）。只关窗口会留在托盘，
+  SingleInstance 会复用旧进程。
+
+最新产物修复 Wayland 原生文件拖放 COPY 协商和 leave 后异步数据授权，已在独立
+Docker 中通过 GTK Wayland 源真实拖放、同文件重复上传及下载 SHA 校验，并通过本轮
+X11 核心回归。无测试 shim 改变产品行为；用户随后确认真实 KDE/Dolphin 拖拽可用。
+此前 X11 多文件、目录混合、普通文件选择等扩展验收见 VERIFICATION §18，未在本轮重跑。
+
+大文件进度/取消仍**未验证**。原生 FileList 桥复用页面原上传流程，实现依赖 Wails
+v3.1.0 的内部 handler 约定，升级 Wails 后须重验。最新产物摘要和本轮证据见
+`docs/VERIFICATION.md` §19；§17–18 保留此前构建、失败复验和扩展验证历史。
+
+
+## 17. 当前配对版交付（2026-11-08）
+
+Linux桌面`dist/flowdrop-desktop`、CLI `dist/flowdrop`与Android测试包`dist/flowdrop-android-debug.apk`均已重新构建。当前操作不再使用账号密码：完全退出旧桌面实例→运行新版→需要时启用LAN/Tailscale双监听→设置添加设备取码→手机发现/手填地址并配对。每添加一台设备重新生成码，已配对Android会在同一Hub已保存地址间自动重连；Web Cookie仍按origin隔离。三产物SHA及本轮102 JVM、16 Web E2E、隔离Wails与真实Hub回环集成证据见VERIFICATION §20；前文引用旧APK摘要/模拟器/§19拖拽记录均为历史，不能替代本轮真机验收。未自动安装/commit/push，当前debug APK不是商店正式release。真实手机Wi-Fi/Tailscale仍待用户验证。

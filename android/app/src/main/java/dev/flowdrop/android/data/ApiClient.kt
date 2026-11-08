@@ -42,7 +42,7 @@ class ApiClient(
     var maxUploadBytes: Long = DEFAULT_MAX_UPLOAD_BYTES
         private set
 
-    /** Called when any request observes a 401 so the UI can return to login. */
+    /** Called when any request observes a 401 so the UI can drop the session and re-pair. */
     @Volatile
     var onUnauthorized: (() -> Unit)? = null
 
@@ -54,19 +54,100 @@ class ApiClient(
         return info
     }
 
-    suspend fun login(username: String, password: String): SessionInfo {
+    /**
+     * Pairs this device with the Hub using the four-digit code shown on the
+     * Hub's settings screen.
+     *
+     * The request is `native=true`, so the Hub returns the raw device token
+     * exactly once; it is stored in the Keystore-backed [SessionStore] together
+     * with the Hub ID and the saved candidate addresses. The code itself is
+     * never persisted.
+     *
+     * A wrong/expired code answers 401, which here means "pairing failed", not
+     * "the current session expired": the global [onUnauthorized] callback is
+     * deliberately not invoked so an unrelated, already paired session is not
+     * torn down by a mistyped code.
+     */
+    suspend fun pair(code: String, deviceName: String): SessionInfo = withContext(Dispatchers.IO) {
         val body = json.encodeToString(
-            LoginRequest.serializer(),
-            LoginRequest(username = username, password = password),
+            PairRequest.serializer(),
+            PairRequest(code = code, deviceName = deviceName, native = true),
         ).toRequestBody(JSON)
-        val info = requestJson<SessionInfo>(
-            Request.Builder()
-                .url(endpoint.url("/api/v1/auth/login"))
-                .post(body),
-        )
-        applySessionInfo(info)
-        persistSession(username, info)
-        return info
+        val request = Request.Builder()
+            .url(endpoint.url("/api/v1/auth/pair"))
+            .post(body)
+            .build()
+        val response = http.newCall(applyCommonHeaders(request, includeCsrf = false)).await()
+        response.use { res ->
+            if (!res.isSuccessful) throw toApiError(res, notifyUnauthorized = false)
+            val text = res.body?.string().orEmpty()
+            if (text.isBlank()) throw ApiException(0, "empty_body", "empty response body")
+            val info = json.decodeFromString(SessionInfo.serializer(), text)
+            applySessionInfo(info)
+            persistSession(info)
+            info
+        }
+    }
+
+    /**
+     * Rebuilds the cookie session at the *currently active* origin, which must
+     * be one of the saved addresses of the paired Hub [expectedHubId].
+     *
+     * Order matters: the Hub is first probed without any credential, the stored
+     * device token is only sent as a per-request `Authorization: Bearer` after
+     * the probed `hub_id` matches, and only then are cookies/CSRF/limits rebuilt
+     * from GET /auth/session (which never returns the raw token, so the stored
+     * token is kept).
+     *
+     * Rejections and network errors leave the pairing untouched: a wrong Hub ID
+     * or an offline LAN address must not force the user to pair again.
+     */
+    suspend fun restorePairedSession(expectedHubId: String): SessionInfo {
+        val stored = store.loadFor(endpoint.origin)
+            ?: throw ApiException(0, "not_paired", "this address has no stored pairing")
+        if (expectedHubId.isBlank() || stored.hubId != expectedHubId) {
+            throw ApiException(0, "hub_mismatch", "stored Hub ID does not match")
+        }
+        val saved = stored.candidates.filter { HubEndpoint.parse(it.url)?.origin == endpoint.origin }
+        if (saved.isEmpty()) {
+            throw ApiException(0, "unpaired_endpoint", "address is not one of the saved endpoints")
+        }
+        val token = stored.deviceToken
+        if (token.isBlank()) throw ApiException(0, "not_paired", "no device token stored")
+
+        // Credential-free probe on a throwaway client; nothing secret leaves yet.
+        val probed = HubProbe.hubId(RouteCandidate(url = endpoint.origin, kind = saved.first().kind))
+        if (probed != expectedHubId) {
+            throw ApiException(0, "hub_mismatch", "Hub ID probe did not match")
+        }
+
+        // Verified origin: the old cookie session is worthless here, so start
+        // from a clean jar while keeping the pairing record.
+        store.clearCookies(endpoint.origin)
+        csrfToken = ""
+
+        val request = Request.Builder()
+            .url(endpoint.url("/api/v1/auth/session"))
+            .header("Authorization", "Bearer $token")
+            .get()
+            .build()
+        return withContext(Dispatchers.IO) {
+            val response = http.newCall(applyCommonHeaders(request)).await()
+            response.use { res ->
+                if (!res.isSuccessful) throw toApiError(res)
+                val text = res.body?.string().orEmpty()
+                if (text.isBlank()) throw ApiException(0, "empty_body", "empty response body")
+                val info = json.decodeFromString(SessionInfo.serializer(), text)
+                if (!info.authenticated) {
+                    // Token was refused; the pairing record stays so the user can
+                    // retry, revoke on the Hub, or pair again explicitly.
+                    throw ApiException(res.code, "pairing_rejected", "Hub did not accept the stored device token")
+                }
+                applySessionInfo(info)
+                persistSession(info)
+                info
+            }
+        }
     }
 
     suspend fun logout() {
@@ -82,21 +163,46 @@ class ApiClient(
     }
 
     /**
-     * Stores the cookies + token for this Hub. Never stores the password.
-     * Called after login and whenever the session endpoint hands out a token.
+     * Stores the session for this Hub, including the pairing identity when the
+     * response carries it.
+     *
+     * - `hub.id`, `device_id` and `device_token` are written when present and
+     *   otherwise carried over from the stored record: GET /auth/session never
+     *   echoes the raw token, so a missing value must not erase it.
+     * - The saved candidates always contain this origin, so the address the
+     *   device paired at stays usable even if the Hub omits it from `hub`.
+     * - Pairing codes are never part of the stored record.
      */
-    fun persistSession(username: String, info: SessionInfo) {
+    fun persistSession(info: SessionInfo) {
         val existing = store.loadFor(endpoint.origin)
+        val csrf = info.csrfToken
+            ?: cookieJar.snapshot(endpoint.origin).firstOrNull { it.name == CSRF_COOKIE }?.value
+            ?: csrfToken
         store.save(
             StoredSession(
                 // Store the canonical origin, not baseUrl: it is what cookies
                 // and the Origin header are scoped to.
                 baseUrl = endpoint.origin,
                 origin = endpoint.origin,
-                username = username.ifBlank { existing?.username.orEmpty() },
-                csrfToken = info.csrfToken ?: csrfToken,
+                csrfToken = csrf,
                 cookies = cookieJar.snapshot(endpoint.origin),
-                expiresAt = info.expiresAt ?: 0L,
+                expiresAt = info.expiresAt ?: existing?.expiresAt ?: 0L,
+                hubId = info.hub?.id?.takeIf { it.isNotBlank() } ?: existing?.hubId.orEmpty(),
+                deviceId = info.deviceId?.takeIf { it.isNotBlank() } ?: existing?.deviceId.orEmpty(),
+                deviceToken = info.deviceToken?.takeIf { it.isNotBlank() } ?: existing?.deviceToken.orEmpty(),
+                candidates = mergeCandidates(
+                    existing = existing?.candidates.orEmpty(),
+                    endpoints = info.hub?.endpoints.orEmpty(),
+                    extra = listOf(
+                        HubEndpointInfo(
+                            url = endpoint.origin,
+                            kind = existing?.candidates
+                                ?.firstOrNull { HubEndpoint.parse(it.url)?.origin == endpoint.origin }
+                                ?.kind
+                                ?: RouteCandidate.KIND_OTHER,
+                        ),
+                    ),
+                ),
             ),
         )
     }
@@ -253,13 +359,13 @@ class ApiClient(
         }
     }
 
-    private fun applyCommonHeaders(request: Request): Request {
+    private fun applyCommonHeaders(request: Request, includeCsrf: Boolean = true): Request {
         val builder = request.newBuilder()
             .header("Origin", endpoint.origin)
             .header("Accept", "application/json")
             .header("Cache-Control", "no-store")
         val method = request.method
-        if (method != "GET" && method != "HEAD" && method != "OPTIONS") {
+        if (includeCsrf && method != "GET" && method != "HEAD" && method != "OPTIONS") {
             if (builder.build().header("X-FlowDrop-CSRF") == null && csrfToken.isNotEmpty()) {
                 builder.header("X-FlowDrop-CSRF", csrfToken)
             }
@@ -267,8 +373,8 @@ class ApiClient(
         return builder.build()
     }
 
-    private fun toApiError(response: Response): ApiException {
-        if (response.code == 401) onUnauthorized?.invoke()
+    private fun toApiError(response: Response, notifyUnauthorized: Boolean = true): ApiException {
+        if (response.code == 401 && notifyUnauthorized) onUnauthorized?.invoke()
         val bodyText = runCatching { response.body?.string().orEmpty() }.getOrDefault("")
         val parsed = runCatching { json.decodeFromString<ErrorBody>(bodyText) }.getOrNull()
         val detail = parsed?.error
@@ -282,16 +388,23 @@ class ApiClient(
     companion object {
         const val PAGE_SIZE = 30
         private const val DOWNLOAD_BUFFER = 64 * 1024
+        private const val CSRF_COOKIE = "flowdrop_csrf"
         private val JSON = "application/json; charset=utf-8".toMediaType()
         private val EMPTY_BODY = ByteArray(0).toRequestBody(null)
 
+        /**
+         * No connection retries and no redirects: a retried write could replay
+         * an upload, and following a redirect would hand the session cookie or
+         * an Origin header to whatever origin the redirect names.
+         */
         fun defaultClient(): OkHttpClient = OkHttpClient.Builder()
             .connectTimeout(15, TimeUnit.SECONDS)
             .readTimeout(60, TimeUnit.SECONDS)
             .writeTimeout(0, TimeUnit.MILLISECONDS) // uploads may outlast a fixed write timeout
             .callTimeout(0, TimeUnit.MILLISECONDS)
-            .retryOnConnectionFailure(true)
+            .retryOnConnectionFailure(false)
             .followRedirects(false)
+            .followSslRedirects(false)
             .build()
     }
 }

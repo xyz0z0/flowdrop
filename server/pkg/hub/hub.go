@@ -31,9 +31,11 @@
 //     DataDir (the lock is released by Stop).
 //
 // The HTTP handler keeps the existing authentication model (session cookie,
-// CSRF double-submit token, Host/Origin allowlist). Nothing here adds a remote
-// admin-initialisation endpoint: InitializeAdmin is a local-only call for the
-// Wails bridge and refuses to overwrite an existing admin.
+// CSRF double-submit token, Host/Origin allowlist) with device pairing as the
+// login path: a locally generated code yields a session plus a per-device token.
+// Pairing administration (create code, list, revoke) is local-only through the
+// methods in pairing.go. There is no admin password or admin-initialisation
+// entry point: pairing is the only authentication path.
 package hub
 
 import (
@@ -57,6 +59,7 @@ import (
 	"flowdrop/internal/db"
 	"flowdrop/internal/discovery"
 	"flowdrop/internal/events"
+	"flowdrop/internal/pairing"
 	"flowdrop/internal/storage"
 	"flowdrop/internal/store"
 	"flowdrop/internal/webui"
@@ -72,8 +75,6 @@ const (
 	janitorInterval = 15 * time.Minute
 	// lockFileName is the advisory write-lock inside DataDir.
 	lockFileName = "hub.lock"
-	// minPasswordLen mirrors the CLI admin-init rule.
-	minPasswordLen = 10
 )
 
 var (
@@ -81,9 +82,6 @@ var (
 	ErrAlreadyStarted = errors.New("hub is already started")
 	// ErrClosed is returned by methods that need live resources after Stop.
 	ErrClosed = errors.New("hub is stopped")
-	// ErrAdminExists is returned by InitializeAdmin when an admin already
-	// exists; the existing password hash is never replaced.
-	ErrAdminExists = errors.New("an admin user already exists; refusing to overwrite it")
 	// ErrDataDirInUse means another live FlowDrop Hub (CLI process or desktop
 	// bridge) already holds the write lock for this data directory.
 	ErrDataDirInUse = errors.New("data directory is in use by another FlowDrop Hub")
@@ -138,10 +136,17 @@ type Hub struct {
 	files   *storage.Store
 	store   *store.Store
 	sess    *auth.Store
+	pairing *pairing.Store
 	broker  *events.Broker
 	api     *api.Server
 	handler http.Handler
 	lock    *dataDirLock
+
+	// hubID is the stable, persisted pairing identity (not a secret) and
+	// hostname the advertised display name. Both are resolved once in New so
+	// the API metadata callback never has to touch the database.
+	hubID    string
+	hostname string
 
 	mu             sync.Mutex
 	startAttempted bool
@@ -159,10 +164,6 @@ type Hub struct {
 	stopOnce sync.Once
 	stopDone chan struct{}
 	stopErr  error
-
-	// initMu serialises InitializeAdmin so two concurrent calls can never both
-	// observe "no admin" and race to insert.
-	initMu sync.Mutex
 }
 
 // New loads the effective configuration and prepares the Hub: data-dir lock,
@@ -250,12 +251,17 @@ func New(opts Options) (*Hub, error) {
 	h.store = store.New(conn)
 	h.sess = auth.NewStore(conn, cfg.SessionTTL())
 
-	hasAdmin, err := h.sess.HasAdmin()
+	// Device pairing is the authentication path: no admin password has to be
+	// initialized before a local client can pair. The hub ID is generated and
+	// persisted on first use, so it survives restarts; the name is the OS
+	// hostname with a fixed fallback.
+	h.pairing = pairing.NewStore(conn)
+	h.hubID, err = h.pairing.HubID()
 	if err != nil {
 		return nil, err
 	}
-	if !hasAdmin {
-		log.Warn("no admin password configured; initialize one locally before logging in")
+	if name, err := os.Hostname(); err == nil {
+		h.hostname = strings.TrimSpace(name)
 	}
 
 	h.broker = events.NewBroker()
@@ -265,6 +271,8 @@ func New(opts Options) (*Hub, error) {
 		Store:          h.store,
 		Storage:        files,
 		Broker:         h.broker,
+		Pairing:        h.pairing,
+		HubInfo:        h.hubInfo,
 		UI:             webui.FS(),
 		Logger:         log,
 		TrustedProxies: parseTrustedProxies(cfg.TrustedProxies),
@@ -278,7 +286,8 @@ func New(opts Options) (*Hub, error) {
 		"additional_listen", cfg.AdditionalListen,
 		"data_dir", cfg.DataDir,
 		"cookie_secure", cfg.CookieSecure,
-		"has_admin", hasAdmin,
+		"hub_id", h.hubID,
+		"pairing", "device-code",
 	)
 	return h, nil
 }
@@ -314,60 +323,6 @@ func (h *Hub) URLs() []string {
 		return nil
 	}
 	return append([]string(nil), h.urls...)
-}
-
-// HasAdmin reports whether an admin user exists. It is safe to call before
-// Start and concurrently with initialization; after Stop it returns ErrClosed.
-func (h *Hub) HasAdmin() (bool, error) {
-	h.mu.Lock()
-	stopped := h.stopped
-	h.mu.Unlock()
-	if stopped {
-		return false, ErrClosed
-	}
-	return h.sess.HasAdmin()
-}
-
-// InitializeAdmin creates the single admin user with the same Argon2id hashing
-// rule as the CLI. It only succeeds while no admin exists, so an existing
-// password is never silently overwritten and there is no remote initialisation
-// endpoint. Empty username means "admin"; passwords shorter than 10 characters
-// are rejected. The password is never logged or echoed in errors.
-func (h *Hub) InitializeAdmin(username, password string) error {
-	h.mu.Lock()
-	stopped := h.stopped
-	h.mu.Unlock()
-	if stopped {
-		return ErrClosed
-	}
-	username = strings.TrimSpace(username)
-	if username == "" {
-		username = "admin"
-	}
-	if len(password) < minPasswordLen {
-		return fmt.Errorf("password must be at least %d characters", minPasswordLen)
-	}
-
-	h.initMu.Lock()
-	defer h.initMu.Unlock()
-
-	// Fast path: an initialized Hub never hashes a second password.
-	if has, err := h.sess.HasAdmin(); err != nil {
-		return err
-	} else if has {
-		return ErrAdminExists
-	}
-	// The insert itself is conditional on "no admin yet", so even a concurrent
-	// local `flowdrop admin init` cannot be overwritten.
-	created, err := h.sess.CreateAdminIfAbsent(username, password)
-	if err != nil {
-		return err
-	}
-	if !created {
-		return ErrAdminExists
-	}
-	h.log.Info("admin user initialized", "username", username)
-	return nil
 }
 
 // Start binds every configured listen address synchronously and begins serving.

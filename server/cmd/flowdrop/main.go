@@ -3,13 +3,12 @@
 // Subcommands:
 //
 //	flowdrop serve [-config path]     start the hub (default)
-//	flowdrop admin init [-username]   set/rotate the admin password locally
-//	flowdrop doctor                   check data dir, DB, ports, free space
+//	flowdrop pair [-config path]      generate a one-time device pairing code
+//	flowdrop doctor                   check data dir, DB, pairing and free space
 //	flowdrop version                  print version
 package main
 
 import (
-	"bufio"
 	"context"
 	"errors"
 	"flag"
@@ -17,24 +16,27 @@ import (
 	"net"
 	"os"
 	"os/signal"
-	"strings"
 	"syscall"
 	"time"
 
-	"flowdrop/internal/auth"
 	"flowdrop/internal/config"
 	"flowdrop/internal/db"
 	"flowdrop/internal/discovery"
+	"flowdrop/internal/pairing"
 	"flowdrop/internal/storage"
 	"flowdrop/pkg/hub"
-	"golang.org/x/term"
 )
 
 // version is overridden with -ldflags "-X main.version=..."
 var version = "0.1.0-dev"
 
 func main() {
-	args := os.Args[1:]
+	os.Exit(run(os.Args[1:]))
+}
+
+// run executes one command line and returns the process exit code, so tests can
+// drive the CLI without spawning a binary.
+func run(args []string) int {
 	cmd := "serve"
 	if len(args) > 0 && !isFlag(args[0]) {
 		cmd = args[0]
@@ -44,8 +46,8 @@ func main() {
 	switch cmd {
 	case "serve":
 		err = runServe(args)
-	case "admin":
-		err = runAdmin(args)
+	case "pair":
+		err = runPair(args)
 	case "doctor":
 		err = runDoctor(args)
 	case "backup":
@@ -57,12 +59,13 @@ func main() {
 	default:
 		fmt.Fprintf(os.Stderr, "unknown command %q\n\n", cmd)
 		usage()
-		os.Exit(2)
+		return 2
 	}
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "flowdrop:", err)
-		os.Exit(1)
+		return 1
 	}
+	return 0
 }
 
 func isFlag(s string) bool { return len(s) > 0 && s[0] == '-' }
@@ -71,10 +74,9 @@ func usage() {
 	fmt.Fprint(os.Stderr, `FlowDrop Hub
 
   flowdrop serve [-config FILE]      start the hub (default listen 127.0.0.1:8080)
-  flowdrop admin init [-config FILE] [-username NAME] [--password-stdin]
-                                     set or rotate the admin password
-                                     (--password-stdin: two lines on stdin, for scripts)
-  flowdrop doctor [-config FILE]     check data dir, database and free space
+  flowdrop pair [-config FILE]       create a one-time pairing code shown here only
+                                     (2 minutes, single use, a new code voids the old one)
+  flowdrop doctor [-config FILE]     check data dir, database, pairing state and free space
   flowdrop backup OUT.tar.gz         consistent snapshot of database + attachments
   flowdrop version                   print version
 
@@ -127,114 +129,40 @@ func runServe(args []string) error {
 	return h.Stop(shutdownCtx)
 }
 
-func runAdmin(args []string) error {
-	if len(args) == 0 || args[0] != "init" {
-		return errors.New("usage: flowdrop admin init [-username NAME] [-config FILE]")
-	}
-	fs := flag.NewFlagSet("admin init", flag.ContinueOnError)
+// runPair creates a pairing code and prints it on the local terminal only. It
+// deliberately takes no hub lock: inserting a code into the shared database is
+// how a running hub learns about it, so the hub must not be stopped or
+// duplicated. Nothing is written to logs or files, and no token is echoed.
+func runPair(args []string) error {
+	fs := flag.NewFlagSet("pair", flag.ContinueOnError)
 	cfgPath := fs.String("config", hub.DefaultConfigPath(), "path to config JSON")
-	username := fs.String("username", "admin", "admin username")
-	force := fs.Bool("force", false, "rotate without prompting for confirmation")
-	passwordStdin := fs.Bool("password-stdin", false,
-		"read the password from stdin (two lines) instead of the terminal, for scripts/CI")
-	if err := fs.Parse(args[1:]); err != nil {
+	if err := fs.Parse(args); err != nil {
 		return err
 	}
 	cfg, err := config.Load(*cfgPath)
 	if err != nil {
 		return err
 	}
-
-	conn, err := db.Open(cfg.DataDir)
+	code, err := createPairingCode(cfg.DataDir, time.Now())
 	if err != nil {
 		return err
 	}
-	defer conn.Close()
-	sess := auth.NewStore(conn, cfg.SessionTTL())
-
-	has, err := sess.HasAdmin()
-	if err != nil {
-		return err
-	}
-	if has && !*force {
-		fmt.Fprintf(os.Stderr, "An admin password already exists. Rotating it will revoke all sessions.\nContinue? [y/N] ")
-		var answer string
-		fmt.Fscanln(os.Stdin, &answer)
-		if answer != "y" && answer != "Y" && answer != "yes" {
-			fmt.Println("aborted")
-			return nil
-		}
-	}
-
-	var password string
-	if *passwordStdin {
-		password, err = readPasswordFromStdin()
-	} else {
-		password, err = readPasswordTwice()
-	}
-	if err != nil {
-		return err
-	}
-	if err := sess.SetPassword(*username, password); err != nil {
-		return err
-	}
-	if has {
-		if _, err := conn.Exec(`DELETE FROM sessions`); err != nil {
-			return err
-		}
-	}
-	fmt.Printf("Admin password set for user %q in %s\n", *username, cfg.DataDir)
+	fmt.Printf("Pairing code: %s\n", code.Code)
+	fmt.Printf("Valid for two minutes (until %s), single use.\n",
+		time.UnixMilli(code.ExpiresAt).Format("15:04:05"))
+	fmt.Println("A newly generated code voids this one. Enter it on the new device now.")
 	return nil
 }
 
-// readPasswordFromStdin reads the password and its confirmation as two lines.
-// Intended for automation; the value still never appears in logs or process
-// arguments (unlike passing it as a flag).
-func readPasswordFromStdin() (string, error) {
-	sc := bufio.NewScanner(os.Stdin)
-	sc.Buffer(make([]byte, 0, 64*1024), 64*1024)
-	var lines []string
-	for len(lines) < 2 && sc.Scan() {
-		lines = append(lines, strings.TrimRight(sc.Text(), "\r"))
-	}
-	if err := sc.Err(); err != nil {
-		return "", err
-	}
-	if len(lines) < 2 {
-		return "", errors.New("expected two lines on stdin (password, then confirmation)")
-	}
-	if len(lines[0]) < 10 {
-		return "", errors.New("password must be at least 10 characters")
-	}
-	if lines[0] != lines[1] {
-		return "", errors.New("passwords do not match")
-	}
-	return lines[0], nil
-}
-
-func readPasswordTwice() (string, error) {
-	if !term.IsTerminal(int(os.Stdin.Fd())) {
-		return "", errors.New("stdin is not a terminal; run admin init interactively")
-	}
-	fmt.Fprint(os.Stderr, "New admin password: ")
-	p1, err := term.ReadPassword(int(os.Stdin.Fd()))
-	fmt.Fprintln(os.Stderr)
+// createPairingCode adds a fresh code to the hub that owns dataDir, dropping
+// any previous code and resetting the failed-attempt counter.
+func createPairingCode(dataDir string, now time.Time) (pairing.Code, error) {
+	conn, err := db.Open(dataDir)
 	if err != nil {
-		return "", err
+		return pairing.Code{}, err
 	}
-	if len(p1) < 10 {
-		return "", errors.New("password must be at least 10 characters")
-	}
-	fmt.Fprint(os.Stderr, "Repeat password: ")
-	p2, err := term.ReadPassword(int(os.Stdin.Fd()))
-	fmt.Fprintln(os.Stderr)
-	if err != nil {
-		return "", err
-	}
-	if string(p1) != string(p2) {
-		return "", errors.New("passwords do not match")
-	}
-	return string(p1), nil
+	defer conn.Close()
+	return pairing.NewStore(conn).CreateCode(now)
 }
 
 func runDoctor(args []string) error {
@@ -270,9 +198,25 @@ func runDoctor(args []string) error {
 	_ = conn.QueryRow(`SELECT COALESCE(MAX(version),0) FROM schema_migrations`).Scan(&v)
 	report("database", true, fmt.Sprintf("schema v%d", v))
 
-	sess := auth.NewStore(conn, cfg.SessionTTL())
-	has, err := sess.HasAdmin()
-	report("admin password", has && err == nil, map[bool]string{true: "configured", false: "missing — run 'flowdrop admin init'"}[has && err == nil])
+	// Pairing state lives in the same database: the hub ID proves the pairing
+	// tables are readable, and the device count is informational (zero paired
+	// devices is a normal, freshly installed hub).
+	pairStore := pairing.NewStore(conn)
+	hubID, err := pairStore.HubID()
+	if err != nil {
+		report("pairing", false, err.Error())
+	} else {
+		report("pairing", true, "hub id "+hubID)
+	}
+	devices, err := pairStore.ListDevices()
+	switch {
+	case err != nil:
+		report("paired devices", false, err.Error())
+	case len(devices) == 0:
+		report("paired devices", true, "0 paired (normal until a device pairs)")
+	default:
+		report("paired devices", true, fmt.Sprintf("%d paired", len(devices)))
+	}
 
 	files, err := storage.New(cfg.DataDir)
 	if err != nil {

@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"net/url"
-	"strings"
 	"sync"
 	"time"
 
@@ -14,6 +13,7 @@ import (
 	"flowdrop/desktop/internal/appsettings"
 	"flowdrop/desktop/internal/hubmgr"
 	"flowdrop/desktop/internal/network"
+	"flowdrop/pkg/hub"
 )
 
 // SettingsService is the Wails-bound API of the settings window. It is only
@@ -58,35 +58,37 @@ type InterfaceOption struct {
 
 // State is everything the settings window renders.
 type State struct {
-	Running         bool              `json:"running"`
-	URL             string            `json:"url"`
-	URLs            []string          `json:"urls"`
-	AccessURLs      []AccessURL       `json:"access_urls"`
-	BindAddress     string            `json:"bind_address"`
-	Additional      []string          `json:"additional_addresses"`
-	DualMode        bool              `json:"dual_mode"`
-	DualAvailable   bool              `json:"dual_available"`
-	Port            int               `json:"port"`
-	AdminConfigured bool              `json:"admin_configured"`
-	LastError       string            `json:"last_error"`
-	StartupError    string            `json:"startup_error"`
-	ConfigPath      string            `json:"config_path"`
-	Interfaces      []InterfaceOption `json:"interfaces"`
-	HasTailscale    bool              `json:"has_tailscale"`
-	TrayAvailable   bool              `json:"tray_available"`
-	ProxyWarning    string            `json:"proxy_warning"`
+	Running       bool              `json:"running"`
+	URL           string            `json:"url"`
+	URLs          []string          `json:"urls"`
+	AccessURLs    []AccessURL       `json:"access_urls"`
+	BindAddress   string            `json:"bind_address"`
+	Additional    []string          `json:"additional_addresses"`
+	DualMode      bool              `json:"dual_mode"`
+	DualAvailable bool              `json:"dual_available"`
+	Port          int               `json:"port"`
+	LastError     string            `json:"last_error"`
+	StartupError  string            `json:"startup_error"`
+	ConfigPath    string            `json:"config_path"`
+	Interfaces    []InterfaceOption `json:"interfaces"`
+	HasTailscale  bool              `json:"has_tailscale"`
+	TrayAvailable bool              `json:"tray_available"`
+	ProxyWarning  string            `json:"proxy_warning"`
+	// AccessibilityWarning explains that this launch had to disable the
+	// AT-SPI bridge because the session's accessibility bus was broken. It is
+	// empty when accessibility is enabled.
+	AccessibilityWarning string `json:"accessibility_warning"`
 }
 
 // GetState returns the current shell state for the settings window.
 func (s *SettingsService) GetState() (State, error) {
 	st := State{
-		ConfigPath:      desktop.settingsPath,
-		StartupError:    desktop.lastStartupErr,
-		TrayAvailable:   desktop.trayAvailable,
-		AdminConfigured: false,
-		URLs:            []string{},
-		AccessURLs:      []AccessURL{},
-		Additional:      []string{},
+		ConfigPath:    desktop.settingsPath,
+		StartupError:  desktop.lastStartupErr,
+		TrayAvailable: desktop.trayAvailable,
+		URLs:          []string{},
+		AccessURLs:    []AccessURL{},
+		Additional:    []string{},
 	}
 	list, listErr := network.List()
 	for _, i := range list {
@@ -112,7 +114,6 @@ func (s *SettingsService) GetState() (State, error) {
 		st.BindAddress = snap.BindAddress
 		st.Additional = append([]string{}, snap.AdditionalAddresses...)
 		st.Port = snap.Port
-		st.AdminConfigured = snap.AdminConfigured
 		if snap.LastError != "" {
 			st.LastError = hubmgr.FriendlyError(errors.New(snap.LastError))
 		}
@@ -139,12 +140,77 @@ func (s *SettingsService) GetState() (State, error) {
 				host = u.Hostname()
 			}
 		}
-		st.ProxyWarning = network.ProxyWarning(host)
+		st.ProxyWarning = desktopProxyWarning(host)
 	}
+	st.AccessibilityWarning = desktopAccessibilityWarning(desktop.a11yFallbackReason())
 	if listErr != nil && st.LastError == "" {
 		st.LastError = listErr.Error()
 	}
 	return st, nil
+}
+
+// desktopAccessibilityWarning turns the recorded bridge-disable reason into a
+// user-facing note. An empty reason means accessibility is on.
+func desktopAccessibilityWarning(reason string) string {
+	if reason == "" {
+		return ""
+	}
+	return "本次启动检测到系统的 AT-SPI 无障碍总线无响应（" + reason + "），" +
+		"为避免 at-spi/WebKitGTK 原生崩溃，已仅对本应用禁用无障碍桥；" +
+		"屏幕阅读器本次无法读取 FlowDrop。系统无障碍设置没有改动；" +
+		"注销并重新登录（或修复会话的无障碍总线）后重新启动即可恢复。" +
+		"临时手动方式：NO_AT_BRIDGE=1 启动本应用；" +
+		"FLOWDROP_DESKTOP_A11Y=on 可强制保留无障碍（有崩溃风险）。"
+}
+
+// desktopProxyWarning combines the host environment diagnosis with what this
+// process actually managed to configure in WebKitGTK:
+//
+//   - in-app direct mode applied: the WebSocket no longer goes through the
+//     system proxy, so the old "add this address to no_proxy" demand is gone;
+//   - not applied and a proxy risk exists: keep the warning and state plainly
+//     that the in-app bypass failed, instead of hiding the risk;
+//   - no proxy risk detected: show nothing, including when the bypass failed
+//     (there is nothing for it to bypass).
+func desktopProxyWarning(host string) string {
+	return combineProxyWarning(
+		network.ProxyWarning(host),
+		desktop.webviewProxyConfigured.Load(),
+		desktop.webviewProxyConfigureError(),
+	)
+}
+
+// combineProxyWarning is the pure composition used by desktopProxyWarning so
+// the success/failure policy can be unit-tested without a live WebKit context.
+func combineProxyWarning(environmentWarning string, webviewDirect bool, configureErr string) string {
+	if environmentWarning == "" {
+		return ""
+	}
+	if webviewDirect {
+		return ""
+	}
+	if configureErr == "" {
+		return environmentWarning
+	}
+	return "应用内 WebView 直连代理设置失败（" + configureErr + "）。\n" + environmentWarning
+}
+
+// a11yFallbackReason returns why the AT-SPI bridge was disabled for this
+// launch, or "" when accessibility is enabled or has not been checked.
+func (d *desktopState) a11yFallbackReason() string {
+	if v, ok := d.a11yFallback.Load().(string); ok {
+		return v
+	}
+	return ""
+}
+
+// webviewProxyConfigureError returns the in-app proxy setup error, or "" when
+// it succeeded or has not run yet.
+func (d *desktopState) webviewProxyConfigureError() string {
+	if v, ok := d.webviewProxyConfigureErr.Load().(string); ok {
+		return v
+	}
+	return ""
 }
 
 // ApplyNetwork keeps the original single-address API working: it binds one
@@ -262,22 +328,84 @@ func (s *SettingsService) mustState() State {
 	return st
 }
 
-// InitializeAdmin sets the first admin password. The Hub refuses to overwrite
-// an existing password, so this cannot be used to take over an initialized Hub.
-func (s *SettingsService) InitializeAdmin(username, password string) (State, error) {
-	if strings.TrimSpace(username) == "" {
-		username = "admin"
+// PairingCode is one freshly generated local pairing code. Code stays a string
+// so a leading zero (for example "0073") survives the bridge and the UI.
+type PairingCode struct {
+	Code      string `json:"code"`
+	ExpiresAt int64  `json:"expires_at"`
+}
+
+// PairedDevice is one device paired with this Hub. The raw device token is
+// never part of this view (the Hub only stores its hash).
+type PairedDevice struct {
+	ID         string `json:"id"`
+	Name       string `json:"name"`
+	CreatedAt  int64  `json:"created_at"`
+	LastSeenAt int64  `json:"last_seen_at"`
+}
+
+// errHubNotRunning is the settings bridge's answer when pairing is used without
+// a live Hub: pairing only exists for a Hub that is actually listening, so the
+// window says so instead of showing an empty list as if it were the truth.
+func errHubNotRunning() error {
+	return errors.New("Hub 未运行：请先在下方「网络绑定」中保存地址并启动 Hub，然后再添加设备")
+}
+
+// pairingError maps the Hub's lifecycle errors to that message and keeps every
+// other failure (bad device id, revocation failure) as it is.
+func pairingError(err error) error {
+	if errors.Is(err, hub.ErrNotStarted) || errors.Is(err, hub.ErrClosed) {
+		return errHubNotRunning()
 	}
-	if len(password) < 10 {
-		return s.mustState(), errors.New("密码至少需要 10 个字符")
+	return err
+}
+
+// CreatePairingCode asks the running Hub for a new local 4-digit code (120s
+// lifetime, one use, leading zeros kept). It is only returned to this window:
+// there is no HTTP endpoint that generates a code, and it is never logged.
+func (s *SettingsService) CreatePairingCode() (PairingCode, error) {
+	if s.manager == nil {
+		return PairingCode{}, errHubNotRunning()
 	}
-	if err := s.manager.InitializeAdmin(username, password); err != nil {
-		if errors.Is(err, errAdminExists()) {
-			return s.mustState(), errors.New("已经设置过管理员密码，本窗口不会覆盖它；如需重置请在终端运行 flowdrop admin init")
-		}
-		return s.mustState(), err
+	code, err := s.manager.CreatePairingCode()
+	if err != nil {
+		return PairingCode{}, pairingError(err)
 	}
-	return s.mustState(), nil
+	return PairingCode{Code: code.Code, ExpiresAt: code.ExpiresAt}, nil
+}
+
+// ListPairedDevices returns the devices paired with this Hub so the settings
+// window can show their names and times and offer revocation.
+func (s *SettingsService) ListPairedDevices() ([]PairedDevice, error) {
+	if s.manager == nil {
+		return nil, errHubNotRunning()
+	}
+	devices, err := s.manager.ListPairedDevices()
+	if err != nil {
+		return nil, pairingError(err)
+	}
+	out := make([]PairedDevice, 0, len(devices))
+	for _, d := range devices {
+		out = append(out, PairedDevice{
+			ID:         d.ID,
+			Name:       d.Name,
+			CreatedAt:  d.CreatedAt,
+			LastSeenAt: d.LastSeenAt,
+		})
+	}
+	return out, nil
+}
+
+// RevokePairedDevice revokes one paired device through the running Hub, which
+// also invalidates its HTTP session and open WebSocket.
+func (s *SettingsService) RevokePairedDevice(id string) error {
+	if s.manager == nil {
+		return errHubNotRunning()
+	}
+	if err := s.manager.RevokePairedDevice(id); err != nil {
+		return pairingError(err)
+	}
+	return nil
 }
 
 // OpenInbox tells the shell to show the inbox window.

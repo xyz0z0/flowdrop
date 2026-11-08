@@ -16,6 +16,18 @@ let mode = "single";
 let chosenAddress = null;
 let dualLAN = null;
 let dualTS = null;
+// Pairing display state. The code is kept only in memory for as long as it is
+// valid on screen: it is never stored in localStorage, a cookie, a log or the
+// desktop config file. codeExpiresAt is the Hub-provided Unix-millisecond
+// deadline; 0 means "no code shown".
+let pairingTimer = null;
+let codeExpiresAt = 0;
+// generatingCode keeps the periodic refresh from re-enabling the button while a
+// code request is still in flight (which would allow a double generation).
+let generatingCode = false;
+// hubKey is the running Hub (or "" when stopped). A change means the Hub was
+// restarted or switched address, which invalidates any displayed code.
+let hubKey = null;
 
 function show(el, text) {
   if (!el) return;
@@ -162,17 +174,22 @@ function render(s) {
   $("listen").textContent = !s.running
     ? "—（未运行，当前没有监听）"
     : (listens.length ? listens.join("  +  ") : "—");
-  $("admin-state").textContent = s.admin_configured
-    ? "已设置（密码登录仍由 Hub 校验）"
-    : "尚未设置";
   $("tray-state").textContent = s.tray_available
     ? "可用：关闭窗口会收进托盘，Hub 继续运行"
     : "不可用：关闭窗口会询问是否退出（不会留后台进程）";
   $("cfg-path").textContent = s.config_path ? "桌面设置：" + s.config_path : "";
-  $("admin-card").hidden = s.admin_configured;
+
+  // A stopped Hub, a restarted Hub or a new address makes any code on screen
+  // stale: clear it instead of leaving an old code looking like it still works.
+  const currentHub = s.running ? (s.url || "") : "";
+  if (hubKey !== null && currentHub !== hubKey) {
+    clearPairingCode();
+  }
+  hubKey = currentHub;
 
   show($("startup-error"), s.startup_error || "");
   show($("proxy-warning"), s.proxy_warning || "");
+  show($("a11y-warning"), s.accessibility_warning || "");
   show($("last-error"), s.startup_error ? "" : s.last_error || "");
   $("tailscale-hint").hidden = s.has_tailscale || mode === "dual";
 
@@ -227,9 +244,140 @@ function render(s) {
   renderURLs();
 }
 
+// --- device pairing --------------------------------------------------------
+
+// clearPairingCode removes the displayed code and stops its countdown. It runs
+// when the code expires, when the Hub restarts or switches address, when the
+// window is closed and whenever a generation attempt starts or fails, so an
+// invalid code is never left on screen as if it still worked.
+function clearPairingCode() {
+  if (pairingTimer) {
+    clearInterval(pairingTimer);
+    pairingTimer = null;
+  }
+  codeExpiresAt = 0;
+  const box = $("pairing-code");
+  if (box) box.hidden = true;
+  const value = $("pairing-code-value");
+  if (value) value.textContent = "";
+  const expiry = $("pairing-code-expiry");
+  if (expiry) {
+    expiry.textContent = "";
+    expiry.hidden = true;
+  }
+}
+
+function tickPairingCode() {
+  if (!codeExpiresAt) return;
+  const remaining = Math.round((codeExpiresAt - Date.now()) / 1000);
+  if (remaining <= 0) {
+    clearPairingCode();
+    show($("pairing-error"), "配对码已过期，请重新生成。");
+    return;
+  }
+  show($("pairing-code-expiry"), `剩余 ${remaining} 秒；过期后请重新生成。`);
+}
+
+// showPairingCode renders the code as text (never HTML) with its countdown.
+// The Hub sends the code as a string, so a leading zero is kept.
+function showPairingCode(codeValue, expiresAt) {
+  clearPairingCode();
+  const text = String(codeValue || "");
+  if (!/^[0-9]{4}$/.test(text)) {
+    show($("pairing-error"), "生成配对码失败：Hub 返回的不是有效的四位码。");
+    return;
+  }
+  codeExpiresAt = Number(expiresAt) || 0;
+  $("pairing-code-value").textContent = text;
+  $("pairing-code").hidden = false;
+  tickPairingCode();
+  pairingTimer = setInterval(tickPairingCode, 500);
+}
+
+function formatTime(ms) {
+  const n = Number(ms);
+  if (!n || !Number.isFinite(n)) return "—";
+  try {
+    return new Date(n).toLocaleString("zh-CN", { hour12: false });
+  } catch {
+    return "—";
+  }
+}
+
+// renderDevices builds the device list with textContent only: a device name is
+// remote input and must never be parsed as HTML.
+function renderDevices(devices) {
+  const list = $("device-list");
+  list.textContent = "";
+  const items = devices || [];
+  for (const dev of items) {
+    const li = document.createElement("li");
+    li.className = "device-item";
+    const body = document.createElement("div");
+    body.className = "device-body";
+    const name = document.createElement("span");
+    name.className = "device-name";
+    name.textContent = dev.name || "未命名设备";
+    const meta = document.createElement("span");
+    meta.className = "device-meta";
+    meta.textContent = "创建 " + formatTime(dev.created_at) + " · 最近使用 " + formatTime(dev.last_seen_at);
+    body.appendChild(name);
+    body.appendChild(meta);
+    const revoke = document.createElement("button");
+    revoke.type = "button";
+    revoke.className = "ghost danger";
+    revoke.textContent = "解除配对";
+    revoke.addEventListener("click", () => revokeDevice(dev.id, revoke));
+    li.appendChild(body);
+    li.appendChild(revoke);
+    list.appendChild(li);
+  }
+  show($("device-empty"), items.length ? "" : "还没有已配对设备；点「添加设备」生成四位码。");
+}
+
+async function revokeDevice(id, btn) {
+  if (!id) return;
+  show($("device-error"), "");
+  btn.disabled = true;
+  btn.textContent = "正在解除…";
+  try {
+    await call("RevokePairedDevice", id);
+    await refreshDevices();
+  } catch (err) {
+    show($("device-error"), "解除配对失败：" + String(err));
+    btn.disabled = false;
+    btn.textContent = "解除配对";
+  }
+}
+
+// refreshDevices loads the paired device list, or explains why pairing is
+// unavailable. Its errors live in the pairing card and never touch the network
+// settings above.
+async function refreshDevices() {
+  const add = $("pair-add");
+  if (!state || !state.running) {
+    show($("pairing-unavailable"), "Hub 未运行：现在无法配对设备。请先在下方「网络绑定」中保存地址并启动 Hub。");
+    add.disabled = true;
+    show($("device-error"), "");
+    clearPairingCode();
+    renderDevices([]);
+    show($("device-empty"), "");
+    return;
+  }
+  show($("pairing-unavailable"), "");
+  add.disabled = generatingCode;
+  try {
+    renderDevices(await call("ListPairedDevices"));
+    show($("device-error"), "");
+  } catch (err) {
+    show($("device-error"), "读取已配对设备失败：" + String(err));
+  }
+}
+
 async function refresh() {
   try {
     render(await call("GetState"));
+    await refreshDevices();
   } catch (err) {
     show($("apply-error"), "读取状态失败：" + err);
   }
@@ -295,6 +443,9 @@ $("apply").addEventListener("click", async () => {
     show($("apply-ok"), actual
       ? "已应用：Hub 已按新配置重启，实际绑定 " + actual
       : "已应用：Hub 已按新配置重启。");
+    // The restart replaced the Hub instance, so a code shown before is dead.
+    clearPairingCode();
+    await refreshDevices();
   } catch (err) {
     show($("apply-error"), String(err));
     dirty = false;
@@ -305,33 +456,32 @@ $("apply").addEventListener("click", async () => {
   }
 });
 
-$("set-admin").addEventListener("click", async () => {
-  show($("admin-error"), "");
-  show($("admin-ok"), "");
-  const user = $("admin-user").value.trim() || "admin";
-  const pass = $("admin-pass").value;
-  const pass2 = $("admin-pass2").value;
-  if (pass.length < 10) {
-    show($("admin-error"), "密码至少需要 10 个字符。");
-    return;
-  }
-  if (pass !== pass2) {
-    show($("admin-error"), "两次输入的密码不一致。");
-    return;
-  }
-  const btn = $("set-admin");
+// "添加设备" asks the local Hub for a fresh code. Generation starts by
+// clearing any previously shown code, so a failure can never leave the old one
+// on screen looking valid; the code itself stays in memory only.
+$("pair-add").addEventListener("click", async () => {
+  const btn = $("pair-add");
+  show($("pairing-error"), "");
+  clearPairingCode();
+  generatingCode = true;
   btn.disabled = true;
+  btn.textContent = "正在生成…";
   try {
-    render(await call("InitializeAdmin", user, pass));
-    $("admin-pass").value = "";
-    $("admin-pass2").value = "";
-    show($("admin-ok"), "管理员密码已设置，可以登录收件箱了。");
+    const code = await call("CreatePairingCode");
+    showPairingCode(code && code.code, code && code.expires_at);
   } catch (err) {
-    show($("admin-error"), String(err));
+    show($("pairing-error"), "生成配对码失败：" + String(err));
   } finally {
-    btn.disabled = false;
+    generatingCode = false;
+    btn.disabled = !state || !state.running;
+    btn.textContent = "添加设备";
   }
 });
+
+// Closing the settings window must not leave a code behind in the UI or in a
+// timer; nothing about it is persisted anywhere.
+window.addEventListener("pagehide", clearPairingCode);
+window.addEventListener("beforeunload", clearPairingCode);
 
 $("open-inbox").addEventListener("click", () => {
   call("OpenInbox").catch((err) => show($("apply-error"), String(err)));

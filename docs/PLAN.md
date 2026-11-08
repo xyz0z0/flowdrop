@@ -1,5 +1,9 @@
 # FlowDrop 实施计划与验收记录
 
+后续每个 agent 任务必须先登记到 [TASKS.md](TASKS.md)，按
+[AGENT_WORKFLOW.md](AGENT_WORKFLOW.md) 拆分、设置检查点并验收。
+本文件记录产品阶段；任务派发边界和运行状态以任务记录为准。
+
 范围：PRD P0 的 M0–M3，加上 2026-11-07 第二轮范围调整（HTTP LAN 主路径 + Android 原生）。
 P1/P2（自动过期、设备管理等）不实现。
 
@@ -110,6 +114,7 @@ P1/P2（自动过期、设备管理等）不实现。
 | M6 Linux 桌面 App | ✅ 交付 | Wails v3.1.0 + GTK3；Hub 同进程嵌入；收件箱/设置双窗口、托盘、关闭→托盘、退出停 Hub、地址切换、首次密码、上传/下载/剪贴板/外链均实测；`dist/flowdrop-desktop` 已生成 |
 | M7 桌面 LAN + Tailscale 双监听 | ✅ 交付（本轮） | Hub `additional_listen`/`URLs()` + 桌面双模式；真实 LAN+Tailscale 同端口双地址共享数据/会话/WS；失败回滚；单地址旧方式与 desktop.json 兼容；最终二进制与摘要见 VERIFICATION §14 |
 | 真机验收 | ⏳ 待用户 | Android 原生 App、真实 Wi-Fi 明文 HTTP、移动网络 Tailscale、跨设备自动发现未进行；桌面版仅 Linux，Windows/macOS 未做 |
+| M8 Linux 整窗文件拖拽 | ✅ 已交付，用户确认真机可用 | 修正原生动作协商与异步接收；最新 GTK Wayland 拖入/重复发送与 X11 核心回归通过，下载 SHA 一致；用户确认真实 KDE/Dolphin 拖拽可用，见 VERIFICATION §19；此前扩展场景见 §18 |
 
 详细命令与实际输出、已知限制、待真机验收清单见 `docs/VERIFICATION.md`。
 
@@ -126,3 +131,8 @@ P1/P2（自动过期、设备管理等）不实现。
   模拟器在 API 36 上 20 秒内没有 `onServiceFound`，真实手机 mDNS 互通仍未验证；
   不得把模拟器注入测试写成真实局域网发现通过。详见 `VERIFICATION.md §12.9`。
 - 仍需真实 Android 手机与 Wi-Fi、移动网络 Tailscale、系统 APK 安装完成流程验收。
+
+
+## M9 设备配对与多地址自动连接（2026-11-08）
+
+用户确认范围见PRD §20与[PAIRING.md](PAIRING.md)，每项派发与证据见[TASKS.md](TASKS.md)。源码接入、旧公开密码入口退役、服务端/桌面/Android单测与编译已完成；Linux两产物构建、Chromium16项E2E及隔离Wails配对/拖拽通过。Android网络层对真实Hub双回环地址验证与APK构建已完成，全量102 JVM通过；真实手机Wi-Fi/Tailscale和本轮KDE配对待用户验收。此阶段覆盖前文M1/M4/M6的密码登录与不自动选路结论，不删除历史验收证据。最新证据与限制见VERIFICATION §20。

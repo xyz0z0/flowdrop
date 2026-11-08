@@ -5,7 +5,8 @@ FlowDrop 的 Android 轻客户端（Kotlin + Jetpack Compose），作为 Web 之
 
 - 服务端：复用仓库内 Go Hub（`server/`）；业务 HTTP 协议未变。局域网发现使用
   Hub 发布的 mDNS/DNS-SD 记录（仅地址提示，不含业务数据或凭据）。
-- 认证：与 Web 完全相同的 Cookie 会话 + CSRF 双提交 + 同源 Origin，见下文“协议基线”。
+- 认证：**四位临时配对码 → 设备令牌**（存 Android Keystore），不再使用账号密码。
+  之后仍用 Cookie + CSRF 双提交 + 同源 Origin，见下文“协议基线”。
 - 网络：允许明文 `http://`（可信家庭 Wi-Fi）；`https://` 走系统证书校验，
   **不全局关闭 TLS 校验**。
 
@@ -19,11 +20,12 @@ FlowDrop 的 Android 轻客户端（Kotlin + Jetpack Compose），作为 Web 之
 
 | 能力 | 说明 |
 |---|---|
-| Hub 地址 / 用户名 / 密码登录 | 地址与用户名记住；**密码不保存**，登录成功即从内存丢弃 |
-| 附近 Hub 自动发现 | 登录页前台短时搜索同一 Wi-Fi 的 FlowDrop Hub（mDNS/DNS-SD）；点选只填写地址，仍需用户输入密码登录 |
-| 会话安全保存 | 会话 Cookie + CSRF + 地址/用户名，用 Android Keystore AES-GCM 加密后存应用私有目录 |
-| 会话恢复 | 重启后 `GET /api/v1/auth/session` 恢复；CSRF Cookie 丢失时由 Hub 重新下发 |
-| 退出 | `POST /api/v1/auth/logout` 吊销服务端会话，并清除本地全部会话态与图片缓存 |
+| 配对 | 输入 Hub 本机生成的四位码（120 秒有效、一次成功、全 Hub 错 5 次失效）；码只在本机显示 |
+| 附近 Hub 发现 | 配对页前台短时搜索同一 Wi-Fi 的 FlowDrop Hub（mDNS/DNS-SD）；点选只填写地址，仍需输入配对码 |
+| 设备身份安全保存 | 设备令牌 + Hub 稳定 ID + 候选地址（LAN/Tailscale/other），用 Android Keystore AES-GCM 加密后存应用私有目录 |
+| 自动连接（单 Hub） | 启动/回前台/连接中断时先探测 LAN 再探测 Tailscale；无凭据 `health` 的 `hub_id` 匹配后才用 Bearer 恢复 Cookie/CSRF，再恢复事件流；**不重放写操作** |
+| 会话恢复 | 绑定成功后 `GET /api/v1/auth/session`（Bearer 设备令牌）恢复 Cookie 与 CSRF；CSRF Cookie 丢失时由 Hub 重新下发 |
+| 撤销/退出 | Hub 本机撤销设备或 `POST /api/v1/auth/logout` 后，HTTP 与 WS 同时失效；本地清除会话态与图片缓存 |
 | 文字 / 链接发送 | 自动识别 `http(s)://…` 为 `link`，其余为 `text` |
 | 历史分页 | 倒序 keyset 游标，`limit` 1..100，“加载更早的内容” |
 | 图片 / 普通文件 / APK 上传 | 系统文件选择器（SAF），多选逐个上传（每文件一条目），带字节进度与取消 |
@@ -36,15 +38,17 @@ FlowDrop 的 Android 轻客户端（Kotlin + Jetpack Compose），作为 Web 之
 | APK | 下载后交给**系统安装器**，出现 Android 自己的“允许安装未知应用”确认；不申请静默安装 |
 
 明确不做（与 PRD 一致）：后台常驻/系统通知、静默安装、后台读剪贴板、
-自动过期、设备管理、断点续传、自动跨网络选路、二维码配对、多 Hub 并存、
-TLS 证书配对。
+自动过期、Hub 侧设备管理入口、断点续传、二维码配对、多 Hub 并存、
+TLS 证书配对、Tailscale 管理 API 枚举设备、全网段扫描。自动选路只限**一台已配对
+Hub** 的已保存候选地址（LAN 优先，其次 Tailscale），且只重试连接、不重放写操作。
 
 ## 2. 协议基线（冻结，与 Web 完全一致）
 
 ```text
-POST /api/v1/auth/login      JSON {username,password} → {csrf_token,...} + Set-Cookie
-GET  /api/v1/auth/session    Cookie → {authenticated,csrf_token,limits}
-POST /api/v1/auth/logout     Cookie + CSRF → 204
+GET  /api/v1/health          无凭据探测 → {status,...,hub_id}
+POST /api/v1/auth/pair       {code,device_name,native:true} → SessionInfo + device_token + Set-Cookie
+GET  /api/v1/auth/session    Cookie 或 Bearer → {authenticated,csrf_token,limits,device_id,hub}
+POST /api/v1/auth/logout     Cookie + CSRF → 204（撤销当前设备）
 GET  /api/v1/items?limit&cursor
 POST /api/v1/items/text      {type,text,sender_device}
 POST /api/v1/items/upload    multipart(sender_device,file)
@@ -83,7 +87,7 @@ TXT           v=1, scheme=http, path=/
 ```
 
 - Hub 侧仅在监听**具体 RFC1918 LAN IPv4** 且 `cookie_secure=false` 时发布；
-  Tailscale/CGNAT、loopback、通配地址、HTTPS 反代不发布。发布内容不含密码、
+  Tailscale/CGNAT、loopback、通配地址、HTTPS 反代不发布。发布内容不含凭据、
   会话 Cookie、CSRF、条目内容或文件路径。
 - Android 侧使用平台 `NsdManager`（`_flowdrop._tcp`，`PROTOCOL_DNS_SD`）：
   - 只解析实例名以 `FlowDrop-` 开头的服务；
@@ -98,12 +102,15 @@ TXT           v=1, scheme=http, path=/
   也可手动搜索/刷新/停止；进入后台、离开登录页或超时立即停止，
   注销 discovery/resolve 回调并释放 Wi-Fi multicast lock。
 - **发现结果不被信任**：点选一行只调用“填写 Hub 地址”，不会自动登录、
-  不会自动恢复会话、不会向陌生服务发送已保存 Cookie 或密码；用户仍须确认
-  地址并输入密码。切换地址仍走原有的“按 origin 清会话”逻辑。
+  不会自动恢复会话、不会向陌生服务发送设备令牌或 Cookie；用户仍须输入配对码。
+  已有配对的情况下，自动选路只在**已保存候选地址**内进行，且必须先通过无凭据
+  `hub_id` 校验；ID 不符不发凭据。ID 只防误连，不能认证明文 HTTP 对端。
 
 ## 3. 安全检查清单（本客户端）
 
-- [x] 不保存密码；密码只存在于登录输入框的瞬时状态，登录完成立即清空。
+- [x] 不保存密码（已无密码输入）；配对码只存在于输入框的瞬时状态，提交后立即清空。
+- [x] 设备令牌经 Keystore AES-256-GCM 静态加密；只在 `hub_id` 校验通过的 origin 上以
+      `Authorization: Bearer` 使用，禁止放入 URL/query，禁止跨地址重定向携带。
 - [x] 会话 Cookie 静态加密（Keystore AES-256-GCM），不参与 cloud backup / 设备迁移
       （`allowBackup=false` + `data_extraction_rules.xml` 排除）。
 - [x] Cookie 按 origin 隔离，更换地址即清空；`PersistentCookieJar` 双重过滤。
@@ -121,7 +128,8 @@ TXT           v=1, scheme=http, path=/
       仅在登录页前台搜索期间持有，停止/超时/后台立即释放。
 - [x] 发现记录严格校验（服务前缀、TXT、端口、RFC1918 IPv4），不兼容记录直接丢弃。
 - [x] 发现结果只当地址提示：不自动登录、不自动恢复会话、不向发现的服务发送
-      已保存 Cookie/密码；点选只填地址。
+      设备令牌/Cookie；点选只填地址。
+- [x] 自动选路的探测请求不带凭据；切换地址只重试连接，不从候选地址重放上传/删除/发送。
 
 ## 4. 目录结构
 
@@ -221,7 +229,11 @@ scripts/lan-http.sh --host 100.101.102.103 --port 8080
 Tailscale 客户端在手机上会把该 CGNAT 地址路由进隧道，因此即使两台设备不在同一
 Wi-Fi、也没有公网端口映射，HTTP 仍然直连可用。前提是 Tailscale ACL 允许该端口。
 
-**单 IP 绑定限制（重要，二者不能同时兼得）：**
+**单 IP 绑定限制（历史版本行为，现已由多监听取代）：**
+
+> 下面这一段是旧版单监听时期的实测记录，保留为历史证据。当前版本支持同一个 Hub
+> 同时绑定一个 LAN 地址和一个 Tailscale 地址（`additional_listen` / 桌面双模式），
+> 见 [../docs/DEPLOY.md §5.8](../docs/DEPLOY.md)；Hub 侧仍拒绝通配地址。
 
 - `FLOWDROP_LISTEN` 只能写**一个**具体 IP。明文模式下 Hub 会拒绝 `0.0.0.0` / `::`，
   直接报错退出：
@@ -243,7 +255,7 @@ Wi-Fi、也没有公网端口映射，HTTP 仍然直连可用。前提是 Tailsc
 - Hub 会自动把 `FLOWDROP_LISTEN` 里的那个具体 IP 加入允许的 Host，因此填同一个
   IP 访问不会 421；若改用 MagicDNS 名（如 `http://hub.tailnet-name.ts.net:8080`），
   必须把该名字加入 `FLOWDROP_ALLOWED_HOSTS`。
-- 明文跨网意味着**密码、会话 Cookie 与文件内容都在 Tailscale 隧道内明文**。
+- 明文跨网意味着**设备令牌、会话 Cookie 与文件内容都在 Tailscale 隧道内明文**。
   Tailscale 提供的是加密隧道，安全性依赖 Tailnet 成员可信。
 
 如果更希望跨网也走 HTTPS，可以继续用 `tailscale serve`（Tailscale 终结 TLS，
@@ -254,31 +266,37 @@ Wi-Fi、也没有公网端口映射，HTTP 仍然直连可用。前提是 Tailsc
 
 1. 安装 `app-debug.apk`。
 2. 首屏“附近的 Hub”会在前台自动短时搜索（12 秒），也可点 `搜索` / `刷新` /
-   `停止`。点选一个结果**只会把地址填入“Hub 地址”**，不会自动登录；仍需输入
-   密码后点 `登录`。找不到时可照常手动输入 Hub 地址（包括 Tailscale 地址）。
+   `停止`。点选一个结果**只会把地址填入“Hub 地址”**，不会自动登录；仍需在电脑上
+   生成四位配对码（桌面设置「添加设备」或本机 `flowdrop pair`）后输入完成配对。
+   找不到时可照常手动输入 Hub 地址（包括 Tailscale 地址）。
+3. 配对成功后设备被记住：以后启动/回前台会自动连接，先试 LAN、失败再试 Tailscale。
 3. 收件箱：顶部显示连接状态；`本机名称` 会作为 `sender_device` 随条目上报。
 4. 发送：输入框输入文字或粘贴链接 → `发送`；`选择图片` / `选择文件` 走系统选择器。
 5. 收到其它设备内容会经 WebSocket 实时出现；断线或从后台回来会自动重拉列表。
 6. 系统任意应用的“分享”菜单可直接选 **FlowDrop**，发送文字或文件。
 7. 附件卡片的 `下载` 保存到 Downloads；APK 额外有 `安装`，由系统确认安装。
+8. 想解除绑定：在电脑设置里撤销该设备（立即失效），或在 App 内退出登录。
 
 ### 6.3 验证协议是否通的最小检查
 
 ```bash
 # Hub 起来了吗
 curl http://<hub-ip>:8080/api/v1/health
-# 登录（应返回 csrf_token 与 Set-Cookie）
+# 健康探测（应包含 hub_id，且无需任何凭据）
+curl -s http://<hub-ip>:8080/api/v1/health
+
+# 配对（code 先在 Hub 本机用 flowdrop pair 或桌面设置生成；返回 device_token 与 Set-Cookie）
 curl -i -H 'Origin: http://<hub-ip>:8080' -H 'Content-Type: application/json' \
-  -d '{"username":"admin","password":"..."}' \
-  http://<hub-ip>:8080/api/v1/auth/login
+  -d '{"code":"0427","device_name":"phone","native":true}' \
+  http://<hub-ip>:8080/api/v1/auth/pair
 ```
 
 ## 7. 平台限制与未验证项
 
 - **后台不常驻**：App 在 `onStop` 主动关闭 WebSocket，回前台再重连并 REST 重拉；
   不申请前台服务，因此不保证后台收到实时更新，也没有系统通知（与 PRD 一致）。
-- **明文边界**：HTTP 模式下密码、Cookie 与内容在同一 Wi-Fi 可被监听。这是用户
-  明确接受的取舍，只应在家用可信网络使用。
+- **明文边界**：HTTP 模式下设备令牌、配对码、Cookie 与内容在同一 Wi-Fi 可被监听；
+  配对码不是加密，`hub_id` 也不认证对端。这是用户明确接受的取舍，只应在家用可信网络使用。
 - **`REQUEST_INSTALL_PACKAGES`**：Android 8+ 系统安装器要求来源具备该权限才能弹出
   安装确认；App 自身从不执行安装。
 - **真机未验证**：所有自动化与手工验证都在 **Android 模拟器**（API 36 / x86_64）
@@ -288,29 +306,37 @@ curl -i -H 'Origin: http://<hub-ip>:8080' -H 'Content-Type: application/json' \
   组播、企业网络或 Android 模拟器（不转发宿主 mDNS）都会导致列表为空。App 会
   显示友好提示并保留手动输入地址；这是预期边界，不是登录失败。
 - **发现不是身份验证**：同名实例可能是任意设备。App 不会用发现结果登录或恢复
-  会话，也不会把已保存 Cookie/密码发给它；地址与密码仍由用户确认。
+  会话，也不会把已保存设备令牌/Cookie 发给它；地址与配对码仍由用户确认。
 - **未来 Android 版本**：本版本 `targetSdk=35`。Android 17（API 37）起对
   target 37+ 的应用引入本地网络权限；未来提升 targetSdk 时需要重新评估
   `ACCESS_LOCAL_NETWORK` 与 `NsdManager` 的可见性配置。
 - **SAF 授权范围**：分享时读取的是系统授予的 content URI；极少数应用给的是
   短时授权，若上传耗时极长可能在授权失效后失败（会提示上传失败，不会静默丢数据）。
-- 未实现：断点续传、批量打包上传、搜索、内容自动过期、设备管理、通知、
-  二维码配对、自动跨网络选路、多 Hub 并存。
+- 未实现：断点续传、批量打包上传、搜索、内容自动过期、
+  通知、二维码配对、多 Hub 并存、Tailscale API/全网段自动发现。
+- 自动选路只在**单台已配对 Hub** 的已保存候选地址间进行（LAN 优先、其次 Tailscale），
+  首次异地访问仍需手填 Tailscale 地址（或使用已允许的 MagicDNS 名）；
+  切换地址不重放写操作，中断的传输需手动重试。
+- **本轮交付**：配对版APK已构建，`../dist/flowdrop-android-debug.apk`，102项JVM（含真实Hub双回环集成）与完整AndroidTest编译通过。仍无真机或真实LAN/Tailscale切换实测；结果记录见
+  [../docs/PAIRING.md](../docs/PAIRING.md) 与 [../docs/VERIFICATION.md](../docs/VERIFICATION.md)。
 
-## 8. 测试覆盖
+## 8. 当前测试与构建
 
-| 层 | 内容 | 数量 |
-|---|---|---|
-| JVM 单测 | `HubEndpoint` 解析与 origin、会话按 origin 隔离、Cookie 不跨源、`ApiClient` 对 MockWebServer 的完整协议（登录/CSRF/Origin/分页/流式上传/流式下载+SHA-256 校验/401/会话恢复/登出/413）、下载文件名与 MIME 归一化、局域网发现记录校验/去重/离线移除、发现控制器自动搜索一次/超时/停止/迟到回调 | 53 |
-| 设备测试 | `ACTION_SEND` / `ACTION_SEND_MULTIPLE` / ClipData 解析去重、登录页 Compose UI（含附近 Hub 列表、点选只填地址、搜索/停止、手动输入回归）、收件箱各状态 UI、真实 `NsdManager` 启停生命周期、**对运行中的真实 Hub 的契约**（登录→会话恢复→发文字→列表→上传→下载校验→删除→登出→401；WebSocket 收到 item.created） | 41（无 Hub 参数时 2 skip） |
+- JVM共102项（提供`FLOWDROP_LIVE_TEST_BIN`时含1项真实Hub集成）：本轮102通过、无跳过/失败。数据53、地址选择15、连接控制15及其它UI helper/下载测试均包含在总数内，不能重复相加。
+- 完整`compileDebugAndroidTestKotlin`通过，设备测试未执行；下文模拟器记录是配对前历史。
+- Debug APK 10209256字节，SHA-256 `d00a6808ec5f5190354d9d1191e6a4fb1dd23cda8aaed0ca1d62357531c4e5e4`；v2签名验证通过，minSdk26/targetSdk35。未安装到手机。
+- 当前LiveHub设备测试参数为`hubUrl`和`hubPairingCode`（120秒内使用一次）或专用测试设备的`hubDeviceToken`。设备测试会撤销该测试设备，不要使用日常设备令牌；本轮仅编译，未运行。真实双回环集成为JVM网络层+InMemory存储，不等于真机Keystore/UI。
+- 最新完整证据见[VERIFICATION §20](../docs/VERIFICATION.md)。
 
-### 8.1 设备测试的准确口径（避免误读）
+### 8.1 历史设备测试口径（配对改造前，仅保留证据）
 
 - 全部 41 项都跑在 **Android 模拟器**（Medium_Phone_API_36，API 36 / x86_64）上，
   **没有在真实手机上跑过任何一项**。下文“实时 Hub 契约”指的是“真实运行的 Hub
   进程 + 模拟器客户端”，不是真机。
 - 41 项里 `LiveHubContractTest` 的 2 项需要 Hub 参数；**不带参数时这 2 项会被
   JUnit `assumeTrue` 判为 skipped**，此时报告为 `tests=41 skipped=2`，实际执行 39 项。
+- **历史记录**：下面 B 的 `hubUser`/`hubPass` 参数属于密码登录时期的验证记录，
+  配对改造后不再适用（需改为配对码/设备令牌参数，本轮未重跑这些设备测试）。
 - 因此有两种合法跑法，数字不同但都是全绿：
 
 ```bash

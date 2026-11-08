@@ -29,10 +29,10 @@ import (
 	"github.com/coder/websocket"
 	"github.com/coder/websocket/wsjson"
 
-	"flowdrop/internal/auth"
 	"flowdrop/internal/config"
 	"flowdrop/internal/db"
 	"flowdrop/internal/events"
+	"flowdrop/internal/pairing"
 	"flowdrop/internal/storage"
 	"flowdrop/internal/store"
 )
@@ -44,6 +44,7 @@ type lanHarness struct {
 	t          *testing.T
 	baseURL    string // http://flowdrop.lan:<port>
 	dialAddr   string // 127.0.0.1:<port>
+	pairing    *pairing.Store
 	client     *http.Client
 	csrf       string
 	cookies    []*http.Cookie
@@ -77,18 +78,15 @@ func newLANHarness(t *testing.T, mutate ...func(*config.Config)) *lanHarness {
 	if err != nil {
 		t.Fatalf("storage: %v", err)
 	}
-	sess := auth.NewStore(conn, cfg.SessionTTL())
-	if err := sess.SetPassword("admin", testPassword); err != nil {
-		t.Fatalf("set password: %v", err)
-	}
+	pstore := pairing.NewStore(conn)
 
 	apiSrv := New(Deps{
-		Config:   cfg,
-		Sessions: sess,
-		Store:    store.New(conn),
-		Storage:  files,
-		Broker:   events.NewBroker(),
-		Logger:   slog.New(slog.NewTextHandler(io.Discard, nil)),
+		Config:  cfg,
+		Pairing: pstore,
+		Store:   store.New(conn),
+		Storage: files,
+		Broker:  events.NewBroker(),
+		Logger:  slog.New(slog.NewTextHandler(io.Discard, nil)),
 	})
 	ts := httptest.NewServer(apiSrv.Handler())
 	t.Cleanup(ts.Close)
@@ -101,6 +99,7 @@ func newLANHarness(t *testing.T, mutate ...func(*config.Config)) *lanHarness {
 		t:        t,
 		baseURL:  "http://" + lanTestHost + ":" + u.Port(),
 		dialAddr: u.Host,
+		pairing:  pstore,
 	}
 	jar, err := cookiejar.New(nil)
 	if err != nil {
@@ -143,27 +142,36 @@ func (h *lanHarness) postJSON(path, body string) *http.Response {
 	})
 }
 
-func (h *lanHarness) login() {
+// pair generates a local code and registers this client over plaintext LAN,
+// exactly like a native client's first-run flow.
+func (h *lanHarness) pair() {
 	h.t.Helper()
-	body := fmt.Sprintf(`{"username":"admin","password":%q}`, testPassword)
-	req, _ := http.NewRequest(http.MethodPost, h.baseURL+"/api/v1/auth/login", strings.NewReader(body))
+	code, err := h.pairing.CreateCode(time.Now())
+	if err != nil {
+		h.t.Fatalf("create pairing code: %v", err)
+	}
+	body := fmt.Sprintf(`{"code":%q,"device_name":"lan-client"}`, code.Code)
+	req, _ := http.NewRequest(http.MethodPost, h.baseURL+"/api/v1/auth/pair", strings.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Origin", h.baseURL)
 	res, err := h.client.Do(req)
 	if err != nil {
-		h.t.Fatalf("login: %v", err)
+		h.t.Fatalf("pair: %v", err)
 	}
 	defer res.Body.Close()
 	if res.StatusCode != http.StatusOK {
 		b, _ := io.ReadAll(res.Body)
-		h.t.Fatalf("login = %d body=%s", res.StatusCode, b)
+		h.t.Fatalf("pair = %d body=%s", res.StatusCode, b)
 	}
 	var out sessionResponse
 	if err := json.NewDecoder(res.Body).Decode(&out); err != nil {
-		h.t.Fatalf("decode login: %v", err)
+		h.t.Fatalf("decode pair: %v", err)
 	}
-	if out.CSRFToken == "" {
-		h.t.Fatal("login returned no CSRF token")
+	if !out.Authenticated || out.CSRFToken == "" || out.DeviceID == "" {
+		h.t.Fatalf("pair response = %+v", out)
+	}
+	if out.DeviceToken != "" {
+		h.t.Fatal("browser pairing returned a device token")
 	}
 	h.csrf = out.CSRFToken
 	h.cookies = res.Cookies()
@@ -220,7 +228,7 @@ func readErrorCode(t *testing.T, body []byte) string {
 }
 
 // TestHTTPLANNativeClientContract walks the frozen native-client flow over a
-// plaintext, non-loopback Host: login, session restore, text/upload/download,
+// plaintext, non-loopback Host: pairing, session restore, text/upload/download,
 // and logout. It also pins the cookie attributes HTTP mode depends on.
 func TestHTTPLANNativeClientContract(t *testing.T) {
 	h := newLANHarness(t)
@@ -249,13 +257,13 @@ func TestHTTPLANNativeClientContract(t *testing.T) {
 		t.Fatalf("anonymous write = %d, want 401", res.StatusCode)
 	}
 
-	h.login()
+	h.pair()
 
 	// Cookies must be usable over plaintext HTTP: no Secure attribute, but
 	// session cookie stays HttpOnly and both stay SameSite=Strict.
 	session := h.cookie(sessionCookie)
 	if session == nil {
-		t.Fatalf("no %s cookie in login response: %v", sessionCookie, h.setCookies)
+		t.Fatalf("no %s cookie in pairing response: %v", sessionCookie, h.setCookies)
 	}
 	if session.Secure {
 		t.Fatal("session cookie is Secure over plaintext HTTP; browsers will drop it")
@@ -268,7 +276,7 @@ func TestHTTPLANNativeClientContract(t *testing.T) {
 	}
 	csrf := h.cookie(csrfCookie)
 	if csrf == nil {
-		t.Fatalf("no %s cookie in login response", csrfCookie)
+		t.Fatalf("no %s cookie in pairing response", csrfCookie)
 	}
 	if csrf.Secure {
 		t.Fatal("CSRF cookie is Secure over plaintext HTTP")
@@ -277,7 +285,7 @@ func TestHTTPLANNativeClientContract(t *testing.T) {
 		t.Fatal("CSRF cookie must be readable by the client")
 	}
 	if csrf.Value != h.csrf {
-		t.Fatalf("CSRF cookie %q != login body token", csrf.Value)
+		t.Fatalf("CSRF cookie %q != pairing body token", csrf.Value)
 	}
 
 	// Session restore with the same cookie jar returns the same CSRF token.
@@ -398,7 +406,7 @@ func TestHTTPLANNativeClientContract(t *testing.T) {
 // writes, and the double-submit token is still mandatory.
 func TestHTTPLANRejectsCrossSiteAndMissingCSRF(t *testing.T) {
 	h := newLANHarness(t)
-	h.login()
+	h.pair()
 
 	textBody := `{"type":"text","text":"must not be created"}`
 	withJSON := func(r *http.Request) { r.Header.Set("Content-Type", "application/json") }
@@ -467,7 +475,7 @@ func TestHTTPLANRejectsCrossSiteAndMissingCSRF(t *testing.T) {
 // foreign-origin or anonymous handshakes are still refused.
 func TestHTTPLANWebSocketContract(t *testing.T) {
 	h := newLANHarness(t)
-	h.login()
+	h.pair()
 
 	wsURL := "ws" + strings.TrimPrefix(h.baseURL, "http") + "/api/v1/events"
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
@@ -593,7 +601,7 @@ func TestHTTPLANListenIPIsAnAllowedHost(t *testing.T) {
 // requires cookie_secure=false, it is never inferred from the Host header.
 func TestHTTPLANWithSecureCookiesIsUnusable(t *testing.T) {
 	h := newLANHarness(t, func(c *config.Config) { c.CookieSecure = true })
-	h.login()
+	h.pair()
 
 	session := h.cookie(sessionCookie)
 	if session == nil {

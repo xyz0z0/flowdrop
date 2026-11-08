@@ -39,19 +39,57 @@ data class SessionLimits(
     @SerialName("max_upload_bytes") val maxUploadBytes: Long = DEFAULT_MAX_UPLOAD_BYTES,
 )
 
+/**
+ * One stored address of a paired Hub, exactly as the frozen `hub` payload
+ * carries it (`kind` is `lan`, `tailscale` or `other`).
+ *
+ * This is the serialisable form of [RouteCandidate]: the selector's data class
+ * is intentionally not `@Serializable`, so the store keeps endpoints and the
+ * integration layer maps them for [HubRouteSelector].
+ */
+@Serializable
+data class HubEndpointInfo(
+    val url: String,
+    val kind: String = RouteCandidate.KIND_OTHER,
+) {
+    fun toRouteCandidate(): RouteCandidate = RouteCandidate(url = url, kind = kind)
+}
+
+@Serializable
+data class HubInfo(
+    val id: String = "",
+    val name: String = "",
+    val endpoints: List<HubEndpointInfo> = emptyList(),
+)
+
+/** Public response of GET /api/v1/health; `hub_id` is the credential-free identity. */
+@Serializable
+data class HealthInfo(
+    @SerialName("hub_id") val hubId: String = "",
+    val status: String = "",
+    val service: String = "",
+    val version: String = "",
+    val time: String = "",
+)
+
+@Serializable
+data class PairRequest(
+    val code: String,
+    @SerialName("device_name") val deviceName: String,
+    val native: Boolean = true,
+)
+
 @Serializable
 data class SessionInfo(
     val authenticated: Boolean = false,
     @SerialName("csrf_token") val csrfToken: String? = null,
-    val username: String? = null,
     @SerialName("expires_at") val expiresAt: Long? = null,
     val limits: SessionLimits? = null,
-)
-
-@Serializable
-data class LoginRequest(
-    val username: String,
-    val password: String,
+    val hub: HubInfo? = null,
+    @SerialName("device_id") val deviceId: String? = null,
+    // Only returned once, by POST /auth/pair with native=true. GET /auth/session
+    // deliberately never echoes it, so a missing value must not erase the stored one.
+    @SerialName("device_token") val deviceToken: String? = null,
 )
 
 @Serializable

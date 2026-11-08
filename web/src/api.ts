@@ -18,11 +18,28 @@ export interface Item {
   blob?: Blob;
 }
 
+/** How an endpoint address reaches the Hub; only reported, never inferred. */
+export type HubEndpointKind = 'lan' | 'tailscale' | 'other';
+
+export interface HubEndpointInfo {
+  url: string;
+  kind: HubEndpointKind;
+}
+
+/** Stable Hub identity plus its advertised addresses (see docs/PAIRING.md). */
+export interface HubInfo {
+  id: string;
+  name: string;
+  endpoints: HubEndpointInfo[];
+}
+
 export interface SessionInfo {
   authenticated: boolean;
   csrf_token?: string;
-  username?: string;
   expires_at?: number;
+  /** Present once a device is paired. */
+  device_id?: string;
+  hub?: HubInfo;
   /** Server-declared limits so the UI does not hardcode the default. */
   limits?: { max_upload_bytes: number };
 }
@@ -97,10 +114,15 @@ async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
 export const api = {
   session: () => request<SessionInfo>('/api/v1/auth/session'),
 
-  login: async (username: string, password: string): Promise<SessionInfo> => {
-    const info = await request<SessionInfo>('/api/v1/auth/login', {
+  /**
+   * Redeems a four-digit pairing code for this browser. The Web client never
+   * asks for a native device token: the session lives only in HttpOnly
+   * cookies, so nothing is written to localStorage/sessionStorage here.
+   */
+  pair: async (code: string, deviceName: string): Promise<SessionInfo> => {
+    const info = await request<SessionInfo>('/api/v1/auth/pair', {
       method: 'POST',
-      body: JSON.stringify({ username, password }),
+      body: JSON.stringify({ code, device_name: deviceName }),
     });
     if (info.csrf_token) setCsrfToken(info.csrf_token);
     return info;

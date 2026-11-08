@@ -395,16 +395,30 @@ button:disabled {
   padding: 0.5rem 1.1rem;
 }
 
-.drop-overlay {
-  position: absolute;
+/* 整个内容窗口的投放提示；拖动文件时才出现。 */
+.window-drop-overlay {
+  position: fixed;
   inset: 0;
+  z-index: 50;
   display: grid;
   place-items: center;
-  border-radius: var(--radius);
-  background: color-mix(in srgb, var(--accent) 14%, var(--surface));
-  color: var(--accent);
-  font-weight: 600;
+  padding: 1rem;
   pointer-events: none;
+  background: color-mix(in srgb, var(--accent) 10%, transparent);
+  outline: 2px dashed var(--accent);
+  outline-offset: -0.6rem;
+}
+.window-drop-card {
+  display: grid;
+  gap: 0.3rem;
+  justify-items: center;
+  text-align: center;
+  padding: 1.1rem 1.6rem;
+  border-radius: var(--radius);
+  border: 1px solid var(--border);
+  background: var(--surface);
+  color: var(--accent);
+  box-shadow: var(--shadow);
 }
 
 .uploads {

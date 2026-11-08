@@ -1,3 +1,8 @@
+// Full-server API tests: pairing authentication, items, uploads/downloads,
+// WebSocket broadcast and the Janitor. Every request authenticates with a
+// locally generated pairing code (see docs/PAIRING.md); no password route is
+// exercised here. Pairing-specific HTTP/WS edge cases live in
+// pairing_api_test.go.
 package api
 
 import (
@@ -26,14 +31,13 @@ import (
 	"flowdrop/internal/config"
 	"flowdrop/internal/db"
 	"flowdrop/internal/events"
+	"flowdrop/internal/pairing"
 	"flowdrop/internal/storage"
 	"flowdrop/internal/store"
 )
 
 // Item is the store's item shape; aliased here for terse test assertions.
 type Item = store.Item
-
-const testPassword = "correct horse battery staple"
 
 type harness struct {
 	t      *testing.T
@@ -44,9 +48,16 @@ type harness struct {
 	files  *storage.Store
 	broker *events.Broker
 	api    *Server
-	client *http.Client
-	csrf   string
-	// setCookies keeps the raw login response headers so tests can assert on
+	// pairing is the same store the server authenticates against, so tests can
+	// generate local codes and revoke devices the way the desktop does.
+	pairing *pairing.Store
+	client  *http.Client
+	csrf    string
+	// deviceID/deviceToken identify the device registered by the last pair()
+	// call; tests use them to assert the stored hash and revocation.
+	deviceID    string
+	deviceToken string
+	// setCookies keeps the raw pairing response headers so tests can assert on
 	// cookie attributes, which http.CookieJar drops.
 	setCookies []string
 }
@@ -76,18 +87,19 @@ func newHarness(t *testing.T, mutate ...func(*config.Config)) *harness {
 	if err != nil {
 		t.Fatalf("storage: %v", err)
 	}
-	sess := auth.NewStore(conn, cfg.SessionTTL())
-	if err := sess.SetPassword("admin", testPassword); err != nil {
-		t.Fatalf("set password: %v", err)
-	}
+	// The legacy password-session store is only the Janitor's expired-row
+	// cleaner (see janitor.go). It holds no credential, is never consulted for
+	// authentication, and is not populated here.
+	legacySessions := auth.NewStore(conn, cfg.SessionTTL())
+	pstore := pairing.NewStore(conn)
 
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 	broker := events.NewBroker()
 	st := store.New(conn)
 	apiSrv := New(Deps{
-		Config: cfg,
-
-		Sessions: sess,
+		Config:   cfg,
+		Sessions: legacySessions,
+		Pairing:  pstore,
 		Store:    st,
 		Storage:  files,
 		Broker:   broker,
@@ -102,42 +114,72 @@ func newHarness(t *testing.T, mutate ...func(*config.Config)) *harness {
 		t.Fatalf("jar: %v", err)
 	}
 	h := &harness{
-		t:      t,
-		srv:    ts,
-		cfg:    cfg,
-		db:     conn,
-		store:  st,
-		files:  files,
-		broker: broker,
-		api:    apiSrv,
-		client: &http.Client{Jar: jar, Timeout: 30 * time.Second},
+		t:       t,
+		srv:     ts,
+		cfg:     cfg,
+		db:      conn,
+		store:   st,
+		files:   files,
+		broker:  broker,
+		api:     apiSrv,
+		pairing: pstore,
+		client:  &http.Client{Jar: jar, Timeout: 30 * time.Second},
 	}
 	return h
 }
 
-func (h *harness) login() {
+// newCode generates a local pairing code the way the Hub UI does.
+func (h *harness) newCode() string {
 	h.t.Helper()
-	body := fmt.Sprintf(`{"username":"admin","password":%q}`, testPassword)
-	req, _ := http.NewRequest(http.MethodPost, h.srv.URL+"/api/v1/auth/login", strings.NewReader(body))
+	code, err := h.pairing.CreateCode(time.Now())
+	if err != nil {
+		h.t.Fatalf("create pairing code: %v", err)
+	}
+	return code.Code
+}
+
+// pair registers a browser device through POST /api/v1/auth/pair and keeps the
+// CSRF token, device identity and raw cookies for later assertions.
+func (h *harness) pair(mutate ...func(*http.Request)) {
+	h.t.Helper()
+	body := fmt.Sprintf(`{"code":%q,"device_name":"test-browser"}`, h.newCode())
+	req, _ := http.NewRequest(http.MethodPost, h.srv.URL+"/api/v1/auth/pair", strings.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Origin", h.srv.URL)
+	for _, m := range mutate {
+		m(req)
+	}
 	res, err := h.client.Do(req)
 	if err != nil {
-		h.t.Fatalf("login: %v", err)
+		h.t.Fatalf("pair: %v", err)
 	}
 	defer res.Body.Close()
 	if res.StatusCode != http.StatusOK {
-		h.t.Fatalf("login status = %d, want 200", res.StatusCode)
+		b, _ := io.ReadAll(res.Body)
+		h.t.Fatalf("pair status = %d body=%s", res.StatusCode, b)
 	}
 	var out sessionResponse
 	if err := json.NewDecoder(res.Body).Decode(&out); err != nil {
-		h.t.Fatalf("decode login: %v", err)
+		h.t.Fatalf("decode pair: %v", err)
+	}
+	if !out.Authenticated || out.CSRFToken == "" || out.DeviceID == "" {
+		h.t.Fatalf("pair response = %+v", out)
+	}
+	if out.DeviceToken != "" {
+		h.t.Fatal("browser pairing returned a device token")
 	}
 	h.csrf = out.CSRFToken
-	if h.csrf == "" {
-		h.t.Fatal("login returned no CSRF token")
-	}
+	h.deviceID = out.DeviceID
 	h.setCookies = res.Header.Values("Set-Cookie")
+	u, _ := url.Parse(h.srv.URL)
+	for _, c := range h.client.Jar.Cookies(u) {
+		if c.Name == sessionCookie {
+			h.deviceToken = c.Value
+		}
+	}
+	if h.deviceToken == "" {
+		h.t.Fatal("pairing issued no session cookie")
+	}
 }
 
 func (h *harness) do(method, path string, body io.Reader, mutate ...func(*http.Request)) *http.Response {
@@ -279,49 +321,92 @@ func TestHealthNeedsNoAuth(t *testing.T) {
 	}
 }
 
-func TestLoginWrongPasswordIsUniform(t *testing.T) {
+// TestPairWrongCodeIsUniform replaces the old wrong-password test: a wrong or
+// already-consumed code answers the same 401 pairing_invalid without setting
+// cookies, and one wrong guess does not burn a still-valid local code.
+func TestPairWrongCodeIsUniform(t *testing.T) {
 	h := newHarness(t)
-	res := h.do(http.MethodPost, "/api/v1/auth/login",
-		strings.NewReader(`{"username":"admin","password":"wrong"}`), func(r *http.Request) {
-			r.Header.Set("Content-Type", "application/json")
-		})
-	defer res.Body.Close()
+	plain := &http.Client{Timeout: 10 * time.Second}
+
+	code := h.newCode()
+	wrong := "0000"
+	if wrong == code {
+		wrong = "0001"
+	}
+	send := func(c string) (*http.Response, []byte) {
+		t.Helper()
+		body := fmt.Sprintf(`{"code":%q,"device_name":"phone"}`, c)
+		req, _ := http.NewRequest(http.MethodPost, h.srv.URL+"/api/v1/auth/pair", strings.NewReader(body))
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("Origin", h.srv.URL)
+		res, err := plain.Do(req)
+		if err != nil {
+			t.Fatalf("pair: %v", err)
+		}
+		raw, _ := io.ReadAll(res.Body)
+		res.Body.Close()
+		return res, raw
+	}
+
+	res, raw := send(wrong)
 	if res.StatusCode != http.StatusUnauthorized {
-		t.Fatalf("status = %d, want 401", res.StatusCode)
+		t.Fatalf("wrong code = %d body=%s, want 401", res.StatusCode, raw)
 	}
-	var body struct {
-		Error struct{ Code string } `json:"error"`
+	if got := decodePairError(t, raw); got != "pairing_invalid" {
+		t.Fatalf("wrong code error = %q", got)
 	}
-	json.NewDecoder(res.Body).Decode(&body)
-	if body.Error.Code != "invalid_credentials" {
-		t.Fatalf("error code = %q", body.Error.Code)
+	if bytes.Contains(raw, []byte(wrong)) || bytes.Contains(raw, []byte(code)) {
+		t.Fatalf("pairing error echoed a code: %s", raw)
+	}
+	if n := len(res.Header.Values("Set-Cookie")); n != 0 {
+		t.Fatalf("rejected pairing set %d cookies", n)
+	}
+
+	// The still-valid code survives the wrong attempt (a wrong guess counts
+	// toward the hub-wide lock but does not invalidate the code itself).
+	res, raw = send(code)
+	if res.StatusCode != http.StatusOK || len(res.Header.Values("Set-Cookie")) == 0 {
+		t.Fatalf("pair with live code = %d body=%s", res.StatusCode, raw)
+	}
+
+	// A consumed code is indistinguishable from a wrong one.
+	res, raw = send(code)
+	if res.StatusCode != http.StatusUnauthorized || decodePairError(t, raw) != "pairing_invalid" {
+		t.Fatalf("reused code = %d body=%s", res.StatusCode, raw)
 	}
 }
 
-func TestLoginRateLimited(t *testing.T) {
-	h := newHarness(t, func(c *config.Config) { c.LoginLimitPerMinute = 2 })
-	for i := 0; i < 2; i++ {
-		res := h.do(http.MethodPost, "/api/v1/auth/login",
-			strings.NewReader(`{"username":"admin","password":"wrong"}`), func(r *http.Request) {
-				r.Header.Set("Content-Type", "application/json")
-			})
+// TestAPIRateLimitUsesAPILimitPerMinute pins that the HTTP limit is the generic
+// API limiter (APILimitPerMinute), not the retired login limiter. Pairing's own
+// hub-wide five-attempt lock is reported as pairing_locked and is covered in
+// pairing_api_test.go, so it is deliberately not duplicated here.
+func TestAPIRateLimitUsesAPILimitPerMinute(t *testing.T) {
+	h := newHarness(t, func(c *config.Config) { c.APILimitPerMinute = 2 })
+	h.pair()
+
+	for i := 1; i <= 2; i++ {
+		res := h.do(http.MethodGet, "/api/v1/items?limit=1", nil)
 		res.Body.Close()
+		if res.StatusCode != http.StatusOK {
+			t.Fatalf("request %d = %d, want 200", i, res.StatusCode)
+		}
 	}
-	res := h.do(http.MethodPost, "/api/v1/auth/login",
-		strings.NewReader(`{"username":"admin","password":"wrong"}`), func(r *http.Request) {
-			r.Header.Set("Content-Type", "application/json")
-		})
-	defer res.Body.Close()
+	res := h.do(http.MethodGet, "/api/v1/items?limit=1", nil)
+	raw, _ := io.ReadAll(res.Body)
+	res.Body.Close()
 	if res.StatusCode != http.StatusTooManyRequests {
-		t.Fatalf("status = %d, want 429 after exceeding login limit", res.StatusCode)
+		t.Fatalf("request 3 = %d body=%s, want 429", res.StatusCode, raw)
+	}
+	if code := decodePairError(t, raw); code != "rate_limited" {
+		t.Fatalf("error code = %q, want rate_limited", code)
 	}
 }
 
 func TestSessionCookieIsHttpOnlyAndHashed(t *testing.T) {
 	h := newHarness(t)
-	h.login()
+	h.pair()
 
-	var token, sessionSetCookie string
+	var sessionSetCookie string
 	for _, raw := range h.setCookies {
 		if strings.HasPrefix(raw, sessionCookie+"=") {
 			sessionSetCookie = raw
@@ -335,30 +420,23 @@ func TestSessionCookieIsHttpOnlyAndHashed(t *testing.T) {
 			t.Errorf("session cookie missing %q: %s", attr, sessionSetCookie)
 		}
 	}
-	u, _ := url.Parse(h.srv.URL)
-	for _, c := range h.client.Jar.Cookies(u) {
-		if c.Name == sessionCookie {
-			token = c.Value
-		}
-	}
-	if token == "" {
-		t.Fatal("no session cookie")
-	}
+	// The cookie value is the device token; only its hash may be persisted.
+	token := h.deviceToken
 	var stored string
-	if err := h.db.QueryRow(`SELECT id FROM sessions LIMIT 1`).Scan(&stored); err != nil {
-		t.Fatalf("read session row: %v", err)
+	if err := h.db.QueryRow(`SELECT token_hash FROM paired_devices WHERE id = ?`, h.deviceID).Scan(&stored); err != nil {
+		t.Fatalf("read paired device row: %v", err)
 	}
 	if stored == token {
-		t.Fatal("plaintext token stored in database")
+		t.Fatal("plaintext device token stored in paired_devices")
 	}
 	if stored != auth.TokenID(token) {
-		t.Fatal("stored session id is not the SHA-256 of the token")
+		t.Fatal("stored token_hash is not the SHA-256 of the device token")
 	}
 }
 
 func TestCSRFRequiredForWrites(t *testing.T) {
 	h := newHarness(t)
-	h.login()
+	h.pair()
 
 	// Missing token.
 	res := h.do(http.MethodPost, "/api/v1/items/text",
@@ -396,22 +474,22 @@ func TestCSRFRequiredForWrites(t *testing.T) {
 
 func TestLogoutRequiresCSRF(t *testing.T) {
 	h := newHarness(t)
-	h.login()
+	h.pair()
 	res := h.do(http.MethodPost, "/api/v1/auth/logout", nil)
 	res.Body.Close()
 	if res.StatusCode != http.StatusForbidden {
 		t.Fatalf("logout without CSRF = %d, want 403", res.StatusCode)
 	}
 	var n int
-	h.db.QueryRow(`SELECT COUNT(*) FROM sessions`).Scan(&n)
+	h.db.QueryRow(`SELECT COUNT(*) FROM paired_devices WHERE revoked_at IS NULL`).Scan(&n)
 	if n != 1 {
-		t.Fatalf("session was revoked by a CSRF-less request (sessions=%d)", n)
+		t.Fatalf("device was revoked by a CSRF-less request (active devices=%d)", n)
 	}
 }
 
 func TestUnknownAPIPathDoesNotFallThroughToSPA(t *testing.T) {
 	h := newHarness(t)
-	h.login()
+	h.pair()
 	for _, path := range []string{"/api/v1/nope", "/api/v1/items/x/y/z", "/api/"} {
 		res := h.do(http.MethodGet, path, nil)
 		ct := res.Header.Get("Content-Type")
@@ -433,20 +511,38 @@ func TestHostAllowlistRejectsUnknownHost(t *testing.T) {
 	}
 }
 
-func TestLogoutRevokesSession(t *testing.T) {
+func TestLogoutRevokesPairedDevice(t *testing.T) {
 	h := newHarness(t)
-	h.login()
+	h.pair()
+	token := h.deviceToken
+
 	res := h.postJSON("/api/v1/auth/logout", "")
 	res.Body.Close()
 	if res.StatusCode != http.StatusNoContent {
 		t.Fatalf("logout = %d", res.StatusCode)
 	}
-	var n int
-	if err := h.db.QueryRow(`SELECT COUNT(*) FROM sessions`).Scan(&n); err != nil {
+
+	// Logout revokes instead of deleting: the row stays for local history and
+	// the stored hash can no longer authenticate. Device tokens have no expiry
+	// of their own (only the browser cookie has a lifetime); revocation is what
+	// ends them.
+	var active, total int
+	if err := h.db.QueryRow(`SELECT COUNT(*) FROM paired_devices WHERE revoked_at IS NULL`).Scan(&active); err != nil {
 		t.Fatal(err)
 	}
-	if n != 0 {
-		t.Fatalf("sessions remaining = %d, want 0", n)
+	if err := h.db.QueryRow(`SELECT COUNT(*) FROM paired_devices`).Scan(&total); err != nil {
+		t.Fatal(err)
+	}
+	if active != 0 || total != 1 {
+		t.Fatalf("active=%d total=%d after logout, want 0/1", active, total)
+	}
+	if _, err := h.pairing.LookupToken(token, time.Now()); err == nil {
+		t.Fatal("revoked device token still authenticates")
+	}
+	res = h.do(http.MethodGet, "/api/v1/items", nil)
+	res.Body.Close()
+	if res.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("items after logout = %d, want 401", res.StatusCode)
 	}
 }
 
@@ -454,7 +550,7 @@ func TestLogoutRevokesSession(t *testing.T) {
 
 func TestTextAndLinkValidation(t *testing.T) {
 	h := newHarness(t)
-	h.login()
+	h.pair()
 
 	if it := h.createText("text", "hello 世界", "kubuntu"); it.Type != "text" || it.Text != "hello 世界" {
 		t.Fatalf("unexpected item: %+v", it)
@@ -481,7 +577,7 @@ func TestTextAndLinkValidation(t *testing.T) {
 
 func TestPaginationIsStableAndDescending(t *testing.T) {
 	h := newHarness(t)
-	h.login()
+	h.pair()
 
 	var want []string
 	for i := 0; i < 12; i++ {
@@ -536,7 +632,7 @@ func TestPaginationIsStableAndDescending(t *testing.T) {
 
 func TestInvalidCursorAndLimit(t *testing.T) {
 	h := newHarness(t)
-	h.login()
+	h.pair()
 	for _, q := range []string{"?cursor=!!!!", "?limit=0", "?limit=101", "?limit=abc"} {
 		res := h.do(http.MethodGet, "/api/v1/items"+q, nil)
 		res.Body.Close()
@@ -550,7 +646,7 @@ func TestInvalidCursorAndLimit(t *testing.T) {
 
 func TestUploadImageIsPreviewableAndDownloadable(t *testing.T) {
 	h := newHarness(t)
-	h.login()
+	h.pair()
 
 	png := []byte("\x89PNG\r\n\x1a\n" + strings.Repeat("\x00", 40))
 	res, body := h.upload("shot.png", png, "pixel")
@@ -595,7 +691,7 @@ func TestUploadImageIsPreviewableAndDownloadable(t *testing.T) {
 
 func TestUploadActiveContentIsForcedAttachment(t *testing.T) {
 	h := newHarness(t)
-	h.login()
+	h.pair()
 
 	cases := []struct{ name, body string }{
 		{"evil.html", "<html><script>alert(1)</script></html>"},
@@ -623,7 +719,7 @@ func TestUploadActiveContentIsForcedAttachment(t *testing.T) {
 
 func TestUploadRejectsOversizeWithoutArtifact(t *testing.T) {
 	h := newHarness(t)
-	h.login()
+	h.pair()
 
 	big := bytes.Repeat([]byte("A"), int(h.cfg.MaxUploadBytes)+1024)
 	res, body := h.upload("big.bin", big, "")
@@ -645,7 +741,7 @@ func TestUploadRejectsOversizeWithoutArtifact(t *testing.T) {
 
 func TestUploadFilenameCannotEscapeStorage(t *testing.T) {
 	h := newHarness(t)
-	h.login()
+	h.pair()
 
 	res, body := h.upload("../../../etc/passwd", []byte("evil"), "")
 	if res.StatusCode != http.StatusCreated {
@@ -670,7 +766,7 @@ func TestUploadFilenameCannotEscapeStorage(t *testing.T) {
 
 func TestUploadExactlyAtLimitSucceeds(t *testing.T) {
 	h := newHarness(t)
-	h.login()
+	h.pair()
 
 	// A file exactly at the configured limit must be accepted: the multipart
 	// framing overhead allowance must not turn "at the limit" into "over".
@@ -693,7 +789,7 @@ func TestUploadExactlyAtLimitSucceeds(t *testing.T) {
 
 func TestEmptyFileIsAllowed(t *testing.T) {
 	h := newHarness(t)
-	h.login()
+	h.pair()
 	res, body := h.upload("empty.txt", nil, "")
 	if res.StatusCode != http.StatusCreated {
 		t.Fatalf("upload = %d body=%s", res.StatusCode, body)
@@ -709,9 +805,9 @@ func TestEmptyFileIsAllowed(t *testing.T) {
 	}
 }
 
-func TestDownloadRequiresSessionEvenWithKnownID(t *testing.T) {
+func TestDownloadRequiresPairingEvenWithKnownID(t *testing.T) {
 	h := newHarness(t)
-	h.login()
+	h.pair()
 	res, body := h.upload("secret.txt", []byte("classified"), "")
 	if res.StatusCode != http.StatusCreated {
 		t.Fatalf("upload = %d", res.StatusCode)
@@ -730,20 +826,20 @@ func TestDownloadRequiresSessionEvenWithKnownID(t *testing.T) {
 		t.Fatalf("anonymous download = %d, want 401", ares.StatusCode)
 	}
 
-	// A deleted session must also fail.
-	if _, err := h.db.Exec(`DELETE FROM sessions`); err != nil {
-		t.Fatal(err)
+	// A revoked device must also fail, even while its cookie is still present.
+	if err := h.pairing.RevokeDevice(h.deviceID); err != nil {
+		t.Fatalf("revoke device: %v", err)
 	}
 	dres := h.do(http.MethodGet, "/api/v1/items/"+it.ID+"/download", nil)
 	dres.Body.Close()
 	if dres.StatusCode != http.StatusUnauthorized {
-		t.Fatalf("revoked-session download = %d, want 401", dres.StatusCode)
+		t.Fatalf("revoked-device download = %d, want 401", dres.StatusCode)
 	}
 }
 
 func TestDeleteRemovesItemAndFile(t *testing.T) {
 	h := newHarness(t)
-	h.login()
+	h.pair()
 	res, body := h.upload("photo.png", []byte("\x89PNG\r\n\x1a\nabcdef"), "")
 	if res.StatusCode != http.StatusCreated {
 		t.Fatalf("upload = %d", res.StatusCode)
@@ -805,7 +901,7 @@ func TestWebSocketRequiresAuth(t *testing.T) {
 
 func TestWebSocketRejectsForeignOrigin(t *testing.T) {
 	h := newHarness(t)
-	h.login()
+	h.pair()
 	wsURL := "ws" + strings.TrimPrefix(h.srv.URL, "http") + "/api/v1/events"
 
 	var cookieHeader string
@@ -832,7 +928,7 @@ func TestWebSocketRejectsForeignOrigin(t *testing.T) {
 
 func TestWebSocketBroadcastsCreateAndDelete(t *testing.T) {
 	h := newHarness(t)
-	h.login()
+	h.pair()
 	wsURL := "ws" + strings.TrimPrefix(h.srv.URL, "http") + "/api/v1/events"
 
 	var cookieHeader string
@@ -889,7 +985,7 @@ func TestWebSocketBroadcastsCreateAndDelete(t *testing.T) {
 
 func TestItemsSurviveRestart(t *testing.T) {
 	h := newHarness(t)
-	h.login()
+	h.pair()
 	it := h.createText("text", "persist me", "kubuntu")
 	_, body := h.upload("keep.txt", []byte("payload"), "")
 	uploaded := decodeItem(t, body)
@@ -936,7 +1032,7 @@ func TestItemsSurviveRestart(t *testing.T) {
 
 func TestJanitorRemovesOrphansAndStaleTemp(t *testing.T) {
 	h := newHarness(t)
-	h.login()
+	h.pair()
 
 	// A blob row whose item was deleted out from under it (simulating a crash
 	// between item delete and blob delete).
@@ -944,8 +1040,23 @@ func TestJanitorRemovesOrphansAndStaleTemp(t *testing.T) {
 	key := strings.Repeat("ab", 16)
 	h.db.Exec(`INSERT INTO blobs(id, original_name, content_type, size_bytes, sha256, storage_key, created_at)
 		VALUES('orphanblob','x.txt','text/plain',3,'deadbeef',?,?)`, key, now)
-	h.db.Exec(`INSERT INTO sessions(id, user_id, created_at, last_seen_at, expires_at, user_agent)
-		SELECT 'expiredsession', id, 0, 0, 1, '' FROM admin_users LIMIT 1`)
+	// Legacy password sessions are only cleaned up by the Janitor. This fixture
+	// is explicit historical-table cleanup (not authentication): one expired row
+	// that must go and one unexpired row that must stay.
+	if _, err := h.db.Exec(`INSERT INTO admin_users(id, username, password_hash, created_at, updated_at)
+		VALUES('legacyuser','legacy','unused',0,0)`); err != nil {
+		t.Fatalf("insert legacy admin fixture: %v", err)
+	}
+	if _, err := h.db.Exec(`INSERT INTO sessions(id, user_id, created_at, last_seen_at, expires_at, user_agent)
+		VALUES('expiredsession','legacyuser',0,0,1,''),
+		      ('livesession','legacyuser',0,0,?, '')`, time.Now().Add(time.Hour).UnixMilli()); err != nil {
+		t.Fatalf("insert legacy session fixture: %v", err)
+	}
+	var legacyBefore int
+	h.db.QueryRow(`SELECT COUNT(*) FROM sessions`).Scan(&legacyBefore)
+	if legacyBefore != 2 {
+		t.Fatalf("legacy session fixture = %d rows, want 2", legacyBefore)
+	}
 
 	// A stale temp file and an in-flight one.
 	tmpDir := filepath.Join(h.cfg.DataDir, "tmp")
@@ -978,7 +1089,13 @@ func TestJanitorRemovesOrphansAndStaleTemp(t *testing.T) {
 	var sessions int
 	h.db.QueryRow(`SELECT COUNT(*) FROM sessions WHERE id='expiredsession'`).Scan(&sessions)
 	if sessions != 0 {
-		t.Fatal("expired session was not removed")
+		t.Fatal("expired legacy session was not removed")
+	}
+	if err := h.db.QueryRow(`SELECT COUNT(*) FROM sessions WHERE id='livesession'`).Scan(&sessions); err != nil {
+		t.Fatal(err)
+	}
+	if sessions != 1 {
+		t.Fatal("janitor removed an unexpired legacy session")
 	}
 	if _, err := os.Stat(stale); !os.IsNotExist(err) {
 		t.Fatal("stale temp file was not removed")
@@ -993,7 +1110,7 @@ func TestJanitorRemovesOrphansAndStaleTemp(t *testing.T) {
 
 func TestJanitorRemovesUnreferencedBlobFiles(t *testing.T) {
 	h := newHarness(t)
-	h.login()
+	h.pair()
 	// Write a file to blob storage with no DB row at all.
 	key := strings.Repeat("cd", 16)
 	if _, err := h.files.WriteReader(strings.NewReader("ghost"), key); err != nil {
@@ -1020,7 +1137,7 @@ func TestJanitorRemovesUnreferencedBlobFiles(t *testing.T) {
 
 func TestJanitorKeepsCommittedBlobs(t *testing.T) {
 	h := newHarness(t)
-	h.login()
+	h.pair()
 	res, body := h.upload("keep.bin", []byte("keep me"), "")
 	if res.StatusCode != http.StatusCreated {
 		t.Fatalf("upload = %d", res.StatusCode)

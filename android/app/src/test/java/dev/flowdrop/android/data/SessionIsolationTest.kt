@@ -21,9 +21,12 @@ class SessionIsolationTest {
             StoredSession(
                 baseUrl = first.baseUrl.toString(),
                 origin = first.origin,
-                username = "admin",
                 csrfToken = "token-a",
                 cookies = listOf(StoredCookie("flowdrop_session", "secret-a", "192.168.1.50")),
+                hubId = "hub-1",
+                deviceId = "dev-1",
+                deviceToken = "tok-1",
+                candidates = listOf(HubEndpointInfo(first.origin, RouteCandidate.KIND_LAN)),
             ),
         )
 
@@ -33,6 +36,8 @@ class SessionIsolationTest {
         assertNull("session must be cleared when the origin changes", store.load()?.cookies?.takeIf { it.isNotEmpty() })
         assertNull(store.loadFor(first.origin))
         assertEquals(second.origin, store.load()?.origin)
+        assertEquals("a manually entered Hub drops the pairing too", "", store.load()?.hubId)
+        assertEquals("", store.load()?.deviceToken)
     }
 
     @Test
@@ -46,15 +51,27 @@ class SessionIsolationTest {
     }
 
     @Test
-    fun `stored session never contains a password`() {
+    fun `stored session never contains a password or a pairing code`() {
         val storage = InMemorySecureStorage()
         val store = SessionStore(storage)
         val ep = endpoint("http://hub.lan:8080")
         store.switchTo(ep)
-        store.save(StoredSession(ep.baseUrl.toString(), ep.origin, username = "admin", csrfToken = "t"))
+        store.save(
+            StoredSession(
+                baseUrl = ep.baseUrl.toString(),
+                origin = ep.origin,
+                csrfToken = "t",
+                hubId = "hub-1",
+                deviceId = "dev-1",
+                deviceToken = "tok-1",
+                candidates = listOf(HubEndpointInfo(ep.origin, RouteCandidate.KIND_LAN)),
+            ),
+        )
         val raw = storage.read().orEmpty()
         assertTrue(raw.contains("csrfToken"))
+        assertTrue("the device token is the only durable credential", raw.contains("deviceToken"))
         assertTrue("password must not be a field", !raw.contains("password", ignoreCase = true))
+        assertTrue("the pairing code must never be stored", !raw.contains("\"code\""))
     }
 
     @Test

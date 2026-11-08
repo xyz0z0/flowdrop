@@ -32,7 +32,6 @@ import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.input.KeyboardType
-import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.unit.dp
 import dev.flowdrop.android.R
 import dev.flowdrop.android.discovery.DiscoveredHub
@@ -40,22 +39,39 @@ import dev.flowdrop.android.discovery.DiscoveryState
 import dev.flowdrop.android.discovery.DiscoveryStatus
 
 /**
- * Login form: Hub address, username, password.
+ * Keeps only the digits of a pairing code, at most four.
  *
- * The address and username are remembered; the password is not. Submitting
- * clears the password field as soon as the attempt finishes.
+ * The value stays a String on purpose: the code is shown on the computer with
+ * its leading zeros, so "0429" must not become 429.
+ */
+internal fun sanitizePairingCode(raw: String): String =
+    raw.filter { it in '0'..'9' }.take(PAIRING_CODE_LENGTH)
+
+/** A code can be submitted only when it is exactly four digits. */
+internal fun isPairingCodeComplete(code: String): Boolean =
+    code.length == PAIRING_CODE_LENGTH && code.all { it in '0'..'9' }
+
+internal const val PAIRING_CODE_LENGTH = 4
+
+/**
+ * Pairing form: Hub address, four-digit pairing code and nearby Hub discovery.
+ *
+ * When the app already remembers a paired computer, that computer is offered
+ * as a plain reconnect (no code needed) and the code section pairs another
+ * one. Submitting never clears the code locally: the ViewModel owns that.
  */
 @Composable
 fun LoginScreen(
     hubAddress: String,
-    username: String,
-    password: String,
+    pairingCode: String,
+    hasStoredPairing: Boolean,
+    hubName: String,
     loggingIn: Boolean,
     error: String?,
     onHubChange: (String) -> Unit,
-    onUsernameChange: (String) -> Unit,
-    onPasswordChange: (String) -> Unit,
+    onPairingCodeChange: (String) -> Unit,
     onSubmit: () -> Unit,
+    onRetryConnection: () -> Unit,
     discovery: DiscoveryState = DiscoveryState(),
     onSearchDiscovery: () -> Unit = {},
     onRefreshDiscovery: () -> Unit = {},
@@ -81,6 +97,15 @@ fun LoginScreen(
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
             Spacer(Modifier.height(20.dp))
+
+            if (hasStoredPairing) {
+                StoredPairingSection(
+                    hubName = hubName,
+                    loggingIn = loggingIn,
+                    onRetryConnection = onRetryConnection,
+                )
+                Spacer(Modifier.height(20.dp))
+            }
 
             NearbyHubsSection(
                 discovery = discovery,
@@ -109,30 +134,21 @@ fun LoginScreen(
             Spacer(Modifier.height(12.dp))
 
             OutlinedTextField(
-                value = username,
-                onValueChange = onUsernameChange,
-                label = { Text(stringResource(R.string.label_username)) },
+                value = pairingCode,
+                onValueChange = { onPairingCodeChange(sanitizePairingCode(it)) },
+                label = { Text(stringResource(R.string.label_pairing_code)) },
+                placeholder = { Text(stringResource(R.string.pairing_code_hint)) },
                 singleLine = true,
                 enabled = !loggingIn,
-                keyboardOptions = KeyboardOptions(imeAction = ImeAction.Next),
-                modifier = Modifier.fillMaxWidth(),
-            )
-            Spacer(Modifier.height(12.dp))
-
-            OutlinedTextField(
-                value = password,
-                onValueChange = onPasswordChange,
-                label = { Text(stringResource(R.string.label_password)) },
-                singleLine = true,
-                enabled = !loggingIn,
-                visualTransformation = PasswordVisualTransformation(),
                 keyboardOptions = KeyboardOptions(
-                    keyboardType = KeyboardType.Password,
+                    keyboardType = KeyboardType.Number,
                     imeAction = ImeAction.Done,
                 ),
                 keyboardActions = KeyboardActions(onDone = {
-                    focus.clearFocus()
-                    onSubmit()
+                    if (isPairingCodeComplete(pairingCode) && hubAddress.isNotBlank()) {
+                        focus.clearFocus()
+                        onSubmit()
+                    }
                 }),
                 modifier = Modifier.fillMaxWidth(),
             )
@@ -152,7 +168,9 @@ fun LoginScreen(
                     focus.clearFocus()
                     onSubmit()
                 },
-                enabled = !loggingIn && password.isNotEmpty() && hubAddress.isNotBlank(),
+                enabled = !loggingIn &&
+                    isPairingCodeComplete(pairingCode) &&
+                    hubAddress.isNotBlank(),
                 modifier = Modifier.fillMaxWidth(),
             ) {
                 if (loggingIn) {
@@ -162,13 +180,19 @@ fun LoginScreen(
                         color = MaterialTheme.colorScheme.onPrimary,
                     )
                     Spacer(Modifier.height(0.dp))
-                    Text("  " + stringResource(R.string.login_busy))
+                    Text("  " + stringResource(R.string.pairing_busy))
                 } else {
-                    Text(stringResource(R.string.action_login))
+                    Text(stringResource(R.string.action_pair))
                 }
             }
 
             Spacer(Modifier.height(20.dp))
+            Text(
+                stringResource(R.string.pairing_help),
+                style = MaterialTheme.typography.labelMedium,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            Spacer(Modifier.height(6.dp))
             Text(
                 stringResource(R.string.login_http_warning),
                 style = MaterialTheme.typography.labelMedium,
@@ -176,13 +200,7 @@ fun LoginScreen(
             )
             Spacer(Modifier.height(6.dp))
             Text(
-                stringResource(R.string.clear_password_hint),
-                style = MaterialTheme.typography.labelMedium,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-            )
-            Spacer(Modifier.height(6.dp))
-            Text(
-                stringResource(R.string.address_change_clears_session),
+                stringResource(R.string.address_change_needs_pairing),
                 style = MaterialTheme.typography.labelMedium,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
@@ -190,10 +208,73 @@ fun LoginScreen(
     }
 }
 
+/**
+ * Remembers the computer this device was paired with. Reconnecting reuses the
+ * saved pairing, so an offline Hub never forces the user to read a new code.
+ */
+@Composable
+private fun StoredPairingSection(
+    hubName: String,
+    loggingIn: Boolean,
+    onRetryConnection: () -> Unit,
+) {
+    Card(
+        modifier = Modifier.fillMaxWidth(),
+        colors = CardDefaults.cardColors(
+            containerColor = MaterialTheme.colorScheme.surfaceVariant,
+        ),
+    ) {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 12.dp, vertical = 10.dp),
+        ) {
+            Text(
+                stringResource(R.string.stored_pairing_title),
+                style = MaterialTheme.typography.labelMedium,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            Spacer(Modifier.height(4.dp))
+            Text(
+                hubName.ifBlank { stringResource(R.string.stored_pairing_unnamed) },
+                style = MaterialTheme.typography.bodyLarge,
+            )
+            Spacer(Modifier.height(6.dp))
+            Text(
+                stringResource(R.string.stored_pairing_hint),
+                style = MaterialTheme.typography.labelMedium,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            Spacer(Modifier.height(8.dp))
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Button(onClick = onRetryConnection, enabled = !loggingIn) {
+                    if (loggingIn) {
+                        CircularProgressIndicator(
+                            modifier = Modifier.size(16.dp),
+                            strokeWidth = 2.dp,
+                            color = MaterialTheme.colorScheme.onPrimary,
+                        )
+                        Spacer(Modifier.width(8.dp))
+                        Text(stringResource(R.string.pairing_busy))
+                    } else {
+                        Text(stringResource(R.string.action_reconnect))
+                    }
+                }
+                Spacer(Modifier.width(12.dp))
+                Text(
+                    stringResource(R.string.stored_pairing_another),
+                    style = MaterialTheme.typography.labelMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+        }
+    }
+}
+
 
 /**
  * Nearby Hub list: address hints only. Tapping a row calls [onSelect], which
- * fills the address field; it never logs in by itself.
+ * fills the address field; it never pairs by itself.
  */
 @Composable
 private fun NearbyHubsSection(

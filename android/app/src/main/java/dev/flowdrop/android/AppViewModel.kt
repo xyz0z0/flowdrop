@@ -3,13 +3,20 @@ package dev.flowdrop.android
 import android.net.Uri
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
+import dev.flowdrop.android.connection.ConnectResult
+import dev.flowdrop.android.connection.ConnectTrigger
+import dev.flowdrop.android.connection.PairedConnector
+import dev.flowdrop.android.connection.SavedPairing
 import dev.flowdrop.android.data.ApiClient
 import dev.flowdrop.android.data.ApiException
 import dev.flowdrop.android.data.ConnState
 import dev.flowdrop.android.data.DEFAULT_MAX_UPLOAD_BYTES
 import dev.flowdrop.android.data.EventStream
 import dev.flowdrop.android.data.HubEndpoint
+import dev.flowdrop.android.data.HubProbe
+import dev.flowdrop.android.data.HubRouteSelector
 import dev.flowdrop.android.data.Item
+import dev.flowdrop.android.data.RouteCandidate
 import dev.flowdrop.android.data.UploadSource
 import dev.flowdrop.android.discovery.DiscoveredHub
 import dev.flowdrop.android.discovery.DiscoveryController
@@ -28,6 +35,7 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.io.File
 import java.util.UUID
+import java.util.concurrent.ConcurrentHashMap
 
 enum class Phase { BOOTING, LOGIN, INBOX }
 
@@ -62,8 +70,11 @@ data class Toast(val id: Long, val text: String, val error: Boolean = false)
 data class UiState(
     val phase: Phase = Phase.BOOTING,
     val hubAddress: String = "",
-    val username: String = "admin",
-    val password: String = "",
+    /** Four-digit pairing code while typing; cleared on submit, never stored. */
+    val pairingCode: String = "",
+    /** A Hub/device pairing exists in the Keystore store (reconnect, no code). */
+    val hasStoredPairing: Boolean = false,
+    val hubName: String = "",
     val loggingIn: Boolean = false,
     val loginError: String? = null,
     val deviceName: String = "Android",
@@ -85,12 +96,17 @@ data class UiState(
  * Owns all session-scoped state and every network call.
  *
  * Rules encoded here:
- * - the password lives only in the transient [UiState] while typing and is
- *   cleared immediately after a login attempt (never persisted);
- * - switching Hub addresses clears the previous session first;
- * - any 401 tears the session down and returns to the login screen;
- * - on background the socket is closed; on foreground the list is re-fetched
- *   and the socket restarted, because Android gives no background guarantee.
+ * - the pairing code lives only in [UiState] while typing, is cleared on submit
+ *   and is never persisted; the device token never leaves the Keystore store
+ *   except as a one-shot `Authorization: Bearer` during session restore;
+ * - a paired device reconnects by probing its saved LAN/Tailscale candidates
+ *   (see [PairedConnector] and [HubRouteSelector]) instead of asking again;
+ * - an unreachable paired Hub keeps the pairing (offline must not force a
+ *   re-pair), while an explicit revocation clears it and returns to pairing;
+ * - switching address cancels in-flight transfers instead of replaying them;
+ * - on background the socket and discovery stop; on foreground the list is
+ *   re-fetched and the socket restarted, because Android gives no background
+ *   guarantee.
  */
 class AppViewModel(
     private val app: FlowDropApp,
@@ -103,15 +119,15 @@ class AppViewModel(
     private val _state = MutableStateFlow(
         UiState(
             hubAddress = prefs.hubAddress,
-            username = prefs.username,
+            hubName = prefs.hubName,
             deviceName = prefs.deviceName,
         ),
     )
     val state: StateFlow<UiState> = _state.asStateFlow()
 
     /**
-     * Foreground-only nearby-Hub search. It never touches the session or the
-     * password: a discovered row only fills the address field.
+     * Foreground-only nearby-Hub search. It never touches the session or a
+     * credential: a discovered row only fills the address field.
      */
     private val discovery = DiscoveryController(
         driver = container.newDiscoveryDriver(),
@@ -121,12 +137,43 @@ class AppViewModel(
 
     private var client: ApiClient? = null
     private var eventStream: EventStream? = null
-    private var uploadJobs = mutableMapOf<String, Job>()
-    private var downloadJobs = mutableMapOf<String, Job>()
+
+    // Registered/removed by each transfer's own coroutine and cleared from Main,
+    // so they must be thread-safe and are never iterated live (see cancelTransfers).
+    private val uploadJobs = ConcurrentHashMap<String, Job>()
+    private val downloadJobs = ConcurrentHashMap<String, Job>()
     private var pendingShare: SharePayload? = null
     private val images = dev.flowdrop.android.ui.AuthenticatedImageStore { client }
 
     val imageStore: dev.flowdrop.android.ui.AuthenticatedImageStore get() = images
+
+    /** False while the Activity is backgrounded: no probing, no reselection. */
+    private var foreground = true
+
+    private val routeSelector = HubRouteSelector(probe = { candidate -> HubProbe.hubId(candidate) })
+
+    /**
+     * Single-flight reconnect state machine. The actual probe/bind work is in
+     * [pickPairedCandidate] and [bindPaired]; keeping the loop here small and
+     * pure (except for those two lambdas) is what makes it unit testable.
+     */
+    private val connector = PairedConnector(
+        scope = viewModelScope,
+        pairing = {
+            val stored = sessionStore.load()
+            if (stored == null || stored.hubId.isBlank()) {
+                null
+            } else {
+                SavedPairing(
+                    hubId = stored.hubId,
+                    candidates = stored.candidates.map { it.toRouteCandidate() },
+                )
+            }
+        },
+        pick = { saved -> pickPairedCandidate(saved) },
+        bind = { candidate -> bindPaired(candidate) },
+        isForeground = { foreground },
+    )
 
     init {
         restoreSession()
@@ -134,59 +181,301 @@ class AppViewModel(
 
     // ---------- session lifecycle ----------
 
+    /**
+     * Startup. A paired device reconnects silently through its saved LAN and
+     * Tailscale addresses; an unpaired one gets discovery plus the pairing form.
+     */
     private fun restoreSession() {
-        viewModelScope.launch {
-            val stored = sessionStore.load()
-            val address = stored?.baseUrl?.takeIf { it.isNotBlank() } ?: prefs.hubAddress
-            val endpoint = HubEndpoint.parse(address)
-            if (endpoint == null || stored == null) {
-                _state.update {
-                    it.copy(phase = Phase.LOGIN, hubAddress = address, username = prefs.username)
-                }
-                deliverPendingShare()
-                return@launch
-            }
-            _state.update { it.copy(hubAddress = endpoint.origin) }
-            val api = activate(endpoint)
-            try {
-                val info = api.session()
-                if (info.authenticated) {
-                    api.persistSession(stored.username, info)
-                    enterInbox()
-                } else {
-                    _state.update { it.copy(phase = Phase.LOGIN) }
-                    deliverPendingShare()
-                }
-            } catch (e: ApiException) {
-                _state.update {
-                    it.copy(
-                        phase = Phase.LOGIN,
-                        loginError = if (e.isNetwork) app.getString(R.string.error_network) else null,
-                    )
-                }
-            } catch (e: Exception) {
-                _state.update { it.copy(phase = Phase.LOGIN) }
-            }
+        val stored = sessionStore.load()
+        val paired = stored != null && stored.hubId.isNotBlank()
+        val address = stored?.baseUrl?.takeIf { it.isNotBlank() } ?: prefs.hubAddress
+        _state.update {
+            it.copy(
+                hubAddress = address,
+                hubName = prefs.hubName,
+                hasStoredPairing = paired,
+                phase = if (paired) Phase.BOOTING else Phase.LOGIN,
+            )
         }
+        if (!paired) {
+            deliverPendingShare()
+            return
+        }
+        viewModelScope.launch { handleConnectResult(connector.connect(ConnectTrigger.STARTUP)) }
     }
 
     fun updateHubAddress(value: String) {
         _state.update { it.copy(hubAddress = value, loginError = null) }
     }
 
-    fun updateUsername(value: String) {
-        _state.update { it.copy(username = value, loginError = null) }
+    /** Four-digit pairing code: digits only, leading zeros preserved. */
+    fun updatePairingCode(value: String) {
+        val digits = value.filter { it in '0'..'9' }.take(PAIRING_CODE_LENGTH)
+        _state.update { it.copy(pairingCode = digits, loginError = null) }
     }
 
-    fun updatePassword(value: String) {
-        _state.update { it.copy(password = value, loginError = null) }
+    /**
+     * Pairs this device with the Hub at [UiState.hubAddress] using the code
+     * shown on the Hub's settings screen.
+     *
+     * The code is cleared the moment it is submitted and is never stored; the
+     * device token returned once by the Hub is persisted by [ApiClient.pair]
+     * into the Keystore-backed session record.
+     */
+    fun pair() {
+        val snapshot = _state.value
+        if (snapshot.loggingIn) return
+        val endpoint = HubEndpoint.parse(snapshot.hubAddress)
+        if (endpoint == null) {
+            _state.update { it.copy(loginError = app.getString(R.string.error_bad_address)) }
+            return
+        }
+        val code = snapshot.pairingCode
+        if (code.length != PAIRING_CODE_LENGTH) {
+            _state.update { it.copy(loginError = "请输入 4 位配对码") }
+            return
+        }
+        _state.update { it.copy(pairingCode = "", loggingIn = true, loginError = null) }
+        viewModelScope.launch {
+            val api = container.activate(endpoint) { onUnauthorized() }
+            try {
+                val info = withContext(Dispatchers.IO) { api.pair(code, prefs.deviceName) }
+                client = api
+                val hubName = info.hub?.name.orEmpty()
+                prefs.hubAddress = endpoint.origin
+                prefs.hubName = hubName
+                _state.update {
+                    it.copy(
+                        hubAddress = endpoint.origin,
+                        hubName = hubName,
+                        hasStoredPairing = true,
+                        maxUploadBytes = api.maxUploadBytes,
+                    )
+                }
+                enterInbox()
+            } catch (cancelled: CancellationException) {
+                // ViewModel cleared: never report it as a pairing/network error.
+                container.dropActiveClient()
+                throw cancelled
+            } catch (e: ApiException) {
+                container.dropActiveClient()
+                _state.update { it.copy(loggingIn = false, loginError = pairErrorMessage(e)) }
+            } catch (e: Exception) {
+                container.dropActiveClient()
+                _state.update {
+                    it.copy(loggingIn = false, loginError = app.getString(R.string.error_network))
+                }
+            }
+        }
+    }
+
+    /** User-initiated reconnect of the already paired Hub; no code required. */
+    fun retryConnection() {
+        if (_state.value.loggingIn) return
+        _state.update { it.copy(loggingIn = true, loginError = null) }
+        viewModelScope.launch { handleConnectResult(connector.connect(ConnectTrigger.MANUAL)) }
+    }
+
+    private fun pairErrorMessage(e: ApiException): String = when {
+        e.isNetwork -> app.getString(R.string.error_network)
+        e.status == 403 && e.code == "origin_not_allowed" ->
+            "Hub 拒绝了该地址：请把 ${_state.value.hubAddress} 的主机名加入 Hub 的 allowed_hosts"
+        e.status == 429 || e.code == "pairing_locked" -> "配对码已锁定，请在 Hub 上重新生成"
+        e.status == 401 || e.code == "pairing_invalid" -> "配对码无效或已过期，请在 Hub 上重新查看"
+        else -> e.message
+    }
+
+    // ---------- reconnect (paired Hub) ----------
+
+    /**
+     * LAN first, then Tailscale, then any other saved address; only an address
+     * whose credential-free probe reports the expected Hub ID is accepted.
+     *
+     * Caller cancellation must reach the connector so a backgrounded/finished
+     * round really stops probing; only probe failures become "no route".
+     */
+    private suspend fun pickPairedCandidate(saved: SavedPairing): RouteCandidate? =
+        try {
+            routeSelector.select(saved.hubId, saved.candidates)
+        } catch (cancelled: CancellationException) {
+            throw cancelled
+        } catch (_: Exception) {
+            null
+        }
+
+    /** IO half of a bind; nothing in here publishes state to the UI. */
+    private sealed interface BindOutcome {
+        class Ready(val api: ApiClient) : BindOutcome
+        class Failed(val result: ConnectResult) : BindOutcome
+    }
+
+    /**
+     * Binds one verified candidate: move the stored record to that origin while
+     * keeping the pairing ([SessionStore.switchToPaired] — never
+     * `deactivate`/`discardLocalSession`, which would drop the pairing), build a
+     * client for it, then rebuild cookies/CSRF from the stored device token.
+     *
+     * Only the request work runs on [Dispatchers.IO]; every ViewModel side
+     * effect (transfer maps, `client`, event stream, `_state`) is applied on the
+     * caller's dispatcher, i.e. Main, so it cannot race [onBackground].
+     * Nothing is published unless the restore succeeded, so a failed round
+     * leaves the previous client and the pairing untouched.
+     */
+    private suspend fun bindPaired(candidate: RouteCandidate): ConnectResult {
+        val stored = sessionStore.load() ?: return ConnectResult.NotPaired
+        val expectedHubId = stored.hubId
+        if (expectedHubId.isBlank()) return ConnectResult.NotPaired
+        val endpoint = HubEndpoint.parse(candidate.url) ?: return ConnectResult.NoRoute
+        if (currentOrigin() != null && currentOrigin() != endpoint.origin) {
+            // A transfer started against the old origin must never land in the
+            // new client's list: cancel it and ask the user to retry explicitly.
+            cancelTransfers(TRANSFER_INTERRUPTED)
+        }
+
+        val outcome = withContext(Dispatchers.IO) {
+            if (!sessionStore.switchToPaired(endpoint, expectedHubId)) {
+                return@withContext BindOutcome.Failed(ConnectResult.NoRoute)
+            }
+            val api = try {
+                container.activatePaired(endpoint, expectedHubId) { onUnauthorized() }
+            } catch (_: IllegalStateException) {
+                return@withContext BindOutcome.Failed(ConnectResult.NoRoute)
+            }
+            try {
+                api.restorePairedSession(expectedHubId)
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (e: ApiException) {
+                container.dropActiveClient()
+                return@withContext if (e.code == CODE_PAIRING_REJECTED) {
+                    BindOutcome.Failed(ConnectResult.PairingRejected)
+                } else {
+                    // Temporary failure: pairing and previous client stay.
+                    BindOutcome.Failed(ConnectResult.NoRoute)
+                }
+            } catch (_: Exception) {
+                container.dropActiveClient()
+                return@withContext BindOutcome.Failed(ConnectResult.NoRoute)
+            }
+            BindOutcome.Ready(api)
+        }
+
+        return when (outcome) {
+            is BindOutcome.Failed -> outcome.result
+            is BindOutcome.Ready -> {
+                switchClient(outcome.api)
+                ConnectResult.Bound(candidate)
+            }
+        }
+    }
+
+    private fun switchClient(api: ApiClient) {
+        val originChanged = client?.endpoint?.origin != api.endpoint.origin
+        eventStream?.stop()
+        eventStream = null
+        if (originChanged) {
+            // Cached previews were fetched with the previous origin's cookies;
+            // drop them rather than mixing origins. The pairing is kept.
+            images.clear()
+        }
+        client = api
+        _state.update { it.copy(maxUploadBytes = api.maxUploadBytes, conn = ConnState.CLOSED) }
+    }
+
+    private suspend fun handleConnectResult(result: ConnectResult) {
+        when (result) {
+            is ConnectResult.Bound -> {
+                _state.update {
+                    it.copy(
+                        hubAddress = result.candidate.url,
+                        hubName = prefs.hubName.ifEmpty { it.hubName },
+                        hasStoredPairing = true,
+                        loginError = null,
+                    )
+                }
+                enterInbox()
+            }
+            ConnectResult.PairingRejected -> onPairingRevoked()
+            ConnectResult.NotPaired -> _state.update {
+                it.copy(
+                    phase = Phase.LOGIN,
+                    hasStoredPairing = false,
+                    loggingIn = false,
+                    pairingCode = "",
+                )
+            }
+            ConnectResult.NoRoute -> onNoRoute()
+            ConnectResult.Deferred -> onDeferred()
+        }
+    }
+
+    /**
+     * The round was abandoned (backgrounded) or joined another round that was
+     * abandoned. Never leave the UI spinning or stuck on the boot screen: the
+     * pairing is kept and a foreground event starts a fresh round.
+     */
+    private fun onDeferred() {
+        _state.update {
+            it.copy(
+                loggingIn = false,
+                phase = if (it.phase == Phase.BOOTING) Phase.LOGIN else it.phase,
+            )
+        }
+    }
+
+    /**
+     * Paired but unreachable (offline, Hub ID mismatch, no candidate answered):
+     * keep every credential and show a retry affordance instead of pairing again.
+     */
+    private fun onNoRoute() {
+        val message = app.getString(R.string.error_network)
+        _state.update {
+            if (it.phase == Phase.INBOX) {
+                // The existing link stays authoritative: a failed reselection
+                // must not overwrite an inbox that still works. A genuinely
+                // dead socket is reported by the stream itself.
+                it.copy(loggingIn = false)
+            } else {
+                it.copy(
+                    phase = Phase.LOGIN,
+                    hasStoredPairing = true,
+                    loggingIn = false,
+                    conn = ConnState.CLOSED,
+                    loginError = message,
+                )
+            }
+        }
+    }
+
+    /**
+     * The Hub answered `authenticated:false` (HTTP 200) for our stored device
+     * token: the device was revoked. Only this case clears the old credentials.
+     */
+    private fun onPairingRevoked() {
+        teardownClient()
+        sessionStore.clear()
+        prefs.hubName = ""
+        _state.update {
+            it.copy(
+                phase = Phase.LOGIN,
+                hasStoredPairing = false,
+                hubName = "",
+                pairingCode = "",
+                loggingIn = false,
+                items = emptyList(),
+                nextCursor = "",
+                conn = ConnState.CLOSED,
+                loginError = "此设备已在 Hub 上解除配对，请重新输入配对码",
+            )
+        }
     }
 
     // ---------- nearby Hub discovery (address hint only) ----------
 
-    /** One automatic short search when the foreground login screen first appears. */
+    /** One automatic short search when the foreground pairing screen appears. */
     fun onLoginScreenShown() {
-        if (_state.value.phase != Phase.LOGIN) return
+        val snapshot = _state.value
+        if (snapshot.phase != Phase.LOGIN || snapshot.hasStoredPairing) return
         discovery.start(auto = true)
     }
 
@@ -210,9 +499,9 @@ class AppViewModel(
     }
 
     /**
-     * Selecting a nearby Hub only prefills its address. No login, no session
-     * restore, no cookie or password is sent to a discovered server: the user
-     * still has to press 登录 with the password, exactly like manual entry.
+     * Selecting a nearby Hub only prefills its address. No pairing attempt, no
+     * session restore and no cookie or token is sent to a discovered server: the
+     * user still has to submit a code from that Hub's settings screen.
      */
     fun selectDiscoveredHub(hub: DiscoveredHub) {
         if (_state.value.phase != Phase.LOGIN) return
@@ -221,80 +510,25 @@ class AppViewModel(
         discovery.stop()
     }
 
-    fun login() {
-        val snapshot = _state.value
-        if (snapshot.loggingIn) return
-        val endpoint = HubEndpoint.parse(snapshot.hubAddress)
-        if (endpoint == null) {
-            _state.update { it.copy(loginError = app.getString(R.string.error_bad_address)) }
-            return
-        }
-        val username = snapshot.username.trim().ifEmpty { "admin" }
-        val password = snapshot.password
-        if (password.isEmpty()) return
-        _state.update { it.copy(loggingIn = true, loginError = null) }
-        viewModelScope.launch {
-            // Drop any previous Hub's cookies before touching the new address.
-            if (currentOrigin() != null && currentOrigin() != endpoint.origin) {
-                logoutLocalOnly()
-            }
-            val api = activate(endpoint)
-            try {
-                val info = api.login(username, password)
-                // Password is discarded here and never written to storage.
-                _state.update { it.copy(password = "", loggingIn = false) }
-                prefs.hubAddress = endpoint.origin
-                prefs.username = username
-                api.persistSession(username, info)
-                _state.update {
-                    it.copy(
-                        maxUploadBytes = api.maxUploadBytes,
-                        deviceName = prefs.deviceName,
-                    )
-                }
-                enterInbox()
-            } catch (e: ApiException) {
-                _state.update {
-                    it.copy(
-                        password = "",
-                        loggingIn = false,
-                        loginError = loginErrorMessage(e),
-                    )
-                }
-            } catch (e: Exception) {
-                _state.update {
-                    it.copy(
-                        password = "",
-                        loggingIn = false,
-                        loginError = app.getString(R.string.error_network),
-                    )
-                }
-            }
-        }
-    }
-
-    private fun loginErrorMessage(e: ApiException): String = when {
-        e.isNotInitialized -> app.getString(R.string.not_initialized_hint)
-        e.isNetwork -> app.getString(R.string.error_network)
-        e.status == 403 && e.code == "origin_not_allowed" ->
-            "Hub 拒绝了该地址：请把 ${_state.value.hubAddress} 的主机名加入 Hub 的 allowed_hosts"
-        e.status == 429 -> "登录尝试过于频繁，请稍后再试"
-        e.status == 401 || e.code == "invalid_credentials" -> "用户名或密码不正确"
-        else -> e.message
-    }
-
     fun logout() {
         val api = client
         viewModelScope.launch {
             eventStream?.stop()
             eventStream = null
             if (api != null) {
+                // Revokes this device on the Hub, then forgets it locally.
                 runCatching { withContext(Dispatchers.IO) { api.logout() } }
             }
             logoutLocalOnly()
+            sessionStore.clear()
+            prefs.hubName = ""
             _state.update {
                 it.copy(
                     phase = Phase.LOGIN,
+                    hasStoredPairing = false,
+                    hubName = "",
+                    pairingCode = "",
+                    loggingIn = false,
                     items = emptyList(),
                     nextCursor = "",
                     uploads = emptyList(),
@@ -306,16 +540,48 @@ class AppViewModel(
         }
     }
 
+    /** Full local teardown, including the stored pairing (logout / revocation). */
     private fun logoutLocalOnly() {
         eventStream?.stop()
         eventStream = null
-        uploadJobs.values.forEach { it.cancel() }
-        uploadJobs.clear()
-        downloadJobs.values.forEach { it.cancel() }
-        downloadJobs.clear()
+        cancelTransfers()
         container.deactivate()
         client = null
         images.clear()
+    }
+
+    /**
+     * Drops the live client without touching the stored pairing: a 401 only
+     * means the cookie session is gone, and the device token may still be able
+     * to restore it (a revoked device is detected by the restore call).
+     */
+    private fun teardownClient() {
+        eventStream?.stop()
+        eventStream = null
+        cancelTransfers()
+        container.dropActiveClient()
+        client = null
+        images.clear()
+    }
+
+    /**
+     * Cancels every running transfer and tells the user. Used when the live
+     * origin changes so results from the old client cannot be mixed into the
+     * new one; writes are never replayed automatically.
+     */
+    private fun cancelTransfers(notice: String? = null) {
+        // Snapshot then clear: each transfer's own coroutine removes its entry
+        // from the other thread, so the maps are never iterated live.
+        val pendingUploads = uploadJobs.values.toList()
+        uploadJobs.clear()
+        val pendingDownloads = downloadJobs.values.toList()
+        downloadJobs.clear()
+        pendingUploads.forEach { it.cancel() }
+        pendingDownloads.forEach { it.cancel() }
+        if (pendingUploads.isNotEmpty() || pendingDownloads.isNotEmpty()) {
+            _state.update { it.copy(uploads = emptyList(), downloads = emptyList()) }
+            notice?.let { toast(it, error = true) }
+        }
     }
 
     private fun currentOrigin(): String? = client?.endpoint?.origin
@@ -328,20 +594,26 @@ class AppViewModel(
     }
 
     private fun onUnauthorized() {
-        if (_state.value.phase != Phase.INBOX) return
-        logoutLocalOnly()
-        _state.update {
-            it.copy(
-                phase = Phase.LOGIN,
-                items = emptyList(),
-                nextCursor = "",
-                conn = ConnState.CLOSED,
-                password = "",
-                loggingIn = false,
-                loginError = app.getString(R.string.error_unauthorized),
-            )
+        // May be raised from an OkHttp callback: hop to Main before touching
+        // sockets, transfer maps or UI state.
+        viewModelScope.launch {
+            if (_state.value.phase != Phase.INBOX) return@launch
+            teardownClient()
+            val paired = sessionStore.load()?.hubId?.isNotBlank() == true
+            _state.update {
+                it.copy(
+                    phase = Phase.LOGIN,
+                    hasStoredPairing = paired,
+                    items = emptyList(),
+                    nextCursor = "",
+                    conn = ConnState.CLOSED,
+                    pairingCode = "",
+                    loggingIn = false,
+                    loginError = app.getString(R.string.error_unauthorized),
+                )
+            }
+            deliverPendingShare()
         }
-        deliverPendingShare()
     }
 
     private fun enterInbox() {
@@ -349,19 +621,44 @@ class AppViewModel(
         _state.update {
             it.copy(
                 phase = Phase.INBOX,
+                hasStoredPairing = true,
                 loginError = null,
                 loggingIn = false,
+                conn = ConnState.CLOSED,
                 deviceName = prefs.deviceName,
             )
+        }
+        if (!foreground) {
+            // The Activity went to background while this round finished: keep
+            // the inbox state, but open no socket and scan nothing in background.
+            // onForeground restarts the stream and refetches the list.
+            eventStream?.stop()
+            eventStream = null
+            return
         }
         startEventStream()
         resync()
         deliverPendingShare()
     }
 
+    /**
+     * A dropped link or a failed request asks for a reselection. The connector
+     * coalesces concurrent requests and throttles failure-driven ones, so a
+     * burst of socket callbacks can never open a second link.
+     */
+    private fun requestReselect(trigger: ConnectTrigger) {
+        if (!foreground) return
+        if (sessionStore.load()?.hubId?.isNotBlank() != true) return
+        if (_state.value.phase == Phase.BOOTING) return
+        viewModelScope.launch { handleConnectResult(connector.connect(trigger)) }
+    }
+
+
     // ---------- realtime ----------
 
     private fun startEventStream() {
+        // Never open a socket from a background state, whatever the caller path.
+        if (!foreground) return
         if (eventStream != null) return
         eventStream = EventStream(
             scope = viewModelScope,
@@ -375,21 +672,42 @@ class AppViewModel(
             },
             onState = { conn -> _state.update { it.copy(conn = conn) } },
             onUnauthorized = { onUnauthorized() },
+            onUnavailable = { requestReselect(ConnectTrigger.STREAM_FAILED) },
         ).also { it.start() }
     }
 
-    /** Called from the Activity when it becomes visible again. */
+    /**
+     * Called from the Activity when it becomes visible again.
+     *
+     * Every paired foreground reselects through the connector — LAN first, then
+     * Tailscale — so coming back to the home LAN does not keep the Tailscale
+     * address that was good on the road. The startup round and this one coalesce
+     * into a single selection (the connector owns that), including the case where
+     * a background event cancelled the boot restore.
+     */
     fun onForeground() {
-        if (_state.value.phase != Phase.INBOX) return
+        foreground = true
+        val snapshot = _state.value
+        if (snapshot.phase == Phase.BOOTING || snapshot.hasStoredPairing) {
+            viewModelScope.launch {
+                handleConnectResult(connector.connect(ConnectTrigger.FOREGROUND))
+            }
+        }
+        if (snapshot.phase != Phase.INBOX) return
+        // Keep the current link usable while the reselection runs; a winning
+        // bind replaces this stream, so there is never more than one link.
         eventStream?.let { it.restart() } ?: startEventStream()
         resync()
     }
 
-    /** Called when the Activity goes to the background: sockets are not kept. */
+    /** Called when the Activity goes to the background: no sockets, no probing. */
     fun onBackground() {
+        foreground = false
         eventStream?.stop()
         // No background discovery: stop NSD and release the multicast lock.
         discovery.stop()
+        // Abandon a half-finished selection round; it is redone on foreground.
+        connector.cancel()
     }
 
     // ---------- inbox ----------
@@ -415,6 +733,9 @@ class AppViewModel(
                     onUnauthorized()
                 } else {
                     _state.update { it.copy(loading = false, error = friendly(e)) }
+                    // A read may be retried freely; the user never has to retype
+                    // anything, and no write is replayed on the new address.
+                    if (e.isNetwork) requestReselect(ConnectTrigger.NETWORK_LOST)
                 }
             } catch (e: Exception) {
                 _state.update { it.copy(loading = false, error = friendly(e)) }
@@ -557,6 +878,12 @@ class AppViewModel(
                     try {
                         val item = api.upload(source, _state.value.deviceName) { loaded, total ->
                             updateUpload(key) { it.copy(loaded = loaded, size = total ?: it.size) }
+                        }
+                        if (client !== api) {
+                            // The address switched while this upload was in flight:
+                            // its result belongs to the old origin, so drop it.
+                            _state.update { s -> s.copy(uploads = s.uploads.filterNot { it.key == key }) }
+                            return@launch
                         }
                         updateUpload(key) { it.copy(status = TaskStatus.DONE, loaded = it.size) }
                         _state.update { s ->
@@ -837,11 +1164,19 @@ class AppViewModel(
     override fun onCleared() {
         super.onCleared()
         eventStream?.stop()
+        connector.cancel()
         discovery.release()
         images.clear()
     }
 
     companion object {
+        private const val PAIRING_CODE_LENGTH = 4
+
+        /** `restorePairedSession` maps `authenticated:false` to this code. */
+        private const val CODE_PAIRING_REJECTED = "pairing_rejected"
+
+        private const val TRANSFER_INTERRUPTED = "连接地址已切换，进行中的传输已中断，请重试"
+
         private val LINK_REGEX = Regex("^https?://\\S+$", RegexOption.IGNORE_CASE)
     }
 }

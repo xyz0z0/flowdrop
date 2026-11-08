@@ -147,48 +147,86 @@ func doJSON(t *testing.T, c *http.Client, base, method, path string, body any, c
 	return res, decoded
 }
 
-// TestLifecycleAndFirstAdmin covers the frozen Hub interface as the desktop
-// shell uses it: New/Start, HasAdmin, InitializeAdmin (first only), Stop,
-// re-Start on a different port against the same data directory.
-func TestLifecycleAndFirstAdmin(t *testing.T) {
+// managerSession is one paired client: the cookie jar plus CSRF value of the
+// origin it paired with, and the saved device token.
+type managerSession struct {
+	client *http.Client
+	csrf   string
+	token  string
+}
+
+// pairManager is the only login path: locally generated code -> POST
+// /api/v1/auth/pair. native=true returns the device token a client saves to
+// restore a session without pairing again.
+func pairManager(t *testing.T, m *Manager, base, deviceName string) managerSession {
+	t.Helper()
+	code, err := m.CreatePairingCode()
+	if err != nil {
+		t.Fatalf("CreatePairingCode: %v", err)
+	}
+	client := httpClient(t, base)
+	res, decoded := doJSON(t, client, base, http.MethodPost, "/api/v1/auth/pair",
+		map[string]any{"code": code.Code, "device_name": deviceName, "native": true}, "")
+	if res.StatusCode != http.StatusOK || decoded["authenticated"] != true {
+		t.Fatalf("pair = %d %v", res.StatusCode, decoded)
+	}
+	csrf, _ := decoded["csrf_token"].(string)
+	token, _ := decoded["device_token"].(string)
+	deviceID, _ := decoded["device_id"].(string)
+	if csrf == "" || token == "" || deviceID == "" {
+		t.Fatalf("pair response is incomplete: %v", decoded)
+	}
+	return managerSession{client: client, csrf: csrf, token: token}
+}
+
+// restoreManager replays a saved device token against one origin to rebuild its
+// cookies and CSRF value. Cookies are host-scoped, so every origin restores its
+// own session instead of sharing a jar.
+func restoreManager(t *testing.T, base, token string) (*http.Client, string) {
+	t.Helper()
+	client := httpClient(t, base)
+	req, err := http.NewRequest(http.MethodGet, base+"/api/v1/auth/session", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("Origin", base)
+	req.Header.Set("Authorization", "Bearer "+token)
+	res, err := client.Do(req)
+	if err != nil {
+		t.Fatalf("restore session %s: %v", base, err)
+	}
+	defer res.Body.Close()
+	var decoded map[string]any
+	raw, _ := io.ReadAll(res.Body)
+	if err := json.Unmarshal(raw, &decoded); err != nil {
+		t.Fatalf("decode session: %v body=%s", err, raw)
+	}
+	csrf, _ := decoded["csrf_token"].(string)
+	if res.StatusCode != http.StatusOK || decoded["authenticated"] != true || csrf == "" {
+		t.Fatalf("restore session %s = %d %s", base, res.StatusCode, raw)
+	}
+	return client, csrf
+}
+
+// TestLifecyclePairingAndStop covers the frozen Hub interface as the desktop
+// shell uses it: New/Start, local pairing (no password), Stop, and the closed
+// lifecycle of the local pairing entry points.
+func TestLifecyclePairingAndStop(t *testing.T) {
 	m, cfg := newTestManager(t)
 	base := startEphemeral(t, m, cfg)
 
-	ok, err := m.HasAdmin()
+	sess := pairManager(t, m, base, "desktop-session")
+	res, item := doJSON(t, sess.client, base, http.MethodPost, "/api/v1/items/text",
+		map[string]string{"text": "paired write"}, sess.csrf)
+	if res.StatusCode != http.StatusCreated {
+		t.Fatalf("paired create text = %d %v", res.StatusCode, item)
+	}
+	devices, err := m.ListPairedDevices()
 	if err != nil {
-		t.Fatalf("HasAdmin: %v", err)
+		t.Fatalf("ListPairedDevices: %v", err)
 	}
-	if ok {
-		t.Fatal("HasAdmin = true on a fresh data directory")
-	}
-
-	if err := m.InitializeAdmin("admin", "short"); err == nil {
-		t.Fatal("InitializeAdmin accepted a short password")
-	}
-	if err := m.InitializeAdmin("admin", "correct-horse-battery"); err != nil {
-		t.Fatalf("InitializeAdmin: %v", err)
-	}
-	if ok, err = m.HasAdmin(); err != nil || !ok {
-		t.Fatalf("HasAdmin after init = %v,%v", ok, err)
-	}
-	// Initializing twice must never overwrite the existing password.
-	err = m.InitializeAdmin("admin", "another-password-123")
-	if !errors.Is(err, hub.ErrAdminExists) {
-		t.Fatalf("second InitializeAdmin = %v, want hub.ErrAdminExists", err)
-	}
-
-	// The previous password still works.
-	client := httpClient(t, base)
-	res, decoded := doJSON(t, client, base, http.MethodPost, "/api/v1/auth/login",
-		map[string]string{"username": "admin", "password": "correct-horse-battery"}, "")
-	if res.StatusCode != http.StatusOK || decoded["authenticated"] != true {
-		t.Fatalf("login after failed overwrite = %d %v", res.StatusCode, decoded)
-	}
-	// And the rejected password does not.
-	res2, _ := doJSON(t, httpClient(t, base), base, http.MethodPost, "/api/v1/auth/login",
-		map[string]string{"username": "admin", "password": "another-password-123"}, "")
-	if res2.StatusCode == http.StatusOK {
-		t.Fatal("the rejected password was accepted")
+	if len(devices) != 1 || devices[0].Name != "desktop-session" {
+		t.Fatalf("paired devices = %+v, want the one desktop-session", devices)
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
@@ -199,8 +237,11 @@ func TestLifecycleAndFirstAdmin(t *testing.T) {
 	if m.URL() != "" {
 		t.Fatalf("URL() = %q after Stop, want empty", m.URL())
 	}
-	if _, err := m.HasAdmin(); err == nil {
-		t.Fatal("HasAdmin succeeded after Stop, want ErrClosed-style error")
+	if _, err := m.CreatePairingCode(); !errors.Is(err, hub.ErrClosed) {
+		t.Fatalf("CreatePairingCode after Stop = %v, want hub.ErrClosed", err)
+	}
+	if _, err := m.ListPairedDevices(); !errors.Is(err, hub.ErrClosed) {
+		t.Fatalf("ListPairedDevices after Stop = %v, want hub.ErrClosed", err)
 	}
 }
 
@@ -233,18 +274,9 @@ func TestAddressSwitchKeepsData(t *testing.T) {
 	m, cfg := newTestManager(t)
 	base := startEphemeral(t, m, cfg)
 
-	if err := m.InitializeAdmin("admin", "correct-horse-battery"); err != nil {
-		t.Fatalf("InitializeAdmin: %v", err)
-	}
-	c := httpClient(t, base)
-	res, sess := doJSON(t, c, base, http.MethodPost, "/api/v1/auth/login",
-		map[string]string{"username": "admin", "password": "correct-horse-battery"}, "")
-	csrf, _ := sess["csrf_token"].(string)
-	if res.StatusCode != http.StatusOK || csrf == "" {
-		t.Fatalf("login = %d %v", res.StatusCode, sess)
-	}
-	res, item := doJSON(t, c, base, http.MethodPost, "/api/v1/items/text",
-		map[string]string{"text": "switch me"}, csrf)
+	pair := pairManager(t, m, base, "switch-test")
+	res, item := doJSON(t, pair.client, base, http.MethodPost, "/api/v1/items/text",
+		map[string]string{"text": "switch me"}, pair.csrf)
 	if res.StatusCode != http.StatusCreated {
 		t.Fatalf("create text = %d %v", res.StatusCode, item)
 	}
@@ -261,15 +293,10 @@ func TestAddressSwitchKeepsData(t *testing.T) {
 		t.Fatalf("Restart URL() = %q (was %q), want a new bound URL", newBase, base)
 	}
 
-	// The admin password and the item survive the switch (same data dir).
-	c2 := httpClient(t, newBase)
-	res, sess = doJSON(t, c2, newBase, http.MethodPost, "/api/v1/auth/login",
-		map[string]string{"username": "admin", "password": "correct-horse-battery"}, "")
-	csrf, _ = sess["csrf_token"].(string)
-	if res.StatusCode != http.StatusOK || csrf == "" {
-		t.Fatalf("login after switch = %d %v", res.StatusCode, sess)
-	}
-	res, page := doJSON(t, c2, newBase, http.MethodGet, "/api/v1/items", nil, "")
+	// The saved device token and the item survive the switch (same data dir):
+	// the client restores its session on the new origin instead of pairing again.
+	c2, csrf2 := restoreManager(t, newBase, pair.token)
+	res, page := doJSON(t, c2, newBase, http.MethodGet, "/api/v1/items", nil, csrf2)
 	if res.StatusCode != http.StatusOK {
 		t.Fatalf("list after switch = %d %v", res.StatusCode, page)
 	}
@@ -356,22 +383,21 @@ func TestDataDirLockIsFriendly(t *testing.T) {
 	}
 }
 
-// TestStatusReportsAdminAndURL keeps the settings window honest about state.
-func TestStatusReportsAdminAndURL(t *testing.T) {
+// TestStatusReportsURL keeps the settings window honest about state.
+func TestStatusReportsURL(t *testing.T) {
 	m, cfg := newTestManager(t)
 	if st := m.Status(); st.Running || st.URL != "" {
 		t.Fatalf("Status before start = %+v", st)
 	}
 	base := startEphemeral(t, m, cfg)
 	st := m.Status()
-	if !st.Running || st.URL != base || st.AdminConfigured {
-		t.Fatalf("Status after start = %+v, want running URL=%s admin=false", st, base)
+	if !st.Running || st.URL != base {
+		t.Fatalf("Status after start = %+v, want running URL=%s", st, base)
 	}
-	if err := m.InitializeAdmin("admin", "correct-horse-battery"); err != nil {
-		t.Fatal(err)
-	}
-	if st = m.Status(); !st.AdminConfigured {
-		t.Fatalf("Status.AdminConfigured = false after InitializeAdmin")
+	// Pairing changes the device list, not the lifecycle snapshot.
+	pairManager(t, m, base, "status-test")
+	if st = m.Status(); !st.Running || st.URL != base {
+		t.Fatalf("Status after pairing = %+v, want the same running URL=%s", st, base)
 	}
 }
 
@@ -381,17 +407,9 @@ func TestStatusReportsAdminAndURL(t *testing.T) {
 func TestDesktopFlowEndToEnd(t *testing.T) {
 	m, cfg := newTestManager(t)
 	base := startEphemeral(t, m, cfg)
-	if err := m.InitializeAdmin("admin", "correct-horse-battery"); err != nil {
-		t.Fatal(err)
-	}
 
-	c := httpClient(t, base)
-	res, sess := doJSON(t, c, base, http.MethodPost, "/api/v1/auth/login",
-		map[string]string{"username": "admin", "password": "correct-horse-battery"}, "")
-	csrf, _ := sess["csrf_token"].(string)
-	if res.StatusCode != http.StatusOK || csrf == "" {
-		t.Fatalf("login = %d %v", res.StatusCode, sess)
-	}
+	pair := pairManager(t, m, base, "desktop-e2e")
+	c, csrf := pair.client, pair.csrf
 
 	// The session cookie must be present and the CSRF token must actually be
 	// required (that is what makes the shell's same-origin window correct).
@@ -403,11 +421,11 @@ func TestDesktopFlowEndToEnd(t *testing.T) {
 		}
 	}
 	if !haveSession {
-		t.Fatal("login did not yield a flowdrop_session cookie")
+		t.Fatal("pairing did not yield a flowdrop_session cookie")
 	}
-	res, _ = doJSON(t, c, base, http.MethodPost, "/api/v1/items/text", map[string]string{"text": "no csrf"}, "")
-	if res.StatusCode != http.StatusForbidden {
-		t.Fatalf("text without CSRF = %d, want 403", res.StatusCode)
+	noCSRF, _ := doJSON(t, c, base, http.MethodPost, "/api/v1/items/text", map[string]string{"text": "no csrf"}, "")
+	if noCSRF.StatusCode != http.StatusForbidden {
+		t.Fatalf("text without CSRF = %d, want 403", noCSRF.StatusCode)
 	}
 
 	// WebSocket notification for a new item.
@@ -555,25 +573,13 @@ func TestDualListenSharesOneHubAndData(t *testing.T) {
 		}
 	}
 
-	if err := m.InitializeAdmin("admin", "correct-horse-battery"); err != nil {
-		t.Fatalf("InitializeAdmin: %v", err)
-	}
-
-	// Log in separately on each host: cookies are host-scoped, and this product
-	// deliberately does not claim they are shared across hosts. The accounts and
-	// items, however, come from the same database.
-	login := func(base string) (*http.Client, string) {
-		c := httpClient(t, base)
-		res, sess := doJSON(t, c, base, http.MethodPost, "/api/v1/auth/login",
-			map[string]string{"username": "admin", "password": "correct-horse-battery"}, "")
-		csrf, _ := sess["csrf_token"].(string)
-		if res.StatusCode != http.StatusOK || csrf == "" {
-			t.Fatalf("login %s = %d %v", base, res.StatusCode, sess)
-		}
-		return c, csrf
-	}
-	c1, csrf1 := login(urls[0])
-	c2, _ := login(urls[1])
+	// Pair once, then restore a separate session on each host: cookies are
+	// host-scoped, and this product deliberately does not claim they are shared
+	// across hosts. The device and the items, however, come from the same
+	// database.
+	token := pairManager(t, m, urls[0], "dual-test").token
+	c1, csrf1 := restoreManager(t, urls[0], token)
+	c2, _ := restoreManager(t, urls[1], token)
 
 	res, item := doJSON(t, c1, urls[0], http.MethodPost, "/api/v1/items/text",
 		map[string]string{"text": "written via LAN listener"}, csrf1)

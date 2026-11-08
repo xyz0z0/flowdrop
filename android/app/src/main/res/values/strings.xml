@@ -3,18 +3,25 @@
     <string name="app_name">FlowDrop</string>
 
     <string name="login_title">FlowDrop</string>
-    <string name="login_subtitle">登录你的私有共享收件箱</string>
-    <string name="label_hub_address">Hub 地址</string>
-    <string name="label_username">用户名</string>
-    <string name="label_password">管理员密码</string>
-    <string name="action_login">登录</string>
-    <string name="login_busy">登录中…</string>
-    <string name="hub_address_hint">例如：http://192.168.1.50:8080</string>
-    <string name="login_http_warning">家庭局域网 HTTP 为明文传输，仅用于可信网络；跨网请使用 Tailscale 地址。密码仅用于换取会话，随后立即丢弃。</string>
-    <string name="not_initialized_hint">在 Hub 电脑终端执行 flowdrop admin init 设置管理员密码后再登录。</string>
+    <string name="login_subtitle">配对电脑上的 FlowDrop，收件箱自动同步</string>
+    <string name="label_hub_address">电脑地址</string>
+    <string name="label_pairing_code">配对码</string>
+    <string name="pairing_code_hint">四位数字</string>
+    <string name="action_pair">配对</string>
+    <string name="pairing_busy">配对中…</string>
+    <string name="hub_address_hint">例如：http://192.168.1.50:8080 或 Tailscale 地址</string>
+    <string name="pairing_help">在电脑上的 FlowDrop 设置里点「添加设备」获取四位配对码：120 秒内有效，只能用一次。</string>
+    <string name="login_http_warning">家庭局域网 HTTP 为明文传输，仅用于可信网络；跨网请使用 Tailscale 地址。配对码只用于换取本机设备凭证，随后立即失效。</string>
+    <string name="stored_pairing_title">已配对的电脑</string>
+    <string name="stored_pairing_unnamed">（名称未知）</string>
+    <string name="stored_pairing_hint">这台电脑离线时可以直接重连，不需要重新取码。</string>
+    <string name="stored_pairing_another">或在下方输入配对码，配对另一台电脑</string>
+    <string name="action_reconnect">重连</string>
+    <string name="address_change_needs_pairing">手动输入另一台电脑的地址后，需要在电脑上重新获取配对码。</string>
+    <string name="not_initialized_hint">这台电脑还没有开启配对。请在电脑上的 FlowDrop 设置里点「添加设备」获取配对码。</string>
 
     <string name="inbox_title">收件箱</string>
-    <string name="action_logout">退出</string>
+    <string name="action_logout">解除配对</string>
     <string name="action_retry">重试</string>
     <string name="action_cancel">取消</string>
     <string name="action_delete">删除</string>
@@ -48,7 +55,7 @@
     <string name="tag_apk">Android 安装包</string>
     <string name="share_done">已发送到收件箱</string>
     <string name="error_network">无法连接 Hub，请检查地址、网络与 Hub 是否运行</string>
-    <string name="error_unauthorized">会话已失效，请重新登录</string>
+    <string name="error_unauthorized">与电脑的连接已失效，请重新配对</string>
     <string name="error_bad_address">Hub 地址格式不正确</string>
     <string name="error_upload_too_large">文件超过 Hub 允许的大小上限</string>
     <string name="error_save_failed">保存失败</string>
@@ -65,9 +72,6 @@
     <string name="discovery_found">发现 %1$d 个 Hub</string>
     <string name="discovery_error">自动发现不可用：%1$s。仍可手动输入地址。</string>
     <string name="discovery_hint">点选只填写地址，不会自动登录；发现结果不代表 Hub 已通过验证。</string>
-
-    <string name="clear_password_hint">应用不保存密码；仅保存会话 Cookie（可随时退出吊销）。</string>
-    <string name="address_change_clears_session">更改 Hub 地址会清除当前会话，需要重新登录。</string>
 
     <string name="download_progress">下载中 %1$d%%</string>
     <string name="upload_progress">上传中 %1$d%%</string>

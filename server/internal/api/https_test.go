@@ -4,6 +4,7 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"encoding/json"
+	"fmt"
 	"io"
 	"log/slog"
 	"net"
@@ -16,10 +17,10 @@ import (
 	"testing"
 	"time"
 
-	"flowdrop/internal/auth"
 	"flowdrop/internal/config"
 	"flowdrop/internal/db"
 	"flowdrop/internal/events"
+	"flowdrop/internal/pairing"
 	"flowdrop/internal/storage"
 	"flowdrop/internal/store"
 )
@@ -52,15 +53,11 @@ func TestHTTPSReverseProxyContract(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	sess := auth.NewStore(conn, cfg.SessionTTL())
-	if err := sess.SetPassword("admin", testPassword); err != nil {
-		t.Fatal(err)
-	}
+	sess := pairing.NewStore(conn)
 	_, loopback, _ := net.ParseCIDR("127.0.0.1/32")
 	app := New(Deps{
-		Config: cfg,
-
-		Sessions:       sess,
+		Config:         cfg,
+		Pairing:        sess,
 		Store:          store.New(conn),
 		Storage:        files,
 		Broker:         events.NewBroker(),
@@ -106,20 +103,28 @@ func TestHTTPSReverseProxyContract(t *testing.T) {
 		t.Fatalf("health = %d", res.StatusCode)
 	}
 
-	body := strings.NewReader(`{"username":"admin","password":"` + testPassword + `"}`)
-	req, _ := http.NewRequest(http.MethodPost, tlsSrv.URL+"/api/v1/auth/login", body)
+	// Pair once locally, then present the code through the TLS origin the user
+	// typed. The pairing store is the only authentication source.
+	code, err := sess.CreateCode(time.Now())
+	if err != nil {
+		t.Fatalf("create pairing code: %v", err)
+	}
+	body := strings.NewReader(fmt.Sprintf(`{"code":%q,"device_name":"tls-browser"}`, code.Code))
+	req, _ := http.NewRequest(http.MethodPost, tlsSrv.URL+"/api/v1/auth/pair", body)
 	req.Header.Set("Content-Type", "application/json")
 	// The browser's Origin is the public name the user typed, which the proxy
 	// forwards as Host. The hub requires these to match.
 	req.Header.Set("Origin", "https://hub.test")
 	res, err = client.Do(req)
 	if err != nil {
-		t.Fatalf("login over TLS proxy: %v", err)
+		t.Fatalf("pair over TLS proxy: %v", err)
+	}
+	if res.StatusCode != http.StatusOK {
+		b, _ := io.ReadAll(res.Body)
+		res.Body.Close()
+		t.Fatalf("pair over TLS proxy = %d body=%s", res.StatusCode, b)
 	}
 	res.Body.Close()
-	if res.StatusCode != http.StatusOK {
-		t.Fatalf("login over TLS proxy = %d", res.StatusCode)
-	}
 
 	var sessionCookie *http.Cookie
 	for _, c := range res.Cookies() {
@@ -196,25 +201,20 @@ func TestForwardedProtoIgnoredFromUntrustedPeer(t *testing.T) {
 		c.CookieSecure = false // isolate the effect of the header
 		c.TrustedProxies = nil // nothing is trusted
 	})
-	res := h.do(http.MethodPost, "/api/v1/auth/login",
-		strings.NewReader(`{"username":"admin","password":"`+testPassword+`"}`),
-		func(r *http.Request) {
-			r.Header.Set("Content-Type", "application/json")
-			r.Header.Set("Origin", h.srv.URL)
-			r.Header.Set("X-Forwarded-Proto", "https")
-		})
-	defer res.Body.Close()
-	if res.StatusCode != http.StatusOK {
-		t.Fatalf("login = %d", res.StatusCode)
-	}
+	h.pair(func(r *http.Request) { r.Header.Set("X-Forwarded-Proto", "https") })
 	// The request was plain HTTP from an untrusted peer. A spoofed
 	// X-Forwarded-Proto must not be believed, so:
 	//   - no Secure attribute is derived from it
 	//   - HSTS is not emitted for a plaintext response
-	for _, c := range res.Cookies() {
-		if c.Secure {
-			t.Fatalf("cookie %q became Secure from an untrusted X-Forwarded-Proto", c.Name)
+	for _, raw := range h.setCookies {
+		for _, attr := range strings.Split(raw, ";") {
+			if strings.EqualFold(strings.TrimSpace(attr), "Secure") {
+				t.Fatalf("cookie became Secure from an untrusted X-Forwarded-Proto: %s", raw)
+			}
 		}
+	}
+	if len(h.setCookies) == 0 {
+		t.Fatal("pairing set no cookies")
 	}
 	hres := h.do(http.MethodGet, "/", nil, func(r *http.Request) {
 		r.Header.Set("X-Forwarded-Proto", "https")

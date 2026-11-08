@@ -11,8 +11,10 @@
   手机在家用 Wi-Fi 或在外用 Tailscale 都能直接访问，数据与登录由同一实例共享。
   同一 Wi-Fi 的客户端还可通过 mDNS/DNS-SD（`_flowdrop._tcp`）自动发现 Hub。
   HTTPS / Tailscale Serve / Caddy 部署仍保留为**可选**加固方案。
-- 认证：单管理员密码（Argon2id）+ 服务端会话（DB 只存令牌哈希）+ HttpOnly Cookie；
-  CSRF 双提交与 Origin/Host 校验对 Web 与原生 App 一致。
+- 认证：**本机生成四位临时配对码 → 记住设备**（无账号密码）。设备令牌 32 字节随机数，
+  DB 只存哈希；Web 用 HttpOnly Cookie，Android 用 Keystore 保存设备令牌。
+  CSRF 双提交与 Origin/Host 校验对 Web 与原生 App 一致。配对合同见
+  [docs/PAIRING.md](docs/PAIRING.md)。
 
 > 需求基线：[docs/PRD.md](docs/PRD.md)（含 §15 实施澄清、§16 HTTP LAN + Android 范围澄清）
 > 设计说明：[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)
@@ -27,11 +29,13 @@
 - 文字、链接（仅 http/https）发送；链接以可点击形式展示，文字按纯文本渲染。
 - 图片上传 + 受限格式内联预览（JPEG/PNG/GIF/WebP），点击放大。
 - 任意文件上传（含 APK）、进度、鉴权下载、SHA-256 展示与复制。
-- 拖拽上传、粘贴截图上传、多选文件（逐个上传，每个文件一个条目）。
+- 拖拽上传、粘贴截图上传、多选文件（逐个上传，每个文件一个条目）；桌面 App
+  登录后支持向内容窗口任意位置拖入多个文件（见下文「收件箱拖拽上传」）。
 - 倒序稳定分页（keyset cursor）、加载更早内容。
 - 手动删除条目并清理附件；启动及周期性清理临时文件、孤立附件、过期会话。
 - WebSocket 实时通知；断线自动重连，恢复前台/上线后重新拉取列表。
-- 管理员密码登录/注销；限流；Host / Origin / CSRF 校验；统一安全响应头。
+- 设备配对（四位码，120 秒有效、一次成功、全 Hub 累计错 5 次失效）与设备撤销；
+  限流；Host / Origin / CSRF 校验；统一安全响应头。
 - **局域网自动发现（Hub 端）**：绑定具体 RFC1918 LAN IPv4 且 `cookie_secure=false` 时，
   默认以 `_flowdrop._tcp.local` 发布 `FlowDrop-<主机昵称>`；SRV 指向真实端口，
   A 只含绑定的那个 LAN IPv4，TXT 仅 `v=1,scheme=http,path=/`。
@@ -48,13 +52,27 @@
   一键重启 Hub；也可选择「同时使用内网和 Tailscale」，分别选一个内网 IPv4 和一个
   Tailscale IPv4（同端口、同一 Hub、同一数据库）。窗口只把**真正绑定成功**的 URL
   列为可用，并标注地址类型；无 Tailscale 网卡时明确提示不能选双模式，仍可用内网单地址。
-- 首次管理员密码在**本机图形界面**设置（仅未初始化时可用，不会覆盖已有密码）。
+- **主窗口可直接进入设置**：登录前后收件箱窗口都有明确的「设置」按钮（登录页右上角、
+  登录后位于顶部栏「退出」旁），窗口原生菜单也有「设置…」，快捷键 `Ctrl+,`。
+  点击可靠打开并聚焦同一个本机设置窗口，不再只能靠托盘或首次启动。该按钮只注入
+  Wails 收件箱窗口，普通浏览器/手机页面没有它，也不向 Hub 页面开放管理 bridge。
+- **设备配对只在本机进行**：设置窗口点「添加设备」生成四位码（仅在本机显示，
+  不经网络、不写日志），手机输入该码即完成配对；设备列表可查看名称/创建与最近使用
+  时间，并**在本机撤销**（撤销立即失效其 HTTP 会话与 WebSocket）。管理接口只走
+  进程内 Go bridge，不提供远程生成码或远程管理端点。
 - 关闭窗口收进系统托盘、Hub 继续运行；托盘菜单可显示窗口、打开设置、在浏览器打开、
   **明确退出并停止 Hub**（撤回 mDNS、释放端口）。无托盘时关闭窗口会确认退出，
-  不会留下找不回窗口的后台进程。
+  不会留下找不回窗口的后台进程；此时主窗口的「设置」入口仍然可用。
 - 复用现有 React 与 `/api/v1/*`：Cookie、CSRF、Origin、WebSocket、鉴权下载与
   浏览器完全一致；Wails 管理桥（原生设置接口）只对进程内 `wails://` 设置窗口开放，
   局域网可访问的 Hub 页面**无法**调用它。外链交给系统浏览器。
+- **收件箱整窗拖拽上传**：登录后把一张或多张图片/普通文件拖到内容窗口任意位置，
+  松开即上传；进度、取消、大小上限沿用原上传流程。目录跳过并提示、不递归；
+  登录页拖入文件不会上传（也不会把文件当页面打开）。
+- 应用内代理直连：桌面在创建窗口前把本进程 WebKitGTK 的代理模式设为直连，
+  因此系统代理保持开启时 Hub 的 HTTP 与 WebSocket 仍可直连（不再必须修改
+  `no_proxy`）；不会修改系统代理、KDE 设置或环境变量。只有这项应用内配置失败时，
+  设置窗口才显示“代理风险”诊断，并说明 WebSocket 可能被改写而不是断言必然失败。
 - 产物：`dist/flowdrop-desktop`；用户级安装脚本 `scripts/install-desktop.sh`
   （安装到 `~/.local`，不需 sudo，不写开机自启）。构建与运行说明见
   [docs/DEPLOY.md §16](docs/DEPLOY.md)；桌面双监听实测见
@@ -62,17 +80,31 @@
 
 **Android 原生客户端已交付**
 
-- 密码登录、会话保存、文字/图片/文件收发、系统分享入口、实时同步和下载。
-- Debug APK：`android/app/build/outputs/apk/debug/app-debug.apk`（约 9.4 MiB）。
+- 配对码配对、设备令牌存入 Android Keystore、文字/图片/文件收发、系统分享入口、
+  实时同步和下载。
+- **自动连接（单 Hub）**：保存 Hub 稳定 ID、设备令牌与候选地址；启动/回到前台/连接
+  中断时先探测 LAN、再探测 Tailscale，且只在无凭据 `health` 的 `hub_id` 匹配后才用
+  Bearer 恢复 Cookie/CSRF，随后恢复事件流。切地址只重试连接，**不重放**上传/删除等写操作。
+- Debug APK：`dist/flowdrop-android-debug.apk`（约 9.74 MiB，Gradle原包位于`android/app/build/outputs/apk/debug/app-debug.apk`）。
 - 构建与模拟器验证说明见 [android/README.md](android/README.md)，真实手机仍待验收。
 
 **不在 MVP 内**（P1/P2，明确未实现）
 
 - 内容自动过期（默认 7 天等），仅保留 `expires_at` 字段但**不自动删除**，
   见 PRD §15.3。
-- 扫码配对、Windows/macOS 桌面版、开机自启、自动网络重绑定/自动选路、多个 Hub 实例。
-- APK 自动发布监听目录、设备管理、搜索、批量传输、断点续传。
+- 扫码配对、Tailscale 管理 API 自动枚举设备、全网段扫描、Windows/macOS 桌面版、
+  开机自启、Web 跨 origin 自动切换登录态、多个 Hub 实例。
+- APK 自动发布监听目录、搜索、批量传输、断点续传。
 - 自建 NAT 穿透、公网匿名分享、多用户/团队协作、端到端加密。
+
+## 当前版本（配对版，2026-11-08）
+
+配对与单Hub LAN/Tailscale自动连接已实现并构建。可直接运行[Linux桌面版](dist/flowdrop-desktop)，
+手机使用[Android测试APK](dist/flowdrop-android-debug.apk)。先完全从托盘退出旧桌面实例；
+需要双网络时在设置启用内网与Tailscale双模式，再点「添加设备」取四位码，每台设备配对一次。
+服务端/桌面检查、Android102 JVM、Chromium16项以及隔离Wails真实配对/拖拽通过；
+真实手机Wi-Fi/Tailscale切换仍待验收，未自动安装或提交。产物摘要、证据与限制见
+[VERIFICATION §20](docs/VERIFICATION.md#20-四位码配对与多地址连接2026-11-08本轮)。
 
 ## 快速开始（开发）
 
@@ -84,13 +116,14 @@ scripts/dev.sh
 ```
 
 - 前端开发地址：<http://127.0.0.1:5173>（Vite 代理 `/api` 与 WS 到 Go）
-- 首次使用需在另一个终端设置管理员密码：
+- 首次配对（不需要账号密码）：保持 Hub 运行，在另一个终端生成四位码：
 
 ```bash
-cd server && go run ./cmd/flowdrop admin init
+cd server && go run ./cmd/flowdrop pair
 ```
 
-然后浏览器打开 <http://127.0.0.1:5173> 登录。
+- 该命令与 Hub 使用同一 `data_dir`，码只在本终端打印；然后浏览器打开
+  <http://127.0.0.1:5173>，输入该码完成配对。桌面版可直接在设置窗口点「添加设备」。
 
 > 开发模式必须**通过 Vite 的 5173 端口**访问，不要直接用 8080：`FLOWDROP_COOKIE_SECURE`
 > 默认为 `true`，开发时请按下面说明设置，否则浏览器不会保存登录 Cookie。
@@ -111,9 +144,9 @@ scripts/dev.sh
 
 ```bash
 scripts/build.sh 0.1.0        # 前端构建 + 嵌入 → dist/flowdrop（单文件）
-./dist/flowdrop admin init    # 本机设置管理员密码（必须在 Hub 本机）
-./dist/flowdrop doctor        # 环境自检
+./dist/flowdrop doctor        # 环境自检（含配对表与 Hub ID）
 ./dist/flowdrop serve         # 默认 http://127.0.0.1:8080
+./dist/flowdrop pair          # Hub 运行中时生成四位配对码（本机终端显示）
 ```
 
 ### 主路径：家庭局域网 HTTP
@@ -127,7 +160,7 @@ FLOWDROP_COOKIE_SECURE=false \
 ./dist/flowdrop serve
 ```
 
-手机与电脑浏览器打开 `http://192.168.1.10:8080` 登录即可。
+手机与电脑浏览器打开 `http://192.168.1.10:8080`，输入本机生成的配对码即可。
 
 - **`FLOWDROP_LISTEN` 必须写具体的局域网 IP，不能是 `0.0.0.0` / `::`**：
   `cookie_secure=false` 时服务端**拒绝**通配地址启动，避免在所有网卡上开明文端口。
@@ -155,7 +188,7 @@ FLOWDROP_COOKIE_SECURE=false \
 启用条件（全部满足才发布）：监听地址是**具体的 RFC1918 IPv4**（10/8、172.16/12、
 192.168/16）、`cookie_secure=false`、地址确实在某块启用多播的网卡上。回环、`0.0.0.0`/`::`、
 Tailscale `100.64/10`、链路本地、公网地址和 HTTPS 反代入口**不会**发布该记录。
-记录中**不含**密码、会话、条目正文或机器路径。
+记录中**不含**设备令牌、会话、条目正文或机器路径。
 
 ```bash
 # 显式关闭（默认自动开启；JSON 也可写 "discovery_enabled": false）
@@ -208,7 +241,9 @@ FLOWDROP_COOKIE_SECURE=false \
 }
 ```
 
-同一 tailnet 内的手机/电脑访问 `http://100.x.y.z:8080`，用同一管理员密码登录。
+同一 tailnet 内的手机/电脑访问 `http://100.x.y.z:8080`，用本机生成的配对码配对。
+Android 已配对后会在 LAN 与 Tailscale 之间自动优先 LAN；**首次异地访问**需要手填
+Tailscale 地址（或在使用已允许的 MagicDNS 名时填该名字），不会自动扫描 tailnet。
 若想用 MagicDNS 名访问（如 `http://hub.tailnet-name.ts.net:8080`），把该名字加入
 `FLOWDROP_ALLOWED_HOSTS`。Tailscale 直连**不需要** `tailscale serve`；若你已经用
 `tailscale serve` 提供 HTTPS，则保持 `cookie_secure=true`（那是 TLS 入口，不属于
@@ -236,8 +271,9 @@ cd android
 ./gradlew :app:assembleDebug
 ```
 
-安装后把 Hub 地址填为 `http://<Hub-IP>:8080`，用同一管理员密码登录。
-客户端沿用 Cookie 会话、CSRF 和 Origin 协议。完整说明见 [android/README.md](android/README.md)。
+安装后在发现列表或手填 Hub 地址，输入**本机生成的四位配对码**完成配对；
+配对后设备令牌保存在 Android Keystore。客户端沿用 Cookie 会话、CSRF 和 Origin 协议。
+完整说明见 [android/README.md](android/README.md)。
 
 Android 发现交付边界（并行 worker 自报，本轮未复跑）：APK
 `android/app/build/outputs/apk/debug/app-debug.apk`，SHA-256
@@ -261,6 +297,33 @@ scripts/install-desktop.sh
 ~/.local/bin/flowdrop-desktop
 ```
 
+> **从旧版升级**：先通过托盘菜单「退出 FlowDrop（停止 Hub）」完全退出旧进程，
+> 再执行 `scripts/build-desktop.sh` 和 `scripts/install-desktop.sh`，最后重新启动。
+> 只关闭窗口会收进托盘；SingleInstance 会复用旧进程，直接启动新二进制可能看不到新入口。
+
+**直接运行，无需额外准备**：`dist/flowdrop-desktop` 是完整的单文件应用，双击或
+`./dist/flowdrop-desktop` 就会在进程内拉起同一个 Hub 并打开收件箱；不需要先运行
+任何 `.sh`，也不需要另外启动 `flowdrop serve`。`scripts/` 里的脚本只是构建与安装
+工具，不会自动安装或替换你现有的二进制（新版需要你手动运行）。
+
+**收件箱拖拽上传（Linux 内容窗口）**：登录后把一张或多张图片/普通文件拖到窗口
+任意内容区域，松开鼠标即按原有流程上传（进度、取消、512 MiB 上限不变）；同时拖入
+多个文件时逐个顺序上传。拖入目录会被跳过并在页面提示，**不递归**展开；只在登录后
+的收件箱窗口生效，登录页拖入文件不会发送。
+
+> 新版修正 Wayland 原生拖放动作协商与异步接收状态，已在独立容器用 GTK Wayland
+> 源验证真实拖入、重复上传与下载 SHA 一致，并通过本轮 X11 核心回归。此前多文件、
+> 目录跳过与普通文件选择验证记录保留在 §18；用户已确认真实 KDE/Dolphin 拖拽可用，
+> 大文件进度/取消未实测，最新产物与证据见 [docs/VERIFICATION.md §19](docs/VERIFICATION.md)。
+
+**会话无障碍总线损坏时的启动兜底**：如果登录会话的 AT-SPI 无障碍总线已损坏
+（症状：启动后约 1 秒内原生 `SIGSEGV`，日志里有 `Couldn't register with
+accessibility bus`），旧构建会被系统 `libatk-bridge` 的空指针崩溃带走。新构建会在
+GTK 初始化前探测该总线，只有探测失败时才**仅对本进程**设置 `NO_AT_BRIDGE=1` 并
+继续启动，同时在设置窗口显示黄色说明；正常会话不关闭无障碍。没有设置窗口可看时
+可用 `FLOWDROP_DESKTOP_A11Y=off` 显式关闭、`=on` 强制保留；彻底恢复无障碍需注销
+并重新登录（重启会话的无障碍总线），详见 `docs/DEPLOY.md` §16.10。
+
 构建依赖（Debian/Ubuntu）：
 
 ```bash
@@ -274,7 +337,7 @@ sudo apt install build-essential pkg-config libgtk-3-dev libwebkit2gtk-4.1-dev
 `libsoup-3.0-0`、`libjavascriptcoregtk-4.1-0`）。
 
 桌面版自身的设置只保存**绑定地址与端口**（`~/.config/flowdrop/desktop.json`，
-不含密码）。单地址沿用旧的 `bind_address` + `port`；双模式额外写入
+不含设备令牌）。单地址沿用旧的 `bind_address` + `port`；双模式额外写入
 `additional_bind_addresses`（恰好一个 Tailscale 地址），旧版 `desktop.json` 仍可直接读取。
 Hub 数据仍在 `~/.local/share/flowdrop/`，与 CLI 共用。
 
@@ -282,9 +345,8 @@ Hub 数据仍在 `~/.local/share/flowdrop/`，与 CLI 共用。
 
 ```text
 flowdrop serve [-config FILE]                     启动 Hub
-flowdrop admin init [-username NAME] [--force]    设置/轮换管理员密码（交互式，不回显）
-flowdrop admin init --password-stdin              脚本用：从 stdin 读两行
-flowdrop doctor [-config FILE]                    检查数据目录、数据库、磁盘、端口
+flowdrop pair [-config FILE]                      生成四位配对码（仅本机终端显示）
+flowdrop doctor [-config FILE]                    检查数据目录、数据库、配对表、磁盘、端口
 flowdrop backup OUT.tar.gz                        一致性快照（数据库 + 附件）
 flowdrop version                                  版本
 ```
@@ -312,13 +374,13 @@ scripts/build.sh && cd tests && npm install && npx playwright test
 
 | 面 | 措施 |
 |---|---|
-| 传输 | **默认主路径是可信家庭 LAN 明文 HTTP**（用户已接受该边界）；跨网/不可信网络请用 Tailscale Serve 或 TLS 反代。多租户/公网暴露不在范围内 |
-| 认证 | Argon2id 慢哈希；会话令牌只存 SHA-256；滑动过期；服务端可吊销 |
+| 传输 | **默认主路径是可信家庭 LAN 明文 HTTP**（用户已接受该边界）；跨网/不可信网络请用 Tailscale Serve 或 TLS 反代。设备令牌在 LAN 上同样可能被同网段监听，Tailscale 前置要求两端在线且策略允许。多租户/公网暴露不在范围内 |
+| 认证 | 四位数临时配对码（120 秒、一次成功、5 错失效）+ 32B 设备令牌（DB 只存 SHA-256）；服务端可撤销设备。码不是加密，Hub ID 也只防误连，不认证明文 HTTP 对端 |
 | CSRF | 双提交令牌 + Origin / Host 校验；Host 白名单防 DNS rebinding。Web 与原生 App 同一套 |
 | 越权 | 所有条目、预览、下载、WS 统一会话鉴权，知道 ID 也不够 |
 | 上传 | 流式写入、大小上限、磁盘余量预检、并发上限、临时文件 + 原子 rename |
 | 文件 | 服务端嗅探 MIME；SVG/HTML/XML/JS 强制 `attachment` + `octet-stream`；文件名不参与路径 |
-| 隐私 | 日志不含内容原文/密码/令牌；无第三方分析、无外链资源 |
+| 隐私 | 日志不含内容原文/设备令牌/会话；无第三方分析、无外链资源 |
 
 发现安全问题时请勿公开提交 issue，先私下联系维护者。
 
@@ -328,16 +390,21 @@ scripts/build.sh && cd tests && npm install && npx playwright test
   这是用户已接受的家庭可信 LAN 边界；需要加密时改用 Tailscale 或 Caddy HTTPS。
 - **LAN HTTP 下浏览器能力受限**：`navigator.clipboard`、Service Worker、通知等可能不可用。
   Web 端复制会降级为可手动选择的文本；**不承诺**后台剪贴板读写或系统通知。
-- Android debug APK 已构建并在 API 36 模拟器验证；真实手机安装与收发仍待验收。
+- Android debug APK 已构建并在 API 36 模拟器验证；真实手机安装、收发与真实
+  LAN/Tailscale 自动选路仍待验收（见 [docs/VERIFICATION.md](docs/VERIFICATION.md)）。
 - 手机浏览器后台不保证常驻 WS 或系统通知；回到前台会重新拉取列表（设计如此）。
+- **Web 不自动切换地址**：浏览器 Cookie 按 origin 保存，换地址（如 LAN → Tailscale）
+  需重新配对；只有 Android（单 Hub）自动在保存的候选地址间选路。
+- 浏览器 Cookie TTL 仍为 7 天（`session_ttl_hours`），**不是**随设备令牌无限滑动；
+  到期后需重新输入配对码。设备令牌本身一直有效直到在本机撤销。
 - APK 下载后由 Android 系统引导安装，应用不请求静默安装权限。
 - 单用户、单 Hub；无多租户、无端到端加密、无自动过期。
 - 大文件上限 512 MiB（可配置）；无断点续传，中断需重传。
 - **单地址限制是历史版本行为**：旧版一个 Hub 只能绑定一个具体 IP，LAN 与 Tailscale
   需重启切换。当前版本支持同一个 Hub 同时监听一个内网地址 + 一个 Tailscale 地址
-  （`additional_listen` / 桌面双模式）；仍不会监听 `0.0.0.0`，也不会自动切换网络或
-  自动重绑定失效地址。Tailscale 绑定步骤见上文与
-  [Android 使用说明](android/README.md)。
+  （`additional_listen` / 桌面双模式）；仍不会监听 `0.0.0.0`，也不会在 Hub 侧重绑定
+  失效地址。**客户端自动选路只有 Android（单 Hub）**，Web 不承诺自动换 origin。
+  Tailscale 绑定步骤见上文与 [Android 使用说明](android/README.md)。
 - mDNS 自动发现只在**具体 RFC1918 LAN IPv4 + 明文 HTTP** 时发布；
   Tailscale、回环、通配、HTTPS 入口不广播。系统 Avahi 或其它进程占用 UDP 5353 时，
   发布可能失败（Hub 仍正常收发，仅日志告警）。

@@ -208,7 +208,7 @@ export function App() {
           </span>
           <div>
             <h1>FlowDrop</h1>
-            <p className="sub">共享收件箱</p>
+            <p className="sub">{session?.hub?.name ?? '共享收件箱'}</p>
           </div>
         </div>
         <div className="topbar-right">
@@ -216,7 +216,7 @@ export function App() {
             {connLabel(conn)}
           </span>
           <button className="ghost" onClick={onLogout} type="button">
-            退出
+            解除配对
           </button>
         </div>
       </header>
@@ -270,7 +270,7 @@ export function App() {
           <div className="empty">
             <p className="empty-title">收件箱是空的</p>
             <p className="muted">
-              在上面输入文字或链接，或把文件拖进页面。手机与电脑登录同一 Hub 即可互见。
+              在上面输入文字或链接，或把文件拖进页面。手机与电脑配对同一个 Hub 即可互见。
             </p>
           </div>
         )}

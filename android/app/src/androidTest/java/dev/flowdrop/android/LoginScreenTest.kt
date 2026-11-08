@@ -21,6 +21,11 @@ import org.junit.Assert.assertTrue
 import org.junit.Rule
 import org.junit.Test
 
+/**
+ * Pins the pairing form: four-digit code with leading zeros, no submission
+ * before a complete code, pairing vs. reconnect of an already paired Hub, and
+ * the unchanged discovery/address behaviour.
+ */
 class LoginScreenTest {
 
     @get:Rule
@@ -28,12 +33,15 @@ class LoginScreenTest {
 
     private fun setLogin(
         address: String = "http://192.168.1.50:8080",
-        username: String = "admin",
-        password: String = "",
+        pairingCode: String = "",
+        hasStoredPairing: Boolean = false,
+        hubName: String = "",
         error: String? = null,
         discovery: DiscoveryState = DiscoveryState(),
         onHubChange: (String) -> Unit = {},
+        onPairingCodeChange: (String) -> Unit = {},
         onSubmit: () -> Unit = {},
+        onRetryConnection: () -> Unit = {},
         onSelectHub: (DiscoveredHub) -> Unit = {},
         onSearchDiscovery: () -> Unit = {},
         onRefreshDiscovery: () -> Unit = {},
@@ -43,14 +51,15 @@ class LoginScreenTest {
             FlowDropTheme {
                 LoginScreen(
                     hubAddress = address,
-                    username = username,
-                    password = password,
+                    pairingCode = pairingCode,
+                    hasStoredPairing = hasStoredPairing,
+                    hubName = hubName,
                     loggingIn = false,
                     error = error,
                     onHubChange = onHubChange,
-                    onUsernameChange = {},
-                    onPasswordChange = {},
+                    onPairingCodeChange = onPairingCodeChange,
                     onSubmit = onSubmit,
+                    onRetryConnection = onRetryConnection,
                     discovery = discovery,
                     onSearchDiscovery = onSearchDiscovery,
                     onRefreshDiscovery = onRefreshDiscovery,
@@ -69,43 +78,82 @@ class LoginScreenTest {
     )
 
     @Test
-    fun showsHubUserAndPasswordFields() {
+    fun showsAddressAndPairingCodeFields() {
         setLogin()
-        compose.onNodeWithText("Hub 地址").assertIsDisplayed()
-        compose.onNodeWithText("用户名").assertIsDisplayed()
-        compose.onNodeWithText("管理员密码").assertIsDisplayed()
-        compose.onNodeWithText("登录").assertIsDisplayed()
+        compose.onNodeWithText("电脑地址").assertIsDisplayed()
+        compose.onNodeWithText("配对码").assertIsDisplayed()
+        compose.onNodeWithText("配对").assertIsDisplayed()
     }
 
     @Test
     fun showsErrorText() {
-        setLogin(error = "用户名或密码不正确")
-        compose.onNodeWithText("用户名或密码不正确").assertIsDisplayed()
+        setLogin(error = "配对码无效或已过期，请在 Hub 上重新查看")
+        compose.onNodeWithText("配对码无效或已过期，请在 Hub 上重新查看").assertIsDisplayed()
     }
 
     @Test
-    fun loginButtonIsDisabledWithoutPassword() {
+    fun pairButtonIsDisabledWithoutACompleteCode() {
         var submitted = false
-        setLogin(password = "", onSubmit = { submitted = true })
-        compose.onNodeWithText("登录").assertIsDisplayed()
-        compose.onNodeWithText("登录").performClick()
-        assertEquals(false, submitted)
+        setLogin(pairingCode = "042", onSubmit = { submitted = true })
+        compose.onNodeWithText("配对").performClick()
+        assertFalse("a three-digit code must not submit", submitted)
     }
 
     @Test
-    fun loginButtonSubmitsWithPassword() {
+    fun pairButtonSubmitsWithFourDigitCode() {
         var submitted = false
-        setLogin(password = "secret", onSubmit = { submitted = true })
-        compose.onNodeWithText("登录").performClick()
-        assertEquals(true, submitted)
+        setLogin(pairingCode = "0429", onSubmit = { submitted = true })
+        compose.onNodeWithText("配对").performClick()
+        assertTrue(submitted)
     }
 
     @Test
-    fun submitsOnImeDone() {
+    fun typingKeepsLeadingZeroAndOnlyFourDigits() {
+        var lastCode = ""
+        compose.setContent {
+            var code by remember { mutableStateOf("") }
+            FlowDropTheme {
+                LoginScreen(
+                    hubAddress = "http://192.168.1.50:8080",
+                    pairingCode = code,
+                    hasStoredPairing = false,
+                    hubName = "",
+                    loggingIn = false,
+                    error = null,
+                    onHubChange = {},
+                    onPairingCodeChange = {
+                        code = it
+                        lastCode = it
+                    },
+                    onSubmit = {},
+                    onRetryConnection = {},
+                )
+            }
+        }
+        // Letters are dropped, the leading zero is kept, the fifth digit is cut.
+        compose.onNodeWithText("配对码").performTextInput("04a299")
+        assertEquals("0429", lastCode)
+        compose.onNodeWithText("0429").assertIsDisplayed()
+    }
+
+    @Test
+    fun storedPairingOffersReconnectInsteadOfPairing() {
+        var reconnected = false
         var submitted = false
-        setLogin(password = "secret", onSubmit = { submitted = true })
-        compose.onNodeWithText("登录").performClick()
-        assertEquals(true, submitted)
+        setLogin(
+            pairingCode = "0429",
+            hasStoredPairing = true,
+            hubName = "客厅里的电脑",
+            onSubmit = { submitted = true },
+            onRetryConnection = { reconnected = true },
+        )
+
+        compose.onNodeWithText("已配对的电脑").assertIsDisplayed()
+        compose.onNodeWithText("客厅里的电脑").assertIsDisplayed()
+        compose.onNodeWithText("重连").performClick()
+
+        assertTrue("reconnect must reuse the saved pairing", reconnected)
+        assertFalse("reconnect must not start a new pairing", submitted)
     }
 
     @Test
@@ -126,7 +174,7 @@ class LoginScreenTest {
         var submitted = false
         var selected: DiscoveredHub? = null
         setLogin(
-            password = "secret",
+            pairingCode = "0429",
             discovery = DiscoveryState(
                 status = DiscoveryStatus.FINISHED,
                 hubs = listOf(nearbyHub),
@@ -138,8 +186,8 @@ class LoginScreenTest {
         compose.onNodeWithText("客厅").performClick()
 
         assertEquals(nearbyHub, selected)
-        // Selection must not log in: the user still presses 登录 with a password.
-        assertFalse("selection must not submit the login form", submitted)
+        // Selection must not pair: the user still presses 配对 with a code.
+        assertFalse("selection must not submit the pairing form", submitted)
     }
 
     @Test
@@ -170,10 +218,10 @@ class LoginScreenTest {
     }
 
     @Test
-    fun discoveryFailureDoesNotBlockManualLogin() {
+    fun discoveryFailureDoesNotBlockManualPairing() {
         var submitted = false
         setLogin(
-            password = "secret",
+            pairingCode = "0429",
             discovery = DiscoveryState(
                 status = DiscoveryStatus.ERROR,
                 message = "此设备不支持网络服务发现",
@@ -181,8 +229,8 @@ class LoginScreenTest {
             onSubmit = { submitted = true },
         )
         compose.onNodeWithText("此设备不支持网络服务发现", substring = true).assertIsDisplayed()
-        compose.onNodeWithText("登录").performClick()
-        assertTrue("manual login must still work", submitted)
+        compose.onNodeWithText("配对").performClick()
+        assertTrue("manual pairing must still work", submitted)
     }
 
     @Test
@@ -195,23 +243,24 @@ class LoginScreenTest {
             FlowDropTheme {
                 LoginScreen(
                     hubAddress = text,
-                    username = "admin",
-                    password = "",
+                    pairingCode = "",
+                    hasStoredPairing = false,
+                    hubName = "",
                     loggingIn = false,
                     error = null,
                     onHubChange = {
                         text = it
                         lastAddress = it
                     },
-                    onUsernameChange = {},
-                    onPasswordChange = {},
+                    onPairingCodeChange = {},
                     onSubmit = {},
+                    onRetryConnection = {},
                     discovery = DiscoveryState(status = DiscoveryStatus.IDLE),
                 )
             }
         }
-        compose.onNodeWithText("Hub 地址").performTextClearance()
-        compose.onNodeWithText("Hub 地址").performTextInput("100.101.102.103:8080")
+        compose.onNodeWithText("电脑地址").performTextClearance()
+        compose.onNodeWithText("电脑地址").performTextInput("100.101.102.103:8080")
         assertEquals("100.101.102.103:8080", lastAddress)
         compose.onNodeWithText("100.101.102.103:8080").assertIsDisplayed()
     }
@@ -220,7 +269,7 @@ class LoginScreenTest {
     fun warnsAboutCleartextHttp() {
         setLogin()
         compose.onNodeWithText(
-            "家庭局域网 HTTP 为明文传输，仅用于可信网络；跨网请使用 Tailscale 地址。密码仅用于换取会话，随后立即丢弃。",
+            "家庭局域网 HTTP 为明文传输，仅用于可信网络；跨网请使用 Tailscale 地址。配对码只用于换取本机设备凭证，随后立即失效。",
         ).assertIsDisplayed()
     }
 }

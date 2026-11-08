@@ -32,26 +32,52 @@ type multiClient struct {
 	csrf   string
 }
 
-func loginMulti(t *testing.T, base string) *multiClient {
+func pairMulti(t *testing.T, h *hub.Hub, base string) string {
 	t.Helper()
-	res, body := doJSON(t, http.MethodPost, base+"/api/v1/auth/login",
-		fmt.Sprintf(`{"username":"admin","password":%q}`, testPassword),
+	code, err := h.CreatePairingCode()
+	if err != nil {
+		t.Fatalf("CreatePairingCode: %v", err)
+	}
+	res, body := doJSON(t, http.MethodPost, base+"/api/v1/auth/pair",
+		fmt.Sprintf(`{"code":%q,"device_name":"multi-test","native":true}`, code.Code),
 		func(r *http.Request) { r.Header.Set("Origin", base) })
 	if res.StatusCode != http.StatusOK {
-		t.Fatalf("login %s = %d body=%s", base, res.StatusCode, body)
+		t.Fatalf("pair %s = %d body=%s", base, res.StatusCode, body)
+	}
+	var out struct {
+		DeviceToken string `json:"device_token"`
+	}
+	if err := json.Unmarshal(body, &out); err != nil || out.DeviceToken == "" {
+		t.Fatalf("pair %s returned no device token: %v body=%s", base, err, body)
+	}
+	return out.DeviceToken
+}
+
+// restoreMulti turns a saved device token into the cookies/CSRF of one origin.
+// Cookies are host-scoped, so each listener gets its own restored session rather
+// than sharing one cookie across addresses.
+func restoreMulti(t *testing.T, base, token string) *multiClient {
+	t.Helper()
+	res, body := doJSON(t, http.MethodGet, base+"/api/v1/auth/session", "",
+		func(r *http.Request) {
+			r.Header.Set("Origin", base)
+			r.Header.Set("Authorization", "Bearer "+token)
+		})
+	if res.StatusCode != http.StatusOK || !strings.Contains(string(body), `"authenticated":true`) {
+		t.Fatalf("restore session %s = %d body=%s", base, res.StatusCode, body)
 	}
 	var out struct {
 		CSRFToken string `json:"csrf_token"`
 	}
 	if err := json.Unmarshal(body, &out); err != nil {
-		t.Fatalf("decode login: %v body=%s", err, body)
+		t.Fatalf("decode session: %v body=%s", err, body)
 	}
 	var pairs []string
 	for _, c := range res.Cookies() {
 		pairs = append(pairs, c.Name+"="+c.Value)
 	}
-	if len(pairs) == 0 {
-		t.Fatalf("login %s set no cookies", base)
+	if out.CSRFToken == "" || len(pairs) == 0 {
+		t.Fatalf("restore session %s is incomplete: %s", base, body)
 	}
 	return &multiClient{base: base, cookie: strings.Join(pairs, "; "), csrf: out.CSRFToken}
 }
@@ -216,11 +242,9 @@ func TestDualListenSharedStateEventsAndSecurity(t *testing.T) {
 		}
 	}
 
-	if err := h.InitializeAdmin("", testPassword); err != nil {
-		t.Fatalf("InitializeAdmin: %v", err)
-	}
-	a := loginMulti(t, urls[0])
-	b := loginMulti(t, urls[1])
+	token := pairMulti(t, h, urls[0])
+	a := restoreMulti(t, urls[0], token)
+	b := restoreMulti(t, urls[1], token)
 
 	// One store: a text created on listener A is visible on B.
 	status, body := a.postJSON(t, "/api/v1/items/text", `{"type":"text","text":"shared across listeners","sender_device":"client-a"}`)

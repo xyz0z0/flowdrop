@@ -1068,6 +1068,10 @@ Hub 返回 `426`，页面持续「已离线，重连中」。用原始 DNS/HTTP 
 处理：桌面版**不修改**用户的代理配置，只在设置窗口显示黄色横幅，指出要把具体 IP 加入
 忽略列表，并给出 `no_proxy` 示例。绑定回环地址（`127.0.0.1`）时不受影响。
 
+> **历史限制已修复（2026-11-08 本轮）**：这一节保留为旧版实测记录。当前桌面版在创建
+> 窗口前把本进程 WebKitGTK 设为直连，系统代理保持开启时 HTTP 与 WebSocket 均可
+> 直接工作，不再必须修改 `no_proxy`。新的实测、失败路径和入口验证见 §15。
+
 ### 13.8 未验证 / 未做（明确标注）
 
 1. **未在真实手机**上验证手机访问桌面版 Hub（与既有 Android 真机待验收项一致）。
@@ -1288,7 +1292,7 @@ listening urls="[http://192.168.31.184:18082 http://100.125.168.63:18082]"
 | 项目 | 状态 |
 |---|---|
 | 真实手机在家庭 Wi-Fi 与移动网络 Tailscale 之间切换访问 | **未验证**；本轮只在本机真实 `eno1` + `tailscale0` 上验证双地址 |
-| 桌面 Wails WebView 的 WebSocket 经系统代理 | **仍失败（426）**：本机 KDE 系统代理未把 Hub IP 加入忽略列表。设置窗口保留黄色提示；Go WS 探针绕过代理后 101 通过。未修改宿主代理 |
+| 桌面 Wails WebView 的 WebSocket 经系统代理 | **旧版仍失败（426）**：本机 KDE 系统代理未把 Hub IP 加入忽略列表。设置窗口保留黄色提示；Go WS 探针绕过代理后 101 通过。未修改宿主代理。**该限制已在本轮修复**：应用内 WebKit 直连后，系统代理保持开启时实测 `/api/v1/events status=101`，见 §15 |
 | 地址在运行中失效（Tailscale 退出/DHCP 变化）后的自动重绑定 | **设计上不做**；只验证启动失败与手动保存失败回滚 |
 | Android 真机 / 自动发现 | 仍待验收，本轮未改 Android，也未真机测试 |
 | Windows/macOS 桌面版 | 未做 |
@@ -1316,3 +1320,556 @@ listening urls="[http://192.168.31.184:18082 http://100.125.168.63:18082]"
   `dist/flowdrop` 已更新，包含同一 Hub 多地址监听；构建时间 `2026-11-07T21:29:55Z`。
   此结果补齐本节 worker 完成时尚未重建正式 CLI 产物的历史状态。
 - 真实手机从 Wi-Fi 切换到移动网络经 Tailscale 收发仍待用户验收；本次未重复 worker 已通过的测试。
+
+## 15. 本轮验证：主窗口设置入口 + 应用内代理直连（2026-11-08）
+
+### 15.1 问题与最小修复
+
+旧版主窗口是 Hub 的真实 HTTP origin（`http://<LAN-IP>:<port>/`），设置窗口是进程内
+`wails://localhost`，两者 origin 隔离；设置入口只有托盘，所以主窗口里找不到设置。
+
+本轮不把管理 bridge 开放给 Hub 页面，也不增加 LAN HTTP 管理 API：
+
+- 只向 **Wails 收件箱窗口**注入一个「设置」按钮：登录页在右上角，登录后位于顶部栏
+  「退出」旁；React 在首次加载/登录/退出后替换 DOM 时由 `MutationObserver` 自动补回。
+- 收件箱窗口增加原生菜单「设置… / 在浏览器打开 / 退出 FlowDrop（停止 Hub）」，
+  并提供 `Ctrl+,` 快捷键。
+- 点击只发送固定 raw message `flowdrop:opensettings`。服务端只在本实例 inbox 窗口、
+  当前 Hub origin 完全匹配时接受；未知消息、其它 origin、设置窗口自身、任意 native
+  方法名一律忽略。外链仍走原有 `flowdrop:openurl:`（仅 http/https + 限速）。
+- 普通浏览器/手机加载的 React 资产不包含该按钮；设置窗口的 `wails://` 资产也不包含。
+- 托盘菜单「设置…」、首次管理员初始化、双网络模式、隐藏/恢复窗口、无托盘确认退出
+  均保留。
+
+代理侧：另一个 worker 提供同 main 包 `configureDesktopWebViewProxy() error`，在
+`application.New` 之后、创建窗口之前把本进程 WebKitGTK 数据管理器的网络代理设为
+`WEBKIT_NETWORK_PROXY_MODE_NO_PROXY`。它不修改系统代理、KDE/GSettings 或环境变量。
+`SettingsService.ProxyWarning` 现在由实际结果组合：
+
+| 应用内直连 | 环境代理风险 | 设置窗口 |
+|---|---|---|
+| 成功 | 有/无 | 不显示旧的「必须改 no_proxy」提示 |
+| 失败 | 有 | 显示「应用内 WebView 直连代理设置失败（原因）」+ 真实风险诊断（不隐藏） |
+| 失败 | 无 | 不显示；无代理可绕过时不制造警告 |
+
+风险文案明确写“可能被改写、代理允许 WebSocket 时不受影响”，不再断言检测到代理就必然
+离线。
+
+### 15.2 单元测试（`go vet` / `go test`）
+
+```text
+$ cd desktop && go vet -tags gtk3 ./...          # 无输出
+$ cd desktop && go test -tags gtk3 -count=1 ./...
+ok  flowdrop/desktop
+ok  flowdrop/desktop/internal/appsettings
+ok  flowdrop/desktop/internal/hubmgr
+ok  flowdrop/desktop/internal/network
+```
+
+本轮桌面模块共 **56 个顶层 PASS + 30 个子测试 PASS**。与设置入口/代理状态直接相关的：
+
+| 测试 | 覆盖 |
+|---|---|
+| `TestInboxControlActionAllowsOnlyFixedSettingsFromHubOrigin` | 正确 inbox + 正确 Hub origin 的 `flowdrop:opensettings` 被接受；设置窗口/错误 origin/不同 scheme/缺失 origin/未知动作/带额外 payload 全部拒绝 |
+| `TestInboxControlActionKeepsExternalURLLimited` | 外链仍只允许 http/https，拒绝 javascript/file/wails 和超长 URL |
+| `TestSettingsEntryScriptUsesOnlyTheFixedRawMessage` | 注入脚本只含固定设置消息，不含 `Call.ByName` / wails runtime / 第二个 URL 通道 |
+| `TestSettingsEntryButtonIsDesktopOnly` | 本地设置资产与 Hub 浏览器资产都不含桌面专属按钮/消息 |
+| `TestCombineProxyWarningHonorsInAppDirectMode` | 直连成功才清掉旧 no_proxy 提示；失败保留环境诊断并明确标注直连失败；无代理风险时不制造警告 |
+
+失败路径（WebKit 直连配置失败）无法在本机 Linux/GTK3 真实触发（helper 成功），
+因此该分支只有上面的纯函数单元测试，不声称已做真实失败 GUI 实测。
+
+### 15.3 真实 Wails/WebKitGTK + Xvfb 验证
+
+环境：既有 Xvfb `:99`（1400x1000）、独立 D-Bus 会话、临时 `XDG_*`/数据目录，绑定真实 LAN
+`192.168.31.184:18114`，已有管理员密码。系统代理保持开启：
+`http_proxy=https_proxy=HTTP_PROXY=HTTPS_PROXY=http://127.0.0.1:10808`（真实 xray
+监听），`no_proxy=` / `NO_PROXY=` 为空；未修改 KDE `kioslaverc` 或任何环境配置。
+
+启动日志：
+
+```text
+2026/11/08 09:16:46 in-app WebView network proxy: direct (system proxy unchanged)
+listening url=http://192.168.31.184:18114
+request method=GET path=/api/v1/auth/session status=200
+request method=POST path=/api/v1/auth/login status=200
+request method=GET path=/api/v1/items status=200
+request method=GET path=/api/v1/events status=101 dur_ms=48108
+```
+
+`status=101` 是真实 WebKit WebView 的 WebSocket 升级，页面同时显示「实时同步中」；
+`ss -tnp` 显示 `WebKitNetworkProcess` 直接连到 `192.168.31.184:18114`，没有经过
+`127.0.0.1:10808`。HTTP 登录/列表均为 200。
+
+| 场景 | 实测结果 | 截图 |
+|---|---|---|
+| 已有管理员，启动进入主窗口（不是设置窗口） | 主窗口登录页出现；**登录前**右上角已有「设置」按钮 | `/tmp/fd-gui-settings/shots/01-login.png` |
+| 登录前点击主窗口「设置」 | 打开并聚焦同一个 780x760 设置窗口；无旧代理警告（直连成功） | `/tmp/fd-gui-settings/shots/02-settings-from-injected.png` |
+| `Ctrl+,`（登录前/后） | 设置窗口重新显示并聚焦 | `/tmp/fd-gui-settings/shots/03-settings-via-shortcut.png`、`09b-settings-shortcut-after-login.png` |
+| 登录后入口 | 顶部栏「设置」位于「实时同步中」「退出」之间；WS 已连接 | `/tmp/fd-gui-settings/shots/07b-after-login.png` |
+| 登录后点击入口 | 设置窗口再次显示/聚焦 | `/tmp/fd-gui-settings/shots/08-settings-after-login.png` |
+| 小窗口 420x420 | 顶部栏入口不遮挡「实时同步中」「退出」；发送区仍可用 | `/tmp/fd-gui-settings/shots/13-small-window.png` |
+| 退出登录 | React 替换 DOM 后右上角「设置」入口仍存在 | `/tmp/fd-gui-settings/shots/14-after-logout-small.png` |
+| 托盘继续工作 | 隔离会话里用最小 `StatusNotifierWatcher` 桩注册托盘；DBusMenu 5 项：显示收件箱/设置…/在浏览器打开/分隔符/退出；点击「设置…」打开设置，点击「退出」停止 Hub 并释放端口 | `/tmp/fd-gui-settings/shots/10-settings-from-tray.png` |
+| 无托盘仍能进设置 | 无 Watcher 的独立会话日志 `no StatusNotifierWatcher ... running without a tray`；点击登录前右上角「设置」仍打开设置窗口 | `/tmp/fd-gui-settings/shots/11-notray-settings-from-injected.png` |
+
+真实执行命令要点（可复现）：
+
+```bash
+Xvfb :99 -screen 0 1400x1000x24 -nolisten tcp &   # 本轮复用了既有 :99
+dbus-daemon --session --fork --print-address=1 --print-pid=1   # 需要托盘时另起 watcher 桩
+env DISPLAY=:99 http_proxy=http://127.0.0.1:10808 https_proxy=http://127.0.0.1:10808 \
+    no_proxy= NO_PROXY= \
+    FLOWDROP_DESKTOP_CONFIG=/tmp/.../desktop.json FLOWDROP_DATA_DIR=/tmp/.../data \
+    dist/flowdrop-desktop
+```
+
+> 无窗口管理器时，`xdotool type --window` 可向 WebKit 输入框输入，`Ctrl+,` 用
+> XTEST 全局按键；这不是 Chromium/curl 验证，窗口是真实 Wails GTK3 + WebKitGTK 4.1。
+
+### 15.4 安全边界与回归
+
+- 原 §13.4「Hub 页面拿不到管理 bridge」不变：本轮没有把 `Call.ByName` 或
+  runtime.js 引入 Hub 页面；新增的只是固定设置动作，且受 inbox 窗口 + 当前
+  Hub origin 双重校验（单元测试覆盖拒绝路径）。
+- 托盘菜单结构保持原有 5 项；窗口隐藏后托盘「显示收件箱」可恢复、托盘「设置…」可
+  打开设置、托盘「退出」停止 Hub 并释放端口均复测。关闭窗口收进托盘的 WindowClosing
+  hook 本轮未改；由于测试环境没有窗口管理器，本轮用窗口隐藏/恢复验证 Wails Show/Hide
+  路径，真实点击关闭按钮的旧实测保留在 §13.5。
+- 首次管理员设置、双地址绑定、启动失败显示设置窗口、`desktop.json` 保存逻辑未改。
+- 外链仍交系统浏览器，下载仍走 WebKit 原生行为。
+
+### 15.5 限制
+
+- 应用内代理失败分支未在真实 GUI 触发（本机构建成功）；只有组合逻辑单测，未伪造
+  “配置失败”的生产行为。
+- 托盘验证使用最小 `StatusNotifierWatcher` D-Bus 桩，不是完整 KDE Plasma 面板；
+  菜单注册、布局和点击事件是真实的 Wails D-Bus 交互。
+- 未重新验证高 DPI、多显示器和真实手机。
+
+### 15.6 最终产物
+
+- `dist/flowdrop-desktop`（`scripts/build-desktop.sh` 在代理 helper 最终版之后重新生成）
+- SHA-256：`1d725145f9223d3ada068f8f4ba9df3efd6ce831f4bf6bd2374e8379ad8394ca`
+- 大小：`16,970,824` 字节（release, tags `gtk3 production`）
+- 最终产物在独立 Xvfb/D-Bus 中冒烟：启动日志 `in-app WebView network proxy: direct`，
+  登录页 HTTP 200，真实点击右上角「设置」打开 780x760 设置窗口，退出后 Hub `hub stopped`
+  且端口释放。
+- 安装/升级：先退出正在运行的 FlowDrop（托盘「退出 FlowDrop」），再运行
+  `scripts/install-desktop.sh`；不要直接覆盖 `~/.local/bin` 后立即启动，
+  SingleInstance 可能复用旧进程。详见 DEPLOY §16.3。
+
+---
+
+## 16. 桌面启动原生崩溃（AT-SPI / libatk-bridge）定位与修复 — 2026-11-08
+
+### 16.1 结论
+
+本轮复现的原生崩溃定位于登录会话的 AT-SPI 无障碍总线故障：系统 `libatk-bridge` 在
+`spi_register_object_to_path` 里解引用空的 `spi_global_app_data`（`NULL+0x18`），
+而 WebKitGTK 仍注册可访问对象。用户最初日志缺少首部，尚不能完全确认与该复现为同次原因。Go 无法 recover 原生 SIGSEGV。本轮做了**进程级窄
+兜底**：启动时探测无障碍总线，仅在探测失败时对 FlowDrop 这一个进程设置
+`NO_AT_BRIDGE=1`；正常会话保留无障碍。
+
+### 16.2 崩溃证据（事实）
+
+- 真实进程 `flowdrop-desktop[3081727]` 10:42:46 崩溃：`SIGSEGV`、`PC=0x7f1873ab5778`、
+  `addr=0x18`、`rax=0`、`signal arrived during cgo execution`，前置
+  `Couldn't register with accessibility bus: Did not receive a reply`。
+- 该 `PC` 的低位偏移 `0x11778` 落在 `libatk-bridge-2.0.so.0.0.0`：
+  `mov (%rax),%rax` 后 `cmp %rsi,0x18(%rax)`，GOT 项为 `spi_global_app_data`；
+  崩溃即该指针为 NULL。
+- 只读诊断 worker 用无 FlowDrop 代码的 C 探针在同一故障会话 3/3 同址崩溃，并保留
+  原生栈：`spi_register_object_to_path ← libatk-bridge ← WebKit ← JSC ← GLib main
+  loop ← gtk_main_iteration_do`；`NO_AT_BRIDGE=1` 对照 2/2 正常；隔离新会话总线
+  3/3 正常（报告 `/tmp/flowdrop-crash-diagnosis-2026-11-08.md`）。
+- 托盘 goroutine 的 `runtime.selectgo`（`systemtray_linux.go:411`）只是崩溃 dump 中
+  的阻塞点，不是崩溃帧；无 Wails/菜单/代理帧。
+
+### 16.3 修复内容（desktop/ 内）
+
+- 新增 `desktop/a11y_linux.go`：`guardAccessibilityBridge()` 在 `main()` 最前面、
+  GTK/WebKit 初始化之前运行。
+  - `FLOWDROP_DESKTOP_A11Y=on|keep`：不探测、不关闭（用户显式选择）。
+  - `FLOWDROP_DESKTOP_A11Y=off|none`：本进程关闭。
+  - 已设置 `NO_AT_BRIDGE`：尊重调用方，不覆盖。
+  - 默认 `auto`：经会话总线 `org.a11y.Bus.GetAddress` 取地址，连接后调用只读的
+    `org.a11y.atspi.Registry.GetRegisteredEvents` 做真实 D-Bus 往返，单阶段超时 2 秒、外层等待上限 3 秒；
+    失败才 `NO_AT_BRIDGE=1` 并输出原因与恢复建议。
+- `desktop/main.go`：调用该 guard；`desktopState` 记录兜底原因。
+- `desktop/service.go` + `desktop/assets/{index.html,app.js}`：设置窗口新增黄色
+  `accessibility_warning` 横幅，明确“仅本应用、系统设置未改、注销重登恢复”。
+- 新增 `desktop/a11y_unsupported.go`（非 Linux 空实现）与
+  `desktop/a11y_linux_test.go`（策略、地址解析、无响应/缺失 socket 探针、提示文案）。
+
+### 16.4 验证（真实二进制；不重跑无关 GUI 回归）
+
+命令（隔离会话总线/运行时目录与 XDG 数据；Wayland 走真实 kwin，X11 为 XWayland）：
+
+```
+gofmt -l desktop/                                  # 无输出
+go vet -tags gtk3 ./...                            # 通过
+go test -count=1 -tags gtk3 -run 'TestA11y|TestProbeA11y|TestGuardAccessibility|TestDesktopAccessibility' -v .
+                                                   # PASS（含 0.4s 无响应总线探针、缺失 socket）
+scripts/build-desktop.sh                           # release, tags gtk3 production
+```
+
+| 场景 | 结果 |
+|---|---|
+| 真实故障会话（当前 `/run/user/1000/at-spi/bus_0` 缺失） | 日志 `accessibility bridge disabled … connect: no such file or directory`；应用正常启动，Hub 请求 200（`/tmp/fd-repro-a1/run.log`、`/tmp/fd-iso-w2/run.log`） |
+| 隔离健康会话总线（自有 `AT-SPI` 总线） | 日志 `AT-SPI bus responsive; accessibility left enabled`；无障碍保留，应用正常（`/tmp/fd-iso-w1/run.log`） |
+| 故障地址 + `FLOWDROP_DESKTOP_A11Y=on` | 日志 `kept (FLOWDROP_DESKTOP_A11Y=on)`；不探测、不关闭；应用运行（`/tmp/fd-iso-w3b/run.log`） |
+| 故障地址 + `NO_AT_BRIDGE=1` | 日志 `already set; not probing`；应用正常（`/tmp/fd-iso-w4/run.log`） |
+| 隔离会话中冻结无障碍总线守护进程（模拟无响应） | 修复前构建卡在 WebKit 初始化（日志只有 JSC 行）；修复后 2 秒探测超时→关闭→Hub 正常启动（`/tmp/fd-iso-c1/run.log`、`/tmp/fd-iso-c2/run.log`） |
+
+### 16.5 产物
+
+`dist/flowdrop-desktop`（`scripts/build-desktop.sh`，2026-11-08 11:04 CST）：
+
+- SHA-256：`53a4bb9cbf86dea00176ca552de7209943d90cd8bd27e0f872f07f7a783b4b02`
+- 大小：`16,987,240` 字节（release，tags `gtk3 production`）
+
+### 16.6 限制与未完成
+
+- 崩溃发生时的 a11y 总线状态（“socket 存在但无应答”）在诊断 worker 复现后已变化，
+  本轮**没有再亲手触发同一条 SIGSEGV**；修复有效性依据是：故障总线被可靠探测并
+  跳过，崩溃路径（`libatk-bridge` 初始化 + WebKit 注册）不再进入。没有把探针
+  结果当成“已亲测同次崩溃消失”。
+- 设置窗口的黄色横幅与 `Ctrl+,`/托盘菜单等 GUI 入口本轮未做截图级复测（上一轮
+  §15 已覆盖；本轮只验证进程启动与 Hub 加载）。是否保留可访问性设置入口的完整
+  回归留给 CR-03。
+- 冻结无障碍总线时，WebKit 子进程仍可能因自身 a11y 连接阻塞而拖慢首个页面加载；
+  真实故障态（socket 缺失）下子进程快速失败，不影响本修复目标。
+- 真正的系统侧根因（at-spi2-core 2.60.4 缺少 NULL 保护）未修复，也不应由此仓库修；
+  恢复建议是注销重登，见 `docs/DEPLOY.md` §16.10。
+
+
+### 16.7 CR-03 定向验收补充
+
+2026-11-08，独立新 pi worker（task `task_0af23f9c44fa`，dispatch
+`ctx_6c8046db7f96`）使用同一摘要的现有二进制，空白临时数据库、隔离
+XDG/会话总线、缺失 AT-SPI socket 和 Xvfb :99 验证：
+
+- 真实 WebView 设置页黄色无障碍提示完整可见；主 agent 已人工查看
+  `/tmp/fd-cr03/shots/settings-fault.png`。
+- `Ctrl+,` 使此前隐藏的设置窗口可见。
+- 向本任务应用发送 SIGTERM 后退出码 0，日志 `hub stopped`，18098 端口释放。
+  这只验证信号退出路径，不代表托盘菜单退出已复测。
+- 用户真实 XWayland :0 下，合成快捷键及按钮/菜单点击未打开隐藏设置窗口，
+  截图也受限。原因未确认；Xvfb 的成功不能排除真实桌面问题。
+  主窗口设置按钮和托盘退出本轮仍未验证，不标为通过。
+
+报告：`/tmp/flowdrop-cr03-report.md`。未修改产品代码、未重建、未安装，未停止
+用户应用或宿主服务。复用 §16.4 的健康会话证据，不重复全量检查。原始用户
+同次 SIGSEGV 的首部仍缺失，保留 §16.6 的判断限制。
+
+流程偏差已同步 TASKS：截图超时实际 20 秒而非约定 10 秒，真实 XWayland
+进行了四种输入尝试；后续必须遵循预算与停止条件，不继续扩大验收。
+
+交付产物仍为 §16.5 的 `dist/flowdrop-desktop`。升级时先由用户从托盘菜单退出
+旧进程，然后运行 `scripts/install-desktop.sh` 并重新打开应用；本轮未自动安装或提交。
+
+---
+
+## 17. 收件箱拖拽：独立 release 构建与交付文档 — 2026-11-08
+
+任务 `task_3e6d6280dafe` / dispatch `ctx_b596d92722d7`（DD-03）。依赖已完成：
+DD-02W 前端整窗 drag/drop（报告 `/tmp/flowdrop-dd02w-report.md`，8 例纯逻辑检查 +
+`noEmit` 类型检查通过）、DD-02D 桌面仅 inbox 恢复 WebKit 文件 DND（报告
+`/tmp/flowdrop-dd02d-report.md` 附录 A，真实 GObject 回归修正前 FAIL、修正后 PASS，
+生产/探针标签 vet/test/build 与 6 例 node 守卫均已通过）。本节**不重跑**上述已通过
+检查，只记录独立 release 构建与**非执行**的产物核对。
+
+### 17.1 构建（实际执行）
+
+```bash
+timeout 300 scripts/build-desktop.sh     # 仓库根，rc=0
+```
+
+- 前端：`tsc -b && vite build` → `server/internal/webui/dist`（`index.html` 641 B、
+  `assets/index-CKKiHSIo.css` 10,365 B、`assets/index-DjxBH9lw.js` 165,722 B），
+  与本次源码一致（DD-02W 之后的新样式/逻辑已进入嵌入资源）。
+- 桌面：`go build -tags "gtk3 production" -ldflags "-s -w -X flowdrop/internal/api.Version=0.1.0-desktop"`，
+  GTK 使用仓库既有的用户级 sysroot（`~/.local/share/flowdrop-desktop/sysroot`），
+  未安装任何系统包，未修改构建脚本。
+- 构建命令退出码 0，日志 `/tmp/dd03-build.log`。构建顺带删除了受版本控制的
+  `server/internal/webui/dist/.placeholder`（构建脚本既有行为），本轮已原样恢复，
+  工作区没有额外删除。
+
+### 17.2 产物（只做了 stat / sha256sum / strings / grep，未运行）
+
+| 项目 | 值 |
+|---|---|
+| 绝对路径 | `/home/bob/vibe-code/flowdrop/dist/flowdrop-desktop` |
+| 大小 | `16,999,592` 字节 |
+| 构建时间 | 2026-11-08 13:10:01 +0800（`stat` mtime） |
+| SHA-256 | `6201f15e3dc910686f1d26abc2f2e45532580f309539840838397ef2ab2106f6` |
+| 标签 | `gtk3 production`（release） |
+
+非执行核对结果：
+
+- 嵌入前端 `server/internal/webui/dist/assets/index-DjxBH9lw.js` 含
+  `webkitGetAsEntry`（目录判定）、`window-drop-overlay` 与「松开鼠标即可上传」文案；
+  `index-CKKiHSIo.css` 含 `.window-drop-overlay` 规则。即打包的是 DD-02W 的新前端。
+- 二进制 `strings` 含 DD-02D 生产日志前缀与全部成功/失败分支：
+  `inbox file drop: WebKit HTML5 file drop restored (removed drag-drop=%d, drag-motion=%d)`、
+  `... this view was already relaxed ...`、`... no WebKitWebView found ...`、
+  `... GTK drag-drop/drag-motion signals not found ...`、`... unexpected handler count ...`、
+  `... disconnect count mismatched ...`、`... native GTK window not available yet ...`、
+  `... no GTK window to inspect ...`。
+- 探针专用符号/标签（`flowdrop_filedrop_probe`、`FlowdropProbeObject`）在产物中不存在，
+  即交付的是生产标签构建，不是探针构建。
+- `git diff --check` 退出码 0（无空白/冲突标记）；本次只改 README 与 docs，未改产品
+  代码、构建脚本、依赖或 `docs/TASKS.md`。
+
+### 17.3 交付文档
+
+- `README.md`：桌面特性加“收件箱整窗拖拽上传”要点；桌面版章节补充“直接运行
+  `dist/flowdrop-desktop`、无需任何脚本或额外 Hub”“目录跳过不递归”“只登录后生效”
+  与升级前托盘退出旧进程的说明，并指向本节。
+- `docs/DEPLOY.md` §16.11（新增，并在 §16.9 加一条限制）：使用方式、限制、
+  旧实例升级步骤与未验证项边界。
+- 本任务报告：`/tmp/flowdrop-dd03-report.md`。
+
+### 17.4 尚未验证（不得写成端到端通过）
+
+本轮**未运行任何 GUI/浏览器/临时 D-Bus/Xvfb/portal/a11y**，未连接或操作 KDE/RustDesk，
+未改代理，未启动容器/VM 代替验证。因此以下全部仍是未验证项：
+
+1. 真实 WebKitGTK 控件树命中：inbox 窗口树中是否找到 `WebKitWebView`、两个信号是否
+   各恰好 1 个匹配并成功 `disconnect`。
+2. 实际两信号解除计数（期望 `removed drag-drop=1, drag-motion=1` 的日志行）与计数
+   不符分支的真实表现。
+3. 文件管理器真实拖拽端到端：登录前拖入不导航、目录跳过提示、多文件顺序上传、
+   进度/取消/大小上限。
+4. KDE/XDG portal 与 GTK3 `text/uri-list` 的真实交互；portal 自动激活的附加进程
+   本轮未产生也未核对。
+5. 设置窗口内拖入无反应、浏览器访问 Hub 行为不变（DD-02W/CR 级回归）。
+
+代码完成、产物构建成功和非执行核对通过，都不等于端到端可用。实现依赖 Wails v3.1.0
+未公开的内部 handler 位置与 `user_data` 约定，Wails 升级后必须重验（产品界面不暴露
+该实现细节，仅在此技术文档记录）。
+
+### 17.5 交付边界
+
+**最终状态已更新**：本节保留早期构建及失败复验的历史。原生 FileList 桥最终构建与隔离 E2E 通过结果见 §18，不以本节旧产物摘要判断当前二进制。
+
+**DD-08 诊断补证**：本轮容器 WebKitGTK 2.54 中，真实 pcmanfm 与 GTK URI-list 源的 DOM 事件均只有 URI/HTML 字符串，`files.length=0`。导航守卫已注入；容器临时实验即使接受 URI dragover 使 drop 派发，仍没有 File 对象，因此仅放宽网页类型判断不能完成上传。报告 `/tmp/flowdrop-dd08-report.md`；需原生桥接，尚未实现。结论只限本轮环境；诊断超出硬停止预算的偏差已记入 TASKS，不能因有证据而视为流程合规。
+
+**DD-07 后续复验（2026-11-08）**：初始化接入修正后重建为 `bb6c1948fe3956909dd43e95d7ac195363e331c1d8c4a58f1baed7d25a8e2ade`。独立容器真实日志确认两处 GTK 阻断各解除 1 个，登录前不发送/不导航通过；登录后从 GTK URI-list 源实际拖入仍导航到 file:///、没有上传请求或条目，上传验收失败。产物仍不能认定拖拽可用，需另行诊断事件类型与真实文件管理器来源。报告 `/tmp/flowdrop-dd07-report.md`；容器已清理、宿主正式进程未变。§17.2 原摘要仅作历史记录。
+
+**后续 DD-04 实测更正（2026-11-08）**：对 §17.2 摘要产物在独立 Docker 容器内做了原生 GTK URI-list 鼠标拖拽。WebView 登录通过，但没有任何 `inbox file drop` 日志或上传请求，条目为空，拖拽验收失败；登录前不发送/不导航通过。不能将本构建视为拖拽功能可用。报告 `/tmp/flowdrop-dd04-report.md`；容器已精确停止并删除，宿主 KDE/portal/RustDesk PID 未变。后续仅修正拖拽初始化生命周期接入，再重建复验；其他未验证项保留。
+
+产物已生成但**未安装、未 commit/push**。用户升级时应先从托盘「退出 FlowDrop（停止
+Hub）」结束旧进程，再手动运行新二进制或新安装版本；本仓库不自动安装，也不承诺旧
+实例会被替换。
+
+## 18. Linux 原生 FileList 拖拽最终交付（2026-11-08）
+
+本节保留前次 X11 交付记录；用户随后报告 KDE Wayland 无效，修复后最新产物和验证见 §19。
+
+### 18.1 前次产物与实现
+
+DD-11 task `task_006c1a08e946` / dispatch `ctx_8b450e34c884` 独立构建成功，
+`timeout 300 scripts/build-desktop.sh` rc=0。主 agent 已核对最终文件：
+
+| 项目 | 值 |
+|---|---|
+| 路径 | `dist/flowdrop-desktop` |
+| 大小 | 17,020,360 字节 |
+| mtime | 2026-11-08 13:52:39 +0800 |
+| SHA-256 | `4cbfeef23938cdf38807ffebb8e2f052330e5ce6153c6bdf8b8ba169609636ca` |
+| 构建标签 | `gtk3 production` |
+
+GTK 原生 drop 回调接收实际拖入的本地文件；真实路径只留在原生侧，带唯一 accept MIME
+标记的 WebKit 文件选择请求消费该批路径，隐藏 input 产生真实 FileList，再由 Composer
+沿现有 Cookie/CSRF 上传。未添加路径读取 binding、临时 HTTP relay、Cookie 复制或整文件
+base64 缓冲。普通选择文件请求保持默认处理；未登录时页面 ready 门禁拒绝交付。
+
+### 18.2 原样产品隔离 E2E（实际执行）
+
+DD-12 task `task_017f5729034b` / dispatch `ctx_2717db2a1a90`。报告
+`/tmp/flowdrop-dd12-report.md`，原始日志/截图/脚本在 `/tmp/flowdrop-dd12/`。
+主 agent 已复核日志、下载 SHA 记录、容器清理证明并查看多文件上传后截图。
+
+在独立 Docker/X11 容器中原样运行上述摘要二进制，**未加载 LD_PRELOAD、诊断 shim
+或测试 JS 来改变产品行为**。真实鼠标从 GTK URI-list 源拖入，API 核查会话只查询与下载，
+不代发上传。结果：
+
+| 场景 | 结果与证据 |
+|---|---|
+| 原生初始化 | 两处 Wails 阻断各解除 1 个，native FileList bridge installed 日志出现 |
+| 登录前拖入 | 原生接收后由页面 ready 门禁拒绝；无 chooser、无上传、无导航 |
+| 登录后拖入非 Composer 区域 | 原生 accepted → chooser handoff → 页面 POST upload 201 → 条目新增，下载 SHA 与夹具一致 |
+| 多文件、中文空格名、PNG | 一次真实拖入 3 文件，3 次上传、名称/大小/下载 SHA 均一致；仅验证 PNG 文件传输，不额外认定预览正确 |
+| 目录与文件混合 | 只上传普通文件，显示目录提示，不递归 |
+| 普通选择文件 | 页面按钮打开普通 GTK chooser，选文件上传成功，未被 pending drop 接管 |
+| 相同文件再次拖入 | 每次新增 1 条，下载 SHA 一致 |
+
+总上传请求 **7** 次，均 status=201，与最终 **7** 个条目一致。
+原生 drop accepted=5、chooser handoff=4、未登录拒绝=1，计数自洽。
+6 个不同夹具的源/下载 SHA 逐项一致（其中 core 夹具重复发送一次）：
+
+| 夹具 | 字节 | 源 SHA-256 = 下载 SHA-256 |
+|---|---:|---|
+| `dd12-core.txt` | 26 | `6520e682e545b88ef57b8e24e9083cf0d0dce82d7f8290310694876118d9aa42` |
+| `dd12 中文 空格.txt` | 23 | `d7767ca8cfa2764f36cd67d1699c31dffa4af8401df41d8a4849a0e9e6976415` |
+| `dd12-beta.txt` | 25 | `d454ebb37189f6e67eadb3cf60b30977f17ff9b2ab3f6729c432cdfcf49c87ed` |
+| `dd12-note.png` | 89 | `8581e78087dce3ca1c5c43155ba55e2e675a909507a73e326bb26089451bbe51` |
+| `dd12-mix.txt` | 22 | `9ce63191d1a32a0e1c3207c65034fcc22c0fbbd192ec904b9a0ecd7f2c221375` |
+| `chooser.txt` | 29 | `fe36dd6865761508615f5228074ba58416b574f0eed8c9f08be68cdb5d2052e4` |
+
+### 18.3 干扰、限制与清理
+
+- 普通 chooser 自动化连续按两次 Return 后对话框仍可见，紧随的一次拖拽未被接收。
+  Escape 关闭后用相同方法重试成功。报告归因于自动化干扰；本轮证据只确认存在模态
+  窗口及其阻止拖拽，不将推测归因为确定的产品或自动化问题。
+- 最终轮使用 GTK 原生 URI-list 源，**没有重跑 pcmanfm，更没有覆盖 KDE/Dolphin/portal
+  或 Wayland 真机**。此前 pcmanfm 只用于诊断，不能借此声称最终产品的这些来源通过。
+- 512 MiB 大文件、上传进度/取消、失败条目、多显示器本轮未实测；上传通路未改，
+  不把历史测试当成本轮证据。当前原生单批最多接收 64 个文件和 64 个目录提示，超出
+  项计入 rejected 日志，超过该数量的交互未验证。
+- 容器 network=none、无发布端口、无 bind mounts/设备/privileged/host 会话共享；文件
+  全部 docker cp。图形/私有 DBus/Xvfb 只在容器内。namespace inode 对照本轮因权限
+  未取得，隔离依据是 docker inspect 与容器环境记录。
+- 容器 `b52c86e56e2b72db34d37e43714bbdc8e9c1efb9bb18050b75d0af5f7032c2cf`
+  已 stop/rm；主 agent 复核 docker 列表无 DD-12 容器。其图形/总线资源随容器退出，
+  未自动激活 portal/a11y。宿主正式进程核对使用历史清册与启动时间，本轮缺独立 before
+  快照，不能声称有完整的前后快照对照；未执行宿主 GUI、系统设置或进程清理。
+
+### 18.4 使用与交付边界
+
+用户从托盘「退出 FlowDrop（停止 Hub）」结束旧实例后，可直接运行：
+
+```bash
+./dist/flowdrop-desktop
+```
+
+无需先运行启动脚本或额外 Hub；本轮未自动安装、commit 或 push。
+
+
+## 19. KDE Wayland 拖放修复与定向交付（2026-11-08）
+
+### 19.1 用户证据与最小修复
+
+用户从 Dolphin 拖入时悬停有提示，日志确认两处阻断解除及 native FileList bridge 安装，
+但没有 native accepted、chooser handoff 或上传请求。此前 §18 的 X11 容器结果未覆盖该故障。
+
+DD-13 只读诊断与主 agent 审查发现：文件 drop 由原生接管，motion 的接受动作却交给
+WebKit 页面协商；页面拿不到 File 时可能返回 action=0，Wayland 因此不投递 drop。
+另一处缺陷是 drag-leave 会撤销已经接受、仍在等待异步数据的 drop。
+这些源码机制与用户症状一致，但未采集用户 KWin 协议 trace，不将其写作本机事件级根因证明。
+
+DD-14 仅修正该原生流程：匹配 Hub origin、现有文件 target 且源提供 COPY 时，明确
+`gdk_drag_status(COPY)` 并消费 motion，避免 WebKit 后置 handler 覆盖；已接受 drop 的
+授权跨 leave 保留，仍由一次数据消费、新 drop、5 秒时限判定、页面加载/销毁撤销。
+MIME 过滤、路径只在原生侧、chooser token 与页面认证上传通路保持原约束。
+源只提供 MOVE 的拖拽回落 WebKit，本桥不承诺接受；超限与大文件边界仍见 §18。
+
+检查：GTK vet、probe vet 通过；38 个无 GUI Go 测试通过，其中新增 4 个回归调用生产
+共用动作判定和授权逻辑，覆盖 leave 后数据、外来 context、超时、重复消费和新授权替换。
+它们不等同真实 compositor 测试。报告 `/tmp/flowdrop-dd14-report.md`。
+
+### 19.2 最新 release
+
+DD-15 `timeout 180s bash scripts/build-desktop.sh` rc=0；主 agent 独立复核摘要。
+
+| 项目 | 值 |
+|---|---|
+| 路径 | `dist/flowdrop-desktop` |
+| 大小 | 17,020,392 字节 |
+| mtime | 2026-11-08 17:51:53 +0800 |
+| SHA-256 | `76196ab070de3ae14750a4eb37a3d295d18561d7eee8b4e56a0f06a87f7ab463` |
+| 构建 | Go 1.26.8；`gtk3 production`；0.1.0-desktop |
+
+构建报告 `/tmp/flowdrop-dd15-report.md`。未安装、提交或替换运行中的旧实例。
+
+### 19.3 本轮隔离 GUI 验证
+
+DD-16 使用上述原样二进制（两端 SHA 相同，无 shim/LD_PRELOAD/测试 JS 改行为）。
+独立 Docker 容器中自起 Xvfb、私有 DBus 与 Weston 14.0.2 x11 backend/pixman；
+FlowDrop 与 GTK 源强制 `GDK_BACKEND=wayland`、连接 `wayland-dd16` socket，窗口渲染
+在 Weston 输出内。compositor 的底层 X11 不作为应用 X11 结果；未采集协议 trace。
+
+| 场景 | 结果 |
+|---|---|
+| Wayland GTK 源真实鼠标拖入 | PASS：native accepted → FileList handoff → 页面 POST upload 201 → 新条目 |
+| 同文件再次拖入 | PASS：第二条目、第二次 POST 201 |
+| 独立 X11 会话核心拖入 | PASS：新数据目录与第二实例，同样 accepted/handoff/POST 201 |
+| 内容一致性 | 三次均为 59 B，下载 SHA 与夹具一致 |
+
+夹具/下载 SHA-256：`6397be9bf71e700faab0c3890f9c36b11731623a1aedd2138c80fb36f8e672e7`。
+报告 `/tmp/flowdrop-dd16-report.md`；证据 `/tmp/flowdrop-dd16/evidence/`，含日志、API查询/
+下载校验、截图、inspect 和清理记录。主 agent 已查看重复上传截图并复核实际日志与下载摘要。
+
+容器 network=none、IPC private、无 host bind/device/额外 caps、非特权、无发布端口；
+图形/总线只在容器，文件 docker cp。容器
+`fa83aeb8b46a320ce5acdd0d4367b24a694589043c09410a1abe100032c1103c` 已 stop/rm，
+主 agent 核对列表无残留；宿主相关进程前后 diff 为空。仅缓存测试镜像保留。
+
+### 19.4 使用与剩余验收
+
+先从旧实例托盘「退出 FlowDrop（停止 Hub）」完全退出，再直接运行：
+
+```bash
+/home/bob/vibe-code/flowdrop/dist/flowdrop-desktop
+```
+
+只关闭窗口会留在托盘；新进程可能复用旧实例，不能以磁盘文件重建声称已升级运行版本。
+无需先运行 sh，也未改用户安装目录。2026-11-08 用户随后明确确认「拖拽可以使用了」，
+此前真实 KDE Wayland / Dolphin 故障按用户反馈关闭；未另外采集真机日志。本轮未重跑多文件、
+目录、大文件或取消场景，不以 §18 历史结果冒充本轮通过。没有宿主 GUI 实验或桌面设置修改。
+
+
+## 20. 四位码配对与多地址连接（2026-11-08，本轮）
+
+### 20.1 实现与构建
+
+本轮以临时四位配对码替代账号密码入口。码120秒有效、一次成功后失效、全Hub累计错5次锁定；本机生成新码解除锁并废弃上一值（含确定性碰撞排除）。设备随机令牌只存hash，Android在Keystore保存；Web以HttpOnly Cookie保存。设备在本机设置查看/撤销。Android保存稳定HubID及实际绑定的候选地址，启动/回前台/失联先LAN后Tailscale，无凭据探测ID后恢复该origin的Cookie/CSRF；不自动重放写请求。
+
+| 产物 | 字节 | SHA-256 |
+|---|---:|---|
+| `dist/flowdrop-desktop` | 17069704 | `03ea9fee1e442301c24eada9126b0427f05d07c66118fe5e5e7d6c19346d0857` |
+| `dist/flowdrop` | 11776162 | `48eda3d93639a1f6720392d51ea1a2532e9ee6e693fa2b246a393985d76c50b6` |
+
+2026-11-08 18:52 +0800，Go1.26.8；desktop release tags gtk3/production，版本0.1.0-desktop-pairing；CLI 0.1.0-pairing。前端index-CkHuKcr7.js、index-CKKiHSIo.css。主agent独立sha复核一致，未安装/提交。报告`/tmp/flowdrop-pa09l-report.md`。
+
+### 20.2 已完成检查
+
+- 服务端一次完整`go test ./...`通过，各变更包已定向vet与核心race检查。配对核心16顶层+2子测试、CLI5、API44顶层、Hub21；完整服务端检查对未变包使用缓存，没有冒充全部新跑。
+- desktop全模块65测试与vet通过；包含真实临时Hub本机桥生码→HTTP配对→列表→撤销；JS语法检查通过。
+- Android 101 JVM测试（0失败/跳过）与完整`compileDebugAndroidTestKotlin`通过，未排除旧LoginScreenTest；纯连接控制15项，地址选择15项，数据层53项。AndroidTest仅编译，未执行真机或模拟器。
+- Chromium容器端到端16/16通过（0失败/跳过），原样CLI。包括错误码、配对与刷新、解除后401、双context实时文字、图片预览/原字节下载、APK/普通文件/多文件/SHA、超限413、离线同步与Hub重启。容器私有`http://172.19.0.2:8096`的非secure context与手动复制回退实际验证；不当作用户真实Wi-Fi。报告`/tmp/flowdrop-pa08p-report.md`。
+- 实际Wails X11容器：设置真实点击添加设备并显示四位码/倒计时→inbox真实键盘配对→POSTpair200→原生GTK URI-list鼠标拖放→FileList→POSTupload201→条目64B；独立读取设备下载后SHA一致。主agent查看2张截图及日志。未用API上传代替拖拽。报告`/tmp/flowdrop-pa08g-report.md`，证据`/tmp/flowdrop-pa08g/{evidence,logs}`。
+
+### 20.3 隔离与局限
+
+GUI均独立Docker，无host network/PID/IPC、host bind/display/bus/socket/device、特权或发布端口。cap-drop ALL/no-new-privileges；浏览器仅自建internal网络，桌面network none。未启动宿主GUI/临时DBus/portal/a11y/Xvfb，未操作KDE/RustDesk/代理/用户实例。两个容器及internal网络均stop/rm，主agent核对列表无残留，镜像缓存保留。
+
+镜像缺CJK字体，桌面截图中文显示方框，数字/文件名可读；未因此更改产品或宿主字体。设置内GUI点击撤销未执行，后端HTTP/WS及Web解除已由自动测试覆盖。成功消费的码在设置仍倒计时到过期，不能再消费；每添加一台设备应重新生成。此为显示限制，本轮不扩大修复范围。
+
+真实Android Keystore、手机Wi-Fi/Tailscale切换和本轮KDE/Dolphin真机尚未验证；§19用户反馈属于此前拖拽产物，不能替代本轮配对与切网真机验收。
+
+### 20.4 Android实际网络层集成与APK
+
+新增`RealHubPairingTest`对原样CLI启动的两个具体回环地址执行真实HTTP：一次native配对、文字/103B有效PNG/98317B普通文件上传，模拟电脑读回原字节与SHA；电脑反向发送文字与65543B文件，Android下载核对；第二origin一次Bearer GETsession重建Cookie/CSRF、写重放次数0；同地址换成另一真实Hub时ID不符不发凭据且保留记录；logout后旧token拒绝而另一设备仍可用。新增1项与全量102 JVM均0fail/0skip。故障选择通过probe注入、kind=other、存储InMemory，不能当真实Tailscale/Wi-Fi/Keystore或Android UI验收。报告`/tmp/flowdrop-pa08i-report.md`。
+
+测试命令需显式提供已构建测试二进制：`FLOWDROP_LIVE_TEST_BIN=/home/bob/vibe-code/flowdrop/dist/flowdrop ./gradlew --offline :app:testDebugUnitTest`（cwd android）。新增集成test当前固定本次CLI SHA；未来重建不同版本需审查并更新该验收输入，不应误把摘要不符解释成业务失败。测试未设置环境变量会明确跳过该项，102全通过的本轮运行实际提供了变量。
+
+Hub重启后旧keep-alive首个请求可能报IOException；禁用OkHttp内部连接重试是避免写重放的既定方案。集成测试明确记录该失败并清自己的连接池后重试，不能据此声称App运行时已实测自动恢复该情形；不额外修改GET重试策略。
+
+APK由`timeout 240s ./gradlew --offline :app:assembleDebug`成功构建（4s），Gradle源文件与dist副本逐字节一致：
+
+| 产物 | 字节 | SHA-256 |
+|---|---:|---|
+| `dist/flowdrop-android-debug.apk` | 10209256 | `d00a6808ec5f5190354d9d1191e6a4fb1dd23cda8aaed0ca1d62357531c4e5e4` |
+
+2026-11-08 19:06:26 +0800；apksigner verify通过（v2签名，Android Debug证书），包`dev.flowdrop.android`、versionCode1/versionName0.1.0、minSdk26/targetSdk35。报告`/tmp/flowdrop-pa09a-report.md`。主agent独立复核三产物SHA，未自动安装或启动用户实例，未提交。
+
+### 20.5 用户验收步骤
+
+1. 从旧实例托盘「退出 FlowDrop（停止 Hub）」完全退出，再运行`dist/flowdrop-desktop`；只关闭窗口会复用旧进程。无需先运行sh。
+2. 若要内网和Tailscale都可用，在设置启用双模式、选择两者本机地址并保存；两端Tailscale须在线且策略允许。
+3. 设置点「添加设备」生成码。电脑内容窗口与每台手机分别配对，每添加一台设备都重新生成码（上一成功码不可重用）。手机安装`dist/flowdrop-android-debug.apk`，同Wi-Fi可发现，异地首次手填Tailscale地址；本轮未做扫码/TS节点枚举。
+4. 配对后Android记住同一Hub的候选地址，启动/回前台/失联优先LAN后Tailscale；断开的上传/发送不自动重放，需要用户重试。浏览器仍按origin保存Cookie。
+5. 用户真机确认配对、文字/图片/文件双向收发与离家/回家切换；本轮没有替用户执行该步骤。

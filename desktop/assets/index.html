@@ -21,6 +21,7 @@
 
     <p id="startup-error" class="banner banner-error" hidden></p>
     <p id="proxy-warning" class="banner banner-warn" hidden></p>
+    <p id="a11y-warning" class="banner banner-warn" hidden></p>
 
     <section class="card">
       <h2>运行状态</h2>
@@ -32,8 +33,6 @@
         </dd>
         <dt>实际绑定</dt>
         <dd><code id="listen">—</code></dd>
-        <dt>管理员密码</dt>
-        <dd id="admin-state">—</dd>
         <dt>系统托盘</dt>
         <dd id="tray-state">—</dd>
       </dl>
@@ -43,24 +42,27 @@
       </p>
     </section>
 
-    <section id="admin-card" class="card" hidden>
-      <h2>首次设置管理员密码</h2>
-      <p class="hint">密码只保存在本机 Hub 数据库中（Argon2id 哈希），不会写进桌面配置文件。</p>
+    <section id="pairing-card" class="card">
+      <h2>设备配对</h2>
+      <p class="hint">
+        在手机 FlowDrop 里输入下面的一次性四位码即可与本机 Hub 配对。码只在本窗口显示，
+        不会写入配置、日志或网络请求；120 秒内有效，成功配对一次或重新生成都会作废旧码。
+      </p>
       <div class="row">
-        <label for="admin-user">用户名</label>
-        <input id="admin-user" type="text" value="admin" autocomplete="username" />
+        <button id="pair-add" class="primary" type="button">添加设备</button>
       </div>
-      <div class="row">
-        <label for="admin-pass">密码（至少 10 位）</label>
-        <input id="admin-pass" type="password" autocomplete="new-password" />
+      <p id="pairing-unavailable" class="hint hint-warn" hidden></p>
+      <div id="pairing-code" class="pairing-code" hidden>
+        <p id="pairing-code-value" class="pairing-code-value"></p>
+        <p id="pairing-code-expiry" class="hint"></p>
       </div>
-      <div class="row">
-        <label for="admin-pass2">再次输入</label>
-        <input id="admin-pass2" type="password" autocomplete="new-password" />
-      </div>
-      <button id="set-admin" class="primary" type="button">设置管理员密码</button>
-      <p id="admin-error" class="banner banner-error" hidden></p>
-      <p id="admin-ok" class="banner banner-ok" hidden></p>
+      <p id="pairing-error" class="banner banner-error" hidden></p>
+
+      <h3 class="subhead">已配对设备</h3>
+      <ul id="device-list" class="device-list"></ul>
+      <p id="device-empty" class="hint" hidden>还没有已配对设备；点「添加设备」生成四位码。</p>
+      <p id="device-error" class="banner banner-error" hidden></p>
+      <p class="hint">解除配对会立即失效该设备的登录状态和事件流；设备本机保存的记录需在设备上退出。</p>
     </section>
 
     <section class="card">

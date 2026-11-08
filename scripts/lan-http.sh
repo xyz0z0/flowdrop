@@ -14,12 +14,12 @@
 #   scripts/lan-http.sh --binary ~/.local/bin/flowdrop
 #
 # 局域网自动发现：绑定具体 RFC1918 局域网 IPv4 且关闭 Secure Cookie 时，
-# Hub 默认发布 _flowdrop._tcp.local（只含该网卡地址，不含密码/内容）。
+# Hub 默认发布 _flowdrop._tcp.local（只含该网卡地址，不含设备令牌/内容）。
 # Tailscale 100.64/10、回环、通配地址不会广播。需要关闭时用
 # --no-discovery 或 FLOWDROP_DISCOVERY_ENABLED=false。
 #
 # 安全边界：拒绝 0.0.0.0/:: 与公网 IP，只接受本机网卡上的私有地址。
-# 明文模式下密码、会话 Cookie、传输内容都可能被同一 Wi-Fi 的其他人监听；
+# 明文模式下设备令牌、会话 Cookie、传输内容都可能被同一 Wi-Fi 的其他人监听；
 # 不可信网络请用 Tailscale Serve 或 TLS 反向代理，不要用本脚本。
 set -euo pipefail
 
@@ -154,11 +154,12 @@ FlowDrop 局域网明文 HTTP 模式（仅用于可信家庭网络）
   CookieSecure：    false
   LAN 自动发现：    $([ "$NO_DISCOVERY" = 1 ] && echo '关闭（--no-discovery）' || echo '默认开启（仅符合条件的 RFC1918 地址发布）')
 
-  同一 Wi-Fi 内的其他人可能监听密码、会话 Cookie 和传输内容。
+  同一 Wi-Fi 内的其他人可能监听设备令牌、会话 Cookie 和传输内容。
   不可信网络请改用 Tailscale Serve 或 TLS 反向代理（本脚本不涉及）。
 
-  首次使用需先初始化管理员密码：
-    ${RUN[*]} admin init${CONFIG:+ -config $CONFIG}
+  首次配对：本机生成四位配对码（120 秒、一次有效、错 5 次失效）：
+    ${RUN[*]} pair${CONFIG:+ -config $CONFIG}
+  该命令要与运行中的 Hub 使用同一 data_dir，只在本终端打印码；手机/浏览器用码配对。
 ────────────────────────────────────────────────────────────────────
 
 EOF

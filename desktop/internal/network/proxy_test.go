@@ -40,6 +40,14 @@ func TestProxyWarningDetectsUnproxiedLAN(t *testing.T) {
 	if !strings.Contains(got, "192.168.31.184") || !strings.Contains(got, "no_proxy") {
 		t.Fatalf("ProxyWarning = %q, want an actionable message naming the address", got)
 	}
+	// A detected proxy is a risk, not proof: the message must not claim that
+	// every HTTP proxy breaks the WebSocket handshake.
+	if strings.Contains(got, "会经过代理并被改写握手") {
+		t.Fatalf("ProxyWarning still asserts certain WebSocket failure: %q", got)
+	}
+	if !strings.Contains(got, "风险提示") || !strings.Contains(got, "426") {
+		t.Fatalf("ProxyWarning should distinguish risk from an actual failed handshake: %q", got)
+	}
 }
 
 func TestProxyWarningRespectsNoProxy(t *testing.T) {

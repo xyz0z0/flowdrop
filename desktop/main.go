@@ -2,7 +2,8 @@
 //
 // It runs the exact same Go Hub in-process (flowdrop/pkg/hub) and shows the
 // existing React inbox in a native WebView window, plus a local-only settings
-// window for the bind address, port and the first admin password.
+// window for the bind address, port and device pairing (code generation, device
+// list, revocation).
 //
 // Two windows, two origins, on purpose:
 //
@@ -63,11 +64,27 @@ type desktopState struct {
 	lastStartupErr string
 	hubOrigin      string // scheme://host[:port] the inbox window is allowed to be on
 	lastExternalAt atomic.Int64
+	// webviewProxyConfigured records that configureDesktopWebViewProxy()
+	// applied the in-process WebKit NO_PROXY mode. Only that success may
+	// suppress the old "add no_proxy" warning; a failure keeps the diagnosis.
+	webviewProxyConfigured   atomic.Bool
+	webviewProxyConfigureErr atomic.Value // string
+	// a11yFallback records why guardAccessibilityBridge had to disable the
+	// AT-SPI bridge for this launch (empty when accessibility is on). It is
+	// shown in the settings window so the user is never silently muted.
+	a11yFallback atomic.Value // string
 }
 
 var desktop desktopState
 
 func main() {
+	// The accessibility bridge must be guarded before anything can initialise
+	// GTK/WebKit: a broken session AT-SPI bus crashes libatk-bridge inside the
+	// GTK main loop, which Go cannot recover from. Healthy sessions keep
+	// accessibility; only a bus that fails a real round trip is bypassed for
+	// this process, with the reason surfaced in the settings window.
+	guardAccessibilityBridge()
+
 	st, settingsPath, startupWarn := loadStartupSettings()
 	manager := hubmgr.New()
 
@@ -97,6 +114,12 @@ func main() {
 		Services: []application.Service{
 			application.NewService(newSettingsService(manager)),
 		},
+		KeyBindings: map[string]func(application.Window){
+			// Keep a keyboard route to the local settings window: the main
+			// window is the Hub origin and cannot call the Wails bridge, so
+			// this action runs natively and only opens the in-process window.
+			"Ctrl+,": func(application.Window) { desktop.showSettings() },
+		},
 		Assets: application.AssetOptions{
 			Handler: application.AssetFileServerFS(mustSub(assets)),
 		},
@@ -122,10 +145,23 @@ func main() {
 	desktop.trayAvailable = trayWatcherPresent()
 	syncServiceApp(app)
 
+	// Configure the in-process WebKit network stack before any window/page is
+	// created: the desktop windows only load this app's own Hub and the local
+	// wails:// assets, so they can go direct while the host's system proxy
+	// settings stay untouched. A failure keeps the accurate proxy diagnosis in
+	// the settings window; it never prevents the Hub from starting.
+	if err := configureDesktopWebViewProxy(); err != nil {
+		desktop.webviewProxyConfigureErr.Store(err.Error())
+		log.Printf("in-app WebView proxy bypass not configured; system proxy unchanged: %v", err)
+	} else {
+		desktop.webviewProxyConfigured.Store(true)
+		log.Printf("in-app WebView network proxy: direct (system proxy unchanged)")
+	}
+
 	// The Hub must be started before the inbox window: the window loads the
 	// real HTTP URL, which only exists once the port is bound.
 	startErr := startHub(manager, st, desktop.hubConfigPath)
-	if warn := network.ProxyWarning(st.BindAddress); warn != "" {
+	if warn := desktopProxyWarning(st.BindAddress); warn != "" {
 		log.Printf("proxy warning: %s", warn)
 	}
 	if startupWarn != nil {
@@ -221,9 +257,11 @@ func (d *desktopState) createWindows(startErr error) {
 		return
 	}
 	d.openInbox(hubURL)
-	// First run: no admin password exists yet, so lead with the local settings
-	// window (the Hub deliberately has no remote initialisation endpoint).
-	if ok, err := d.manager.HasAdmin(); err == nil && !ok {
+	// First open: no device is paired yet, so lead with the local settings
+	// window where the user generates a four-digit code (pairing is local-only;
+	// the Hub has no remote code endpoint). As soon as one device exists the
+	// inbox is the useful window. No code is generated here.
+	if devices, err := d.manager.ListPairedDevices(); err != nil || len(devices) == 0 {
 		d.showSettings()
 		return
 	}
@@ -260,13 +298,25 @@ func (d *desktopState) openInbox(hubURL string) {
 			BackgroundColour:           application.NewRGB(24, 25, 28),
 			DevToolsEnabled:            false,
 			DefaultContextMenuDisabled: true,
-			// The Hub page is our own React app; the injected script only
-			// forwards *external* link clicks to the system browser (see
-			// desktopLinkInterceptionJS). Downloads keep native WebKit
-			// behaviour, verified to save into ~/Downloads.
-			JS: desktopLinkInterceptionJS,
+			// The Hub page is our own React app; the injected scripts only relay
+			// *external* link clicks to the system browser (see
+			// desktopLinkInterceptionJS), add the desktop-only 设置 entry, and
+			// provide the page half of the native FileList bridge plus the
+			// "don't navigate to the dropped file" guard
+			// (desktopFileDropGuardJS). Downloads keep native WebKit behaviour,
+			// verified to save into ~/Downloads.
+			JS: desktopLinkInterceptionJS + "\n" + desktopSettingsEntryJS + "\n" + desktopFileDropGuardJS,
+			// A native menu is a second, always-visible route to 设置 (and to
+			// quit) that does not depend on the tray or on React rendering.
+			Linux: application.LinuxWindow{Menu: d.newInboxMenu()},
 		})
 		d.wireCloseToTray(d.inbox)
+		// Linux GTK: restore WebKit's HTML5 drop for this window only and install
+		// the native FileList bridge there (filedrop_linux_gtk3.go). The dropped
+		// local paths stay in native state; the page only ever receives real
+		// File objects through its own hidden file input. Wails'
+		// EnableFileDrop stays false (default), so no native path API is exposed.
+		d.installInboxFileDropRelax()
 	} else {
 		d.inbox.SetURL(hubURL + "/")
 	}
@@ -274,6 +324,24 @@ func (d *desktopState) openInbox(hubURL string) {
 	if d.tray != nil {
 		d.tray.SetTooltip("FlowDrop — 收件箱运行中")
 	}
+}
+
+// newInboxMenu is the native menu of the inbox window. It mirrors the tray's
+// useful actions for sessions without a working StatusNotifierWatcher, and its
+// Ctrl+, accelerator is an extra route to the local settings window.
+func (d *desktopState) newInboxMenu() *application.Menu {
+	menu := d.app.NewMenu()
+	menu.Add("设置…").SetAccelerator("Ctrl+,").OnClick(func(*application.Context) { d.showSettings() })
+	menu.Add("在浏览器中打开").OnClick(func(*application.Context) {
+		if hubURL := preferredHubURL(d.manager); hubURL != "" {
+			if err := d.app.Browser.OpenURL(hubURL + "/"); err != nil {
+				log.Printf("open browser: %v", err)
+			}
+		}
+	})
+	menu.AddSeparator()
+	menu.Add("退出 FlowDrop（停止 Hub）").OnClick(func(*application.Context) { d.quit() })
+	return menu
 }
 
 // showInbox raises the inbox window, creating it if the Hub came up later.
@@ -418,42 +486,17 @@ func originOf(raw string) string {
 	return u.Scheme + "://" + u.Host
 }
 
-// handleRawMessage handles the one narrow message the Hub-origin page may send
-// the shell: "open this external URL in the system browser". The desktop never
-// exposes the settings bridge to that origin (it cannot reach the Wails asset
-// server), so this is the only native action available to it.
+// handleRawMessage accepts only the closed set of fixed actions implemented by
+// settings_entry.go: open the local settings window, or open one validated
+// http(s) URL in the system browser. It runs only for this process's inbox
+// window while that window is on the current Hub origin; the local settings
+// window cannot be driven by the Hub page and no arbitrary native method is
+// reachable.
 func (d *desktopState) handleRawMessage(w application.Window, msg string, origin *application.OriginInfo) {
-	const prefix = "flowdrop:openurl:"
-	if !strings.HasPrefix(msg, prefix) {
+	if d.inbox == nil || w == nil {
 		return
 	}
-	if d.inbox == nil || w == nil || w.ID() != d.inbox.ID() {
-		return
-	}
-	// The page must still be on the Hub origin it was loaded from.
-	if d.hubOrigin == "" || origin == nil || originOf(origin.Origin) != d.hubOrigin {
-		return
-	}
-	target := strings.TrimPrefix(msg, prefix)
-	if len(target) > 4096 {
-		return
-	}
-	if !isAllowedExternalURL(target) {
-		return
-	}
-	u, err := url.Parse(target)
-	if err != nil {
-		return
-	}
-	// Cheap abuse guard: at most one external open per 500ms.
-	now := time.Now().UnixMilli()
-	if prev := d.lastExternalAt.Load(); now-prev < 500 {
-		return
-	}
-	d.lastExternalAt.Store(now)
-	if err := d.app.Browser.OpenURL(u.String()); err != nil {
-		log.Printf("open external url: %v", err)
-	}
+	d.dispatchInboxMessage(w.ID() == d.inbox.ID(), msg, origin)
 }
 
 // desktopLinkInterceptionJS is injected into the Hub-origin inbox window. It
