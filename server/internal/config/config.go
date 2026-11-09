@@ -57,8 +57,8 @@ type Config struct {
 	// explicit.
 	DiscoveryEnabled *bool `json:"discovery_enabled"`
 
-	LoginLimitPerMinute int `json:"login_limit_per_minute"`
-	APILimitPerMinute   int `json:"api_limit_per_minute"`
+	PairLimitPerMinute int `json:"pair_limit_per_minute"`
+	APILimitPerMinute  int `json:"api_limit_per_minute"`
 }
 
 func Default() Config {
@@ -73,7 +73,7 @@ func Default() Config {
 		MinFreeBytes:         1 << 30,
 		SessionTTLHours:      168,
 		CookieSecure:         true,
-		LoginLimitPerMinute:  5,
+		PairLimitPerMinute:   5,
 		APILimitPerMinute:    600,
 	}
 }
@@ -189,7 +189,7 @@ func (c *Config) applyEnv() error {
 		}
 		c.DiscoveryEnabled = &b
 	}
-	if err := setInt("FLOWDROP_LOGIN_LIMIT_PER_MINUTE", &c.LoginLimitPerMinute); err != nil {
+	if err := setInt("FLOWDROP_PAIR_LIMIT_PER_MINUTE", &c.PairLimitPerMinute); err != nil {
 		return err
 	}
 	if err := setInt("FLOWDROP_API_LIMIT_PER_MINUTE", &c.APILimitPerMinute); err != nil {
@@ -245,8 +245,8 @@ func (c *Config) Validate() error {
 	if c.SessionTTLHours <= 0 {
 		return errors.New("session_ttl_hours must be positive")
 	}
-	if c.LoginLimitPerMinute <= 0 {
-		c.LoginLimitPerMinute = 5
+	if c.PairLimitPerMinute <= 0 {
+		c.PairLimitPerMinute = 5
 	}
 	if c.APILimitPerMinute <= 0 {
 		c.APILimitPerMinute = 600

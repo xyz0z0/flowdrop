@@ -17,6 +17,9 @@ func TestDefaultsAreSafe(t *testing.T) {
 	if c.MaxUploadBytes != 512<<20 {
 		t.Fatalf("max upload = %d, want 512 MiB", c.MaxUploadBytes)
 	}
+	if c.PairLimitPerMinute != 5 {
+		t.Fatalf("default pair limit = %d, want 5", c.PairLimitPerMinute)
+	}
 	if len(c.AllowedHosts) != 0 || len(c.TrustedProxies) != 0 {
 		t.Fatal("defaults must not trust extra hosts or proxies")
 	}
@@ -98,6 +101,32 @@ func TestMissingFileIsFine(t *testing.T) {
 	}
 	if c.Listen == "" {
 		t.Fatal("defaults not applied")
+	}
+}
+
+func TestPairLimit(t *testing.T) {
+	// A non-positive value falls back to the default instead of disabling the
+	// limit, so pairing-code guessing cannot be unbounded by a typo.
+	c := Default()
+	c.DataDir = t.TempDir()
+	c.PairLimitPerMinute = 0
+	if err := c.Validate(); err != nil {
+		t.Fatalf("zero pair limit rejected: %v", err)
+	}
+	if c.PairLimitPerMinute != 5 {
+		t.Fatalf("zero pair limit = %d, want the 5 default", c.PairLimitPerMinute)
+	}
+
+	// The env var is the operator-facing name; the retired login one is gone.
+	dir := t.TempDir()
+	t.Setenv("FLOWDROP_DATA_DIR", dir)
+	t.Setenv("FLOWDROP_PAIR_LIMIT_PER_MINUTE", "9")
+	loaded, err := Load("")
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	if loaded.PairLimitPerMinute != 9 {
+		t.Fatalf("FLOWDROP_PAIR_LIMIT_PER_MINUTE not applied: %d", loaded.PairLimitPerMinute)
 	}
 }
 

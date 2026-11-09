@@ -80,7 +80,6 @@
       </div>
       <p id="run-mode-error" class="banner banner-error" hidden></p>
       <p id="run-mode-ok" class="banner banner-ok" hidden></p>
-      <p id="run-mode-restart" class="banner banner-warn" hidden></p>
     </section>
 
     <section id="remote-status-card" class="card" hidden>
@@ -143,7 +142,7 @@
     <section id="network-card" class="card">
       <h2>网络绑定</h2>
       <p class="hint">
-        选择 Hub 监听的<b>具体本机 IPv4 地址</b>（不监听 0.0.0.0）。单地址是旧方式；
+        选择 Hub 监听的<b>具体本机 IPv4 地址</b>（不监听 0.0.0.0）。
         需要手机在家用 Wi-Fi 和 Tailscale 下都能直接访问时，选择「同时使用内网和 Tailscale」，
         同一个 Hub 会在两个地址的<b>同一端口</b>上提供服务，数据与登录完全共享。
       </p>
@@ -152,7 +151,7 @@
         <label class="mode">
           <input id="mode-single" type="radio" name="bind-mode" value="single" />
           <span class="mode-body">
-            <span class="mode-title">只使用一个地址（旧方式）</span>
+            <span class="mode-title">只使用一个地址</span>
             <span class="mode-desc">下面任选一个本机地址：内网、Tailscale 或回环。</span>
           </span>
         </label>

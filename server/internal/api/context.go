@@ -4,24 +4,25 @@ import (
 	"context"
 	"sync"
 	"time"
-
-	"flowdrop/internal/auth"
 )
 
 type ctxKey int
 
 const sessionKey ctxKey = 1
 
+// reqSession is the authenticated identity of one request. It is derived from a
+// paired device token, never from a password or a stored session row.
 type reqSession struct {
-	// Session is only a carrier for the request's identity: ID is the SHA-256
-	// hash of the device token and UserID is the paired device ID. It is never
-	// a password-derived session.
-	Session auth.Session
 	// DeviceID is the paired device the request is authenticated as.
 	DeviceID string
 	// Token is the raw device token used for this request (cookie or Bearer).
 	// It is never logged or echoed back.
 	Token string
+	// TokenHash is the SHA-256 of Token. It is only used as the rate-limiter
+	// key so the raw credential is never held in a limiter bucket.
+	TokenHash string
+	// ExpiresAt is the lifetime of the session cookie issued for this identity.
+	ExpiresAt time.Time
 }
 
 func withSession(ctx context.Context, s reqSession) context.Context {
@@ -34,7 +35,8 @@ func sessionFrom(ctx context.Context) (reqSession, bool) {
 }
 
 // limiter is a fixed-window counter keyed by an arbitrary string. It is
-// intentionally small: enough to stop password guessing and runaway clients.
+// intentionally small: enough to stop pairing-code guessing and runaway
+// clients.
 type limiter struct {
 	mu     sync.Mutex
 	window time.Duration

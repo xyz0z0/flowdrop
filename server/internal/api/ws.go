@@ -31,7 +31,7 @@ func (s *Server) handleEvents(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusUnauthorized, "unauthenticated", "pairing required")
 		return
 	}
-	if !s.limiter.allow(rs.Session.ID) {
+	if !s.limiter.allow(rs.TokenHash) {
 		writeError(w, http.StatusTooManyRequests, "rate_limited", "too many requests")
 		return
 	}

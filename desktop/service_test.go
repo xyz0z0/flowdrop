@@ -345,8 +345,8 @@ func freePortOnAddress(t *testing.T, host string) int {
 
 // RMT-03: ApplyMode switches the run mode of the running process immediately.
 // local -> remote really stops the in-process Hub and points every URL consumer
-// at the remote address; remote -> local really starts it again. No restart and
-// no restart_required in the response.
+// at the remote address; remote -> local really starts it again. No restart is
+// needed and the response describes the new mode right away.
 func TestServiceApplyModeSwitchesAtRuntime(t *testing.T) {
 	svc, m, _ := newTestService(t)
 	localURL := m.URL()
@@ -358,8 +358,8 @@ func TestServiceApplyModeSwitchesAtRuntime(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ApplyMode(local): %v", err)
 	}
-	if st.RestartRequired || st.Mode != appsettings.ModeLocal || st.RemoteURL != "" {
-		t.Fatalf("ApplyMode(local) = %+v, want local mode with restart_required=false", st)
+	if st.Mode != appsettings.ModeLocal || st.RemoteURL != "" {
+		t.Fatalf("ApplyMode(local) = %+v, want local mode", st)
 	}
 	if got := m.URL(); got != localURL {
 		t.Fatalf("idempotent ApplyMode(local) restarted the Hub: %s -> %s", localURL, got)
@@ -370,9 +370,6 @@ func TestServiceApplyModeSwitchesAtRuntime(t *testing.T) {
 	st, err = svc.ApplyMode(appsettings.ModeRemote, remoteURL+"/")
 	if err != nil {
 		t.Fatalf("ApplyMode(remote): %v", err)
-	}
-	if st.RestartRequired {
-		t.Fatalf("ApplyMode(remote) = %+v, want restart_required=false after a hot switch", st)
 	}
 	if st.Mode != appsettings.ModeRemote || st.RemoteURL != remoteURL {
 		t.Fatalf("ApplyMode(remote) state = %+v, want mode=remote url=%s", st, remoteURL)
@@ -419,8 +416,8 @@ func TestServiceApplyModeSwitchesAtRuntime(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ApplyMode(local): %v", err)
 	}
-	if st.Mode != appsettings.ModeLocal || st.RemoteURL != "" || st.RestartRequired {
-		t.Fatalf("ApplyMode(local) state = %+v, want local mode without a restart", st)
+	if st.Mode != appsettings.ModeLocal || st.RemoteURL != "" {
+		t.Fatalf("ApplyMode(local) state = %+v, want local mode", st)
 	}
 	if !st.Running || st.URL == "" {
 		t.Fatalf("ApplyMode(local) state = %+v, want the Hub reported as running", st)
@@ -540,7 +537,7 @@ func TestServiceApplyModeRemoteToLocalStartFailure(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GetState after a failed switch: %v", err)
 	}
-	if st.Mode != appsettings.ModeRemote || st.RestartRequired || st.Running {
+	if st.Mode != appsettings.ModeRemote || st.Running {
 		t.Fatalf("state after a failed switch = %+v, want the unchanged remote mode", st)
 	}
 }
@@ -633,8 +630,8 @@ func TestServiceRemoteModeGuardsLocalHub(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ApplyMode(local): %v", err)
 	}
-	if st.RestartRequired || st.Mode != appsettings.ModeLocal || st.RemoteURL != "" {
-		t.Fatalf("ApplyMode(local) state = %+v, want local mode with restart_required=false", st)
+	if st.Mode != appsettings.ModeLocal || st.RemoteURL != "" {
+		t.Fatalf("ApplyMode(local) state = %+v, want local mode", st)
 	}
 	if !st.Running {
 		t.Fatalf("ApplyMode(local) state = %+v, want the local Hub running again", st)
@@ -643,7 +640,7 @@ func TestServiceRemoteModeGuardsLocalHub(t *testing.T) {
 
 // TestServiceRemoteShellGetState covers the shipped remote-mode process: no
 // local Hub is started at all, so the state must report remote mode and no
-// running Hub while needing no restart.
+// running Hub.
 func TestServiceRemoteShellGetState(t *testing.T) {
 	svc, _, _ := newTestService(t)
 	remoteURL := "http://192.168.31.184:8080"
@@ -662,9 +659,6 @@ func TestServiceRemoteShellGetState(t *testing.T) {
 	}
 	if st.Mode != appsettings.ModeRemote || st.RemoteURL != remoteURL {
 		t.Fatalf("GetState = %+v, want remote mode at %s", st, remoteURL)
-	}
-	if st.RestartRequired {
-		t.Fatalf("GetState = %+v, want restart_required=false once the process runs that mode", st)
 	}
 	if st.Running || st.URL != "" {
 		t.Fatalf("GetState = %+v, want running=false and no URL", st)
@@ -688,6 +682,7 @@ func TestDesktopSettingsFileIsPrivateAndHasNoSession(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "desktop.json")
 	token := testDeviceToken // 43 base64url chars, the shape the Hub issues
 	st := appsettings.Settings{
+		Mode:               appsettings.ModeLocal,
 		BindAddress:        "192.168.1.5",
 		Port:               8080,
 		DesktopDeviceID:    "dev_local",

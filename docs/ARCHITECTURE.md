@@ -58,7 +58,7 @@ flowdrop/
 │   ├── cmd/flowdrop/        # main：serve / pair / doctor / backup / version
 │   ├── internal/api/        # 路由、中间件、handler、限流
 │   ├── internal/pairing/    # 设备配对 Store（码/设备/令牌哈希/Hub ID）
-│   ├── internal/auth/       # 会话载体与历史密码哈希（不再用于认证）
+│   ├── internal/token/      # 随机令牌与 sha256 存储键（配对码/设备令牌/item ID 共用）
 │   ├── internal/config/     # 配置加载（JSON + FLOWDROP_* 环境变量）
 │   ├── internal/db/         # SQLite 打开与 migration
 │   ├── internal/discovery/  # mDNS/DNS-SD 发布（纯 Go，限定绑定的 LAN 网卡）
@@ -83,16 +83,12 @@ flowdrop/
 | `pairing_state` | `id`(恒为 1), `failed_attempts` | 全 Hub 累计错误次数（上限 5，重新生成码时归零解锁） |
 | `pairing_codes` | `code_hash`, `created_at`, `expires_at`, `used_at` | 四位码只存 `sha256(code)`；明文码仅在本机设置窗口/本机 CLI 终端出现 |
 | `paired_devices` | `id`, `name`, `token_hash`, `created_at`, `last_seen_at`, `revoked_at` | 设备令牌 32B 随机数，只存哈希；撤销后该设备的 HTTP 会话与 WS 立即失效 |
-| `admin_users` | `username` UNIQUE, `password_hash` | **历史表残留**：旧版单管理员密码，已不参与认证，仅为不删除旧数据而保留 |
-| `sessions` | `id`(=SHA-256(token) hex), `expires_at`, `last_seen_at` | **历史表残留**：不再写入新会话，由 Janitor 周期清理 |
 | `blobs` | `id`, `original_name`, `content_type`, `size_bytes`, `sha256`, `storage_key` | `storage_key` 为随机值，磁盘路径由它推导 |
 | `inbox_items` | `id`, `type`, `text_content`, `blob_id`, `sender_device`, `created_at`, `expires_at` | `type ∈ {text,link,image,file}`；`expires_at` 保留不用（见 PRD §15.3） |
 
 索引：`inbox_items(created_at DESC, id DESC)` 支持稳定倒序分页；`inbox_items(blob_id)` 支持引用检查；
-`paired_devices(created_at, id)` 支持设备列表；`sessions(expires_at)` 支持清理历史行。
-
-Schema 版本 2 新增 `pairing_meta` / `pairing_state` / `pairing_codes` / `paired_devices`；
-旧 `admin_users` / `sessions` **只追加不删除表**，不作为认证来源。
+`paired_devices(created_at, id)` 支持设备列表。新建数据库只有上面这些表；开发阶段不保留
+已删除表的兼容分支，`internal/db` 的 schema 测试会断言它们不会回来。
 
 ## 4. 认证与会话
 
@@ -110,8 +106,9 @@ Schema 版本 2 新增 `pairing_meta` / `pairing_state` / `pairing_codes` / `pai
   Cookie/CSRF（不回传原令牌）。Android 请求/WS/预览/下载只用当前活动地址，令牌不进 URL/query。
 - **Hub ID**：`GET /api/v1/health` 返回的稳定 `hub_id` 用于**无凭据探测**，客户端只在
   ID 匹配后才发凭据；它只防误连，**不能**认证明文 HTTP 对端（可信 LAN 边界不变）。
-- **历史**：`admin_users`/`sessions` 表与 `internal/auth` 的密码哈希代码只是残留，
-  不提供登录端点，也不再是任何认证来源。
+- **唯一认证来源**：只有 `internal/pairing` 的设备令牌。随机令牌与存储哈希共用
+  `internal/token`（`Random` / `Hash`），没有密码、没有服务端 session 表，也没有
+  `/api/v1/auth/login` 端点。
 - **会话 Cookies**：`flowdrop_session`（`HttpOnly`, `SameSite=Strict`, `Secure` 默认开启,
   `Path=/`）与 CSRF `flowdrop_csrf`；Cookie 按 origin 保存，Web 不承诺跨地址自动共享登录态。
   - 明文 HTTP LAN 主路径需 `cookie_secure=false`；HTTPS（Tailscale/Caddy）保持 `true`。
@@ -242,7 +239,7 @@ desktop/                    独立 Go module（module flowdrop/desktop）
 ├── dbus_linux.go           StatusNotifierWatcher 探测（决定关闭行为）
 ├── assets/                 设置窗口 UI（原生 HTML/JS，调用 /wails/runtime.js）
 └── internal/
-    ├── appsettings/        桌面偏好：主 IPv4 + 可选附加 IPv4 + 端口（无凭据，兼容旧文件）
+    ├── appsettings/        桌面偏好：mode + 主/附加 IPv4 + 端口 + 本机设备令牌（0600）
     ├── network/            真实网卡枚举/分类、默认选路、系统代理提示
     └── hubmgr/             hub.New/Start/Stop/Restart 生命周期封装
 ```

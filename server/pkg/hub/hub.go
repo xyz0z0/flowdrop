@@ -54,7 +54,6 @@ import (
 	"time"
 
 	"flowdrop/internal/api"
-	"flowdrop/internal/auth"
 	"flowdrop/internal/config"
 	"flowdrop/internal/db"
 	"flowdrop/internal/discovery"
@@ -139,7 +138,6 @@ type Hub struct {
 	conn    *sql.DB
 	files   *storage.Store
 	store   *store.Store
-	sess    *auth.Store
 	pairing *pairing.Store
 	broker  *events.Broker
 	api     *api.Server
@@ -171,7 +169,8 @@ type Hub struct {
 }
 
 // New loads the effective configuration and prepares the Hub: data-dir lock,
-// SQLite schema, attachment storage, sessions, event broker and HTTP handler.
+// SQLite schema, attachment storage, paired devices, event broker and HTTP
+// handler.
 // Nothing is bound to the network yet, so Handler is already usable (for
 // example mounted in the desktop webview) before Start.
 //
@@ -256,7 +255,6 @@ func New(opts Options) (*Hub, error) {
 	}
 	h.files = files
 	h.store = store.New(conn)
-	h.sess = auth.NewStore(conn, cfg.SessionTTL())
 
 	// Device pairing is the authentication path: no admin password has to be
 	// initialized before a local client can pair. The hub ID is generated and
@@ -274,7 +272,6 @@ func New(opts Options) (*Hub, error) {
 	h.broker = events.NewBroker()
 	h.api = api.New(api.Deps{
 		Config:         cfg,
-		Sessions:       h.sess,
 		Store:          h.store,
 		Storage:        files,
 		Broker:         h.broker,
@@ -300,8 +297,8 @@ func New(opts Options) (*Hub, error) {
 }
 
 // Handler returns the fully wrapped HTTP handler: Host/Origin allowlist,
-// security headers, session auth, CSRF and the embedded SPA. It is valid from
-// New until Stop and never bypasses authentication for desktop callers.
+// security headers, paired-device auth, CSRF and the embedded SPA. It is valid
+// from New until Stop and never bypasses authentication for desktop callers.
 func (h *Hub) Handler() http.Handler {
 	return h.handler
 }
@@ -337,7 +334,7 @@ func (h *Hub) URLs() []string {
 // are valid; if any binding fails (port in use, invalid address, permission)
 // the listeners already bound by this call are closed again, an error is
 // returned and nothing is published via mDNS. All listeners share one handler,
-// database, attachment store, auth session store, broker and rate limiters.
+// database, attachment store, paired devices, broker and rate limiters.
 //
 // ctx is the Hub lifetime: when it is cancelled the Hub shuts itself down
 // (equivalent to Stop). Start is attempted at most once per Hub, even when a
@@ -410,7 +407,7 @@ func (h *Hub) Start(ctx context.Context) error {
 	h.warnAboutNetworkMode()
 
 	// One http.Server serves every listener, so all of them share the exact same
-	// handler, store, auth sessions, broker, rate limiters and upload semaphore.
+	// handler, store, paired devices, broker, rate limiters and upload semaphore.
 	for _, ln := range bound {
 		ln := ln
 		addr := ln.Addr().String()
@@ -439,10 +436,9 @@ func (h *Hub) Start(ctx context.Context) error {
 			return
 		}
 		janitor := &api.Janitor{
-			Sessions: h.sess,
-			Store:    h.store,
-			Storage:  h.files,
-			Logger:   h.log,
+			Store:   h.store,
+			Storage: h.files,
+			Logger:  h.log,
 		}
 		janitor.Run(hubCtx, janitorInterval)
 	}()
@@ -606,7 +602,7 @@ func (h *Hub) warnAboutNetworkMode() {
 		h.log.Warn("listening on a non-loopback address with Secure cookies; plaintext HTTP clients will not keep a session",
 			"listens", remote, "hint", "set cookie_secure=false only for a trusted LAN, or terminate TLS in front")
 	} else {
-		h.log.Warn("plaintext HTTP LAN mode: passwords, session cookies and content are not encrypted on the wire",
+		h.log.Warn("plaintext HTTP LAN mode: session cookies and content are not encrypted on the wire",
 			"listens", remote, "hint", "use only on a trusted network; prefer Tailscale or a TLS reverse proxy elsewhere")
 	}
 	if len(wildcards) > 0 {

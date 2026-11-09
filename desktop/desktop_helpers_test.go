@@ -126,6 +126,7 @@ func TestStartupDualSettingsBindBothRealAddresses(t *testing.T) {
 	t.Setenv("FLOWDROP_DISCOVERY_ENABLED", "false")
 	port := freePortOnAddress(t, lan)
 	raw, err := json.Marshal(appsettings.Settings{
+		Mode:                    appsettings.ModeLocal,
 		BindAddress:             lan,
 		Port:                    port,
 		AdditionalBindAddresses: []string{ts},

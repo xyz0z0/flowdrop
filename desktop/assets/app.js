@@ -18,11 +18,6 @@ let dirty = false;
 // overwriting text the user is still typing.
 let runMode = "local";
 let runModeDirty = false;
-// restartBannerShown is memory-only: it only appears when a save response says
-// restart_required, which is now the legacy case (a file saved by an older build
-// that never applied it). ApplyMode switches at runtime, so the normal path
-// reports restart_required=false; a status refresh never re-shows the banner.
-let restartBannerShown = false;
 // switchingMode is true while ApplyMode is in flight: the backend is stopping or
 // starting the Hub, so the periodic refresh must not repaint half-switched state
 // or overwrite the form the user just submitted.
@@ -179,9 +174,6 @@ function renderRunMode() {
   $("pairing-card").hidden = remote;
   $("remote-status-card").hidden = !remote;
   show($("remote-current"), remote ? "当前：远程 Hub · " + (s.remote_url || "（未填写地址）") : "");
-
-  // Driven only by the last successful save; refresh() must not re-show it.
-  $("run-mode-restart").hidden = !restartBannerShown;
 }
 
 function renderURLs() {
@@ -499,9 +491,7 @@ $("remote-url").addEventListener("input", () => {
 // Saving the mode calls ApplyMode(mode, url). The backend validates the address
 // and switches the running process immediately (stops/starts the Hub, reloads
 // the inbox window), so the response already describes the new mode. A readable
-// Chinese error is shown in this block's own error line (never an alert), and
-// restart_required in the response is only the legacy "saved but not applied"
-// fallback banner.
+// Chinese error is shown in this block's own error line (never an alert).
 $("run-mode-save").addEventListener("click", async () => {
   show($("run-mode-error"), "");
   show($("run-mode-ok"), "");
@@ -524,17 +514,10 @@ $("run-mode-save").addEventListener("click", async () => {
   try {
     const next = await call("ApplyMode", target, target === "remote" ? url : "");
     runModeDirty = false;
-    restartBannerShown = !!(next && next.restart_required);
-    if (restartBannerShown) {
-      $("run-mode-restart").textContent =
-        "已保存，请从托盘退出 FlowDrop 后重新启动，新模式才会生效。";
-    }
     render(next);
-    if (!restartBannerShown) {
-      show($("run-mode-ok"), target === "remote"
-        ? "已切换到远程 Hub：本机 Hub 已停止，收件箱指向 " + (next.remote_url || "") + "。"
-        : "已切换到本机 Hub：Hub 已启动，收件箱指向 " + (next.url ? next.url + "/" : "本机 Hub") + "。");
-    }
+    show($("run-mode-ok"), target === "remote"
+      ? "已切换到远程 Hub：本机 Hub 已停止，收件箱指向 " + (next.remote_url || "") + "。"
+      : "已切换到本机 Hub：Hub 已启动，收件箱指向 " + (next.url ? next.url + "/" : "本机 Hub") + "。");
     if (appliedRemote()) {
       clearPairingCode();
     } else {

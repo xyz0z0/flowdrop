@@ -4,19 +4,17 @@ import (
 	"context"
 	"time"
 
-	"flowdrop/internal/auth"
 	"flowdrop/internal/storage"
 	"flowdrop/internal/store"
 )
 
-// Janitor performs periodic housekeeping: expired sessions, unreferenced blob
-// rows/files, and stale upload temp files. It never deletes files that are
-// part of an in-flight upload (storage tracks those as active).
+// Janitor performs periodic housekeeping: unreferenced blob rows/files and
+// stale upload temp files. It never deletes files that are part of an in-flight
+// upload (storage tracks those as active).
 type Janitor struct {
-	Sessions *auth.Store
-	Store    *store.Store
-	Storage  *storage.Store
-	Logger   interface {
+	Store   *store.Store
+	Storage *storage.Store
+	Logger  interface {
 		Info(string, ...any)
 		Warn(string, ...any)
 		Error(string, ...any)
@@ -44,12 +42,6 @@ func (j *Janitor) tempMaxAge() time.Duration {
 // RunOnce performs one cleanup pass. Individual failures are logged and do not
 // abort the rest of the pass.
 func (j *Janitor) RunOnce(ctx context.Context) {
-	if n, err := j.Sessions.CleanupExpired(); err != nil {
-		j.Logger.Error("janitor: sessions", "err", err)
-	} else if n > 0 {
-		j.Logger.Info("janitor: removed expired sessions", "count", n)
-	}
-
 	// 1. Unreferenced blob rows (crash between file commit and DB commit, or a
 	//    failed compensating delete).
 	cutoff := time.Now().Add(-j.grace())

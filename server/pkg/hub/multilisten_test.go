@@ -267,7 +267,7 @@ func TestDualListenSharedStateEventsAndSecurity(t *testing.T) {
 	cross := &multiClient{base: b.base, cookie: a.cookie, csrf: a.csrf}
 	status, body = cross.postJSON(t, "/api/v1/items/text", `{"type":"text","text":"A session on B"}`)
 	if status != http.StatusCreated {
-		t.Fatalf("A session on B = %d body=%s, want 201 (sessions are central)", status, body)
+		t.Fatalf("A session on B = %d body=%s, want 201 (device pairing is central)", status, body)
 	}
 
 	// One attachment store: upload on A, download the exact bytes on B.

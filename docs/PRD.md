@@ -5,6 +5,11 @@
 > 建议工作目录：`/home/bob/work-spaces/flowdrop/`  
 > 目标读者：Codex / 项目开发者  
 > 文档日期：2026-11-07
+>
+> **变更说明（2026-11-09）**：本文中的“单管理员密码登录 / `flowdrop admin init` /
+> `/api/v1/auth/login` / `sessions` 表”已被**设备配对**取代，代码里不再存在；当前认证
+> 设计与接口以 [ARCHITECTURE.md](ARCHITECTURE.md) §4 与 [PAIRING.md](PAIRING.md) 为准。
+> 本文保留为当时的需求基线，不改写历史决策。
 
 ## 0. 给 Codex 的执行说明
 

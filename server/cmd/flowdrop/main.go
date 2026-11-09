@@ -258,8 +258,8 @@ func runDoctor(args []string) error {
 			fmt.Println("      plaintext LAN browser will not keep its session.")
 		} else {
 			fmt.Println()
-			fmt.Println("NOTE: plaintext HTTP LAN mode (cookie_secure=false). Passwords, session")
-			fmt.Println("      cookies and content are unencrypted on this network. Use only on a")
+			fmt.Println("NOTE: plaintext HTTP LAN mode (cookie_secure=false). Session cookies")
+			fmt.Println("      and content are unencrypted on this network. Use only on a")
 			fmt.Println("      trusted home Wi-Fi; prefer Tailscale or a TLS reverse proxy otherwise.")
 		}
 	}

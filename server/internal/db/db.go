@@ -43,24 +43,6 @@ func Open(dataDir string) (*sql.DB, error) {
 var migrations = []string{
 	// v1
 	`
-CREATE TABLE admin_users (
-  id            TEXT PRIMARY KEY,
-  username      TEXT NOT NULL UNIQUE,
-  password_hash TEXT NOT NULL,
-  created_at    INTEGER NOT NULL,
-  updated_at    INTEGER NOT NULL
-);
-
-CREATE TABLE sessions (
-  id           TEXT PRIMARY KEY,            -- sha256(token) hex
-  user_id      TEXT NOT NULL REFERENCES admin_users(id) ON DELETE CASCADE,
-  created_at   INTEGER NOT NULL,
-  last_seen_at INTEGER NOT NULL,
-  expires_at   INTEGER NOT NULL,
-  user_agent   TEXT NOT NULL DEFAULT ''
-);
-CREATE INDEX idx_sessions_expires ON sessions(expires_at);
-
 CREATE TABLE blobs (
   id            TEXT PRIMARY KEY,
   original_name TEXT NOT NULL,

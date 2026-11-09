@@ -375,7 +375,7 @@ func newLoginTestState(t *testing.T) (*desktopState, *hubmgr.Manager, string) {
 
 func TestEnsureDesktopLoginPairsAndPersists(t *testing.T) {
 	d, m, path := newLoginTestState(t)
-	st := appsettings.Settings{BindAddress: "127.0.0.1", Port: 8080}
+	st := appsettings.Settings{Mode: appsettings.ModeLocal, BindAddress: "127.0.0.1", Port: 8080}
 
 	next := d.ensureDesktopLogin(st)
 	// The token must never be printed by this helper; only the shape of what
@@ -412,7 +412,7 @@ func TestEnsureDesktopLoginPairsAndPersists(t *testing.T) {
 
 func TestEnsureDesktopLoginReusesSavedIdentity(t *testing.T) {
 	d, m, _ := newLoginTestState(t)
-	first := d.ensureDesktopLogin(appsettings.Settings{BindAddress: "127.0.0.1", Port: 8080})
+	first := d.ensureDesktopLogin(appsettings.Settings{Mode: appsettings.ModeLocal, BindAddress: "127.0.0.1", Port: 8080})
 	if first.DesktopDeviceToken == "" {
 		t.Fatal("first ensureDesktopLogin did not pair")
 	}
@@ -428,13 +428,14 @@ func TestEnsureDesktopLoginReusesSavedIdentity(t *testing.T) {
 
 func TestEnsureDesktopLoginRevokesReplacedDevice(t *testing.T) {
 	d, m, _ := newLoginTestState(t)
-	first := d.ensureDesktopLogin(appsettings.Settings{BindAddress: "127.0.0.1", Port: 8080})
+	first := d.ensureDesktopLogin(appsettings.Settings{Mode: appsettings.ModeLocal, BindAddress: "127.0.0.1", Port: 8080})
 	if first.DesktopDeviceID == "" {
 		t.Fatal("first ensureDesktopLogin did not pair")
 	}
 	// A file whose token no longer passes Normalize keeps the old device id but
 	// no token, so the shell pairs again and must drop the stale record.
 	stale := appsettings.Settings{
+		Mode:            appsettings.ModeLocal,
 		BindAddress:     "127.0.0.1",
 		Port:            8080,
 		DesktopDeviceID: first.DesktopDeviceID,

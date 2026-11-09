@@ -32,10 +32,10 @@ const (
 // Settings is the persisted desktop configuration. Only the values the user
 // picks in the graphical settings window live here.
 type Settings struct {
-	// Mode is the run mode: "" or ModeLocal starts the local Hub, ModeRemote
-	// connects to an existing Hub. It is omitted when empty so desktop.json
-	// files written by older versions keep loading unchanged.
-	Mode string `json:"mode,omitempty"`
+	// Mode is the run mode: ModeLocal starts the local Hub, ModeRemote connects
+	// to an existing Hub. It is required and always written; a file without the
+	// field is unusable and Load rejects it instead of guessing a mode.
+	Mode string `json:"mode"`
 	// RemoteURL is the base URL of the remote Hub (for example
 	// http://192.168.31.184:8080). It is only kept in remote mode and is always
 	// stored without a trailing slash.
@@ -47,9 +47,8 @@ type Settings struct {
 	Port int `json:"port"`
 	// AdditionalBindAddresses are extra concrete local IPv4 addresses bound by
 	// the same Hub on the same port. The desktop's dual mode stores exactly
-	// one: the Tailscale address, while BindAddress is the LAN address. It is
-	// omitted for the legacy single-address mode, so desktop.json files written
-	// by older versions keep loading unchanged.
+	// one: the Tailscale address, while BindAddress is the LAN address. Single
+	// address mode writes no such field at all.
 	AdditionalBindAddresses []string `json:"additional_bind_addresses,omitempty"`
 	// DesktopDeviceID is the Hub's record ID for this desktop, learned when the
 	// shell paired itself as a native client. It is not a credential: it is only
@@ -72,10 +71,10 @@ var (
 )
 
 // Default returns the starting point used before the user ever saved settings:
-// loopback and 8080. The caller normally replaces BindAddress with a detected
-// LAN or Tailscale address.
+// local mode on loopback and 8080. The caller normally replaces BindAddress
+// with a detected LAN or Tailscale address.
 func Default() Settings {
-	return Settings{BindAddress: "127.0.0.1", Port: 8080}
+	return Settings{Mode: ModeLocal, BindAddress: "127.0.0.1", Port: 8080}
 }
 
 // IsRemote reports whether the desktop shell should connect to an existing Hub
@@ -165,8 +164,8 @@ func Load(path string) (settings Settings, found bool, err error) {
 	if err := json.Unmarshal(b, &settings); err != nil {
 		return Settings{}, true, fmt.Errorf("parse desktop settings %s: %w", path, err)
 	}
-	// A file without a mode field is a local-Hub file from an older version;
-	// Normalize keeps it exactly that way and never invents a remote URL.
+	// Normalize never invents a mode: a file without one fails Validate below,
+	// so the caller has to write a file it can use instead of guessing.
 	settings = settings.Normalize()
 	if err := settings.Validate(); err != nil {
 		return settings, true, fmt.Errorf("desktop settings %s: %w", path, err)
@@ -241,18 +240,20 @@ func (s Settings) Validate() error {
 	return nil
 }
 
-// validateMode accepts only the three known modes and, in remote mode, a
-// usable Hub base URL. The URL rules matter because it becomes the inbox
-// window's origin: a path, query, userinfo or fragment would either change the
-// page the window shows or send the credentials elsewhere.
+// validateMode accepts only the two known modes and, in remote mode, a usable
+// Hub base URL. The URL rules matter because it becomes the inbox window's
+// origin: a path, query, userinfo or fragment would either change the page the
+// window shows or send the credentials elsewhere.
 func (s Settings) validateMode() error {
 	switch s.Mode {
-	case "", ModeLocal:
+	case ModeLocal:
 		return nil
 	case ModeRemote:
 		return ValidateRemoteURL(s.RemoteURL)
 	default:
-		return fmt.Errorf("运行模式 %q 无效；只支持本机 Hub（%q）或连接远程 Hub（%q）", s.Mode, ModeLocal, ModeRemote)
+		// An empty mode is the "file without a mode field" case: it is unusable
+		// rather than silently treated as local.
+		return fmt.Errorf("运行模式 %q 无效；必须填写本机 Hub（%q）或连接远程 Hub（%q）", s.Mode, ModeLocal, ModeRemote)
 	}
 }
 

@@ -7,7 +7,6 @@ import (
 	"testing"
 	"time"
 
-	"flowdrop/internal/auth"
 	"flowdrop/internal/db"
 )
 
@@ -18,10 +17,6 @@ func newTestStore(t *testing.T) (*Store, *sql.DB) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { conn.Close() })
-	sess := auth.NewStore(conn, time.Hour)
-	if err := sess.SetPassword("admin", "a-long-enough-password"); err != nil {
-		t.Fatal(err)
-	}
 	return New(conn), conn
 }
 

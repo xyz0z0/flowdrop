@@ -61,32 +61,27 @@ type InterfaceOption struct {
 
 // State is everything the settings window renders.
 type State struct {
-	// Mode is the saved run mode: "local" (the default, including settings
-	// files written before modes existed) or "remote".
+	// Mode is the saved run mode: "local" or "remote". The mode is required in
+	// desktop.json, so this always reports one of the two.
 	Mode string `json:"mode"`
 	// RemoteURL is the saved remote Hub base URL in remote mode, otherwise "".
-	RemoteURL string `json:"remote_url"`
-	// RestartRequired is true only when the saved mode/address still differs
-	// from the mode this process actually runs in. ApplyMode switches at
-	// runtime, so a successful switch always reports false; a true value here is
-	// the legacy "saved by an older build, not applied yet" state.
-	RestartRequired bool              `json:"restart_required"`
-	Running         bool              `json:"running"`
-	URL             string            `json:"url"`
-	URLs            []string          `json:"urls"`
-	AccessURLs      []AccessURL       `json:"access_urls"`
-	BindAddress     string            `json:"bind_address"`
-	Additional      []string          `json:"additional_addresses"`
-	DualMode        bool              `json:"dual_mode"`
-	DualAvailable   bool              `json:"dual_available"`
-	Port            int               `json:"port"`
-	LastError       string            `json:"last_error"`
-	StartupError    string            `json:"startup_error"`
-	ConfigPath      string            `json:"config_path"`
-	Interfaces      []InterfaceOption `json:"interfaces"`
-	HasTailscale    bool              `json:"has_tailscale"`
-	TrayAvailable   bool              `json:"tray_available"`
-	ProxyWarning    string            `json:"proxy_warning"`
+	RemoteURL     string            `json:"remote_url"`
+	Running       bool              `json:"running"`
+	URL           string            `json:"url"`
+	URLs          []string          `json:"urls"`
+	AccessURLs    []AccessURL       `json:"access_urls"`
+	BindAddress   string            `json:"bind_address"`
+	Additional    []string          `json:"additional_addresses"`
+	DualMode      bool              `json:"dual_mode"`
+	DualAvailable bool              `json:"dual_available"`
+	Port          int               `json:"port"`
+	LastError     string            `json:"last_error"`
+	StartupError  string            `json:"startup_error"`
+	ConfigPath    string            `json:"config_path"`
+	Interfaces    []InterfaceOption `json:"interfaces"`
+	HasTailscale  bool              `json:"has_tailscale"`
+	TrayAvailable bool              `json:"tray_available"`
+	ProxyWarning  string            `json:"proxy_warning"`
 	// AccessibilityWarning explains that this launch had to disable the
 	// AT-SPI bridge because the session's accessibility bus was broken. It is
 	// empty when accessibility is enabled.
@@ -108,23 +103,19 @@ func (s *SettingsService) GetState() (State, error) {
 	mode, remoteURL := appsettings.ModeLocal, ""
 	if savedOK {
 		mode = saved.Mode
-		if mode == "" {
-			mode = appsettings.ModeLocal
-		}
 		if mode == appsettings.ModeRemote {
 			remoteURL = saved.RemoteURL
 		}
 	}
 	st := State{
-		Mode:            mode,
-		RemoteURL:       remoteURL,
-		RestartRequired: remoteURL != desktop.remoteHubURL(),
-		ConfigPath:      desktop.settingsPath,
-		StartupError:    desktop.startupError(),
-		TrayAvailable:   desktop.trayAvailable,
-		URLs:            []string{},
-		AccessURLs:      []AccessURL{},
-		Additional:      []string{},
+		Mode:          mode,
+		RemoteURL:     remoteURL,
+		ConfigPath:    desktop.settingsPath,
+		StartupError:  desktop.startupError(),
+		TrayAvailable: desktop.trayAvailable,
+		URLs:          []string{},
+		AccessURLs:    []AccessURL{},
+		Additional:    []string{},
 	}
 	if !savedOK {
 		// No usable file: report what this process actually does.
@@ -224,10 +215,10 @@ func loadSavedSettings() (appsettings.Settings, bool) {
 }
 
 // remoteHubMode reports that no local Hub exists to drive: either this process
-// already runs in remote mode, or an older build saved remote mode without
-// applying it (until such a file is switched, the local Hub is about to go away).
-// Both cases must answer the pairing/network methods with a readable error
-// instead of pretending to work.
+// already runs in remote mode, or the saved file asks for remote mode and has
+// been edited by hand while the process still runs the local Hub. Both cases
+// must answer the pairing/network methods with a readable error instead of
+// pretending to work.
 func (s *SettingsService) remoteHubMode() bool {
 	if s.runningRemote() {
 		return true
@@ -250,9 +241,8 @@ func errRemoteMode() error {
 // it to the running process right away: switching local -> remote stops the
 // in-process Hub, switching remote -> local starts it, and both reload the inbox
 // window and every other URL consumer (tray, native menu, browser) without a
-// restart. The returned State already reports the new mode with
-// restart_required=false. When a step fails the saved settings stay as they were
-// and the process keeps the mode it was working in.
+// restart. When a step fails the saved settings stay as they were and the
+// process keeps the mode it was working in.
 func (s *SettingsService) ApplyMode(mode, remoteURL string) (State, error) {
 	// A switch stops/starts the Hub and reloads the window: two switches must
 	// never interleave. remoteURL readers do not take this lock, so tray/JS
@@ -495,6 +485,9 @@ func (s *SettingsService) applyNetwork(bindAddress string, additional []string, 
 	}
 
 	saved := appsettings.Settings{
+		// This path only runs while the shell is in local mode (remoteHubMode
+		// above rejects the rest), so the file keeps local mode.
+		Mode:                    appsettings.ModeLocal,
 		BindAddress:             bindAddress,
 		Port:                    port,
 		AdditionalBindAddresses: append([]string(nil), additional...),

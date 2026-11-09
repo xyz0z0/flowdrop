@@ -803,3 +803,88 @@ UI-02 完成并由主 agent 复核（2026-11-09）：只重写 `desktop/assets/s
 - 方案：新增 `desktop/injected_js_windows.go`，在每个窗口的 `events.Windows.WebViewNavigationCompleted` 回调里注入与 Linux 相同的脚本（`go w.ExecJS(js)`，避开 `ExecJS` 内部 `InvokeSync` 在 UI 线程上的自锁）；其它平台 `injected_js_other.go` 空操作，`main.go` 各加一行调用；`JS:` 选项保持不变（Linux/macOS 仍靠它）。静态测试锁住结构与两个窗口的调用。
 - 验收：Linux gtk3/purego 的 vet 与测试全绿、gofmt 干净；Windows amd64/arm64 交叉编译与打包成功并记录 SHA-256。**真实 Windows 行为未验证**（无 Windows 机器），只能确认可编译。
 - 状态：完成（ctx_dd345b918ba8 / task_fd4fe9af4947）。新增 `desktop/injected_js_windows.go`、`desktop/injected_js_other.go`、`desktop/injected_js_install_test.go`（worker 把任务里给的 `injected_js_test.go` 改名：`_js` 后缀会被 Go 当 GOOS 静默忽略，首版 0 测试在跑）；`main.go` 两个窗口各加一行 `installInjectedJS`，`JS:` 选项保持不变。交叉编译四个 Windows 产物成功。
+
+## CLEAN-01 清理旧版本兼容与退役代码（2026-11-09，用户要求）
+
+背景：用户指出当前仍是开发阶段，不需要兼容旧版本、旧配置或旧数据，要求清理为兼容保留的代码。只读排查（主 agent）确认两处成规模的遗留：
+
+- **服务端旧密码认证**：`internal/auth` 的 Argon2id 密码哈希与 `admin_users`/`sessions` 表在 PA-07 后已不参与任何认证（`Server.sess`、`Deps.Sessions`、`Janitor.Sessions` 只为“清历史表”而存在，`loginLimiter` 字段无人使用），`server.go` 注释自述“PA-07 retires it”。
+- **桌面端旧配置兼容**：`desktop.json` 缺 `mode` 字段按“本机 Hub”处理（`validateMode` 的 `case ""`、`GetState` 的 `mode == ""` 分支、`appsettings_test` 的两个 `TestLegacy*`），以及 `State.restart_required`——它自述只描述“旧版保存了但没应用”的状态，`ApplyMode` 热切换后正常路径永远为 false。
+
+保留（不属于旧版本兼容）：`web/src/clipboard.ts` 的 `execCommand` 回退（不安全上下文下的浏览器能力回退）、Android 的 `@Suppress("DEPRECATION")`（平台 API 在 minSdk 上仍要工作）、mDNS TXT `v=1` 与 `/api/v1` 前缀（当前协议本身，不是旧版本分支）、`desktop/desktop_login.go` 的“撤销旧设备记录”（同一次配对内的运行时一致性）。
+
+| 编号 | 单一目标 / 允许写入 | 验收、预算与停止条件 | 状态 |
+|---|---|---|---|
+| PA-07 | 删除旧密码认证与 session 表：`server/**`（含 `internal/auth` 删除、新增 `internal/token`、`api`、`pkg/hub`、`internal/db`、`internal/config`、`cmd/flowdrop`、测试与 `go.mod`） | 见下方“PA-07 规格”；`gofmt -l` 空、`go vet ./...`、`go test ./...`、`go build ./...` 全绿；新建库无 `admin_users`/`sessions`（新增 schema 断言测试）；20–25min；不碰 docs/desktop/web/android | 完成 ctx_7556c4f06d39 / task_8258188fbe31 + 追加 ctx_9e9fd7ad5fa4 / task_97187d19d95c |
+| DL-02 | 删除桌面端旧配置兼容：`desktop/internal/appsettings/**`、`desktop/service.go`、`desktop/assets/{app.js,index.html}`、相关 `_test.go` | 见下方“DL-02 规格”；`gofmt -l` 空、gtk3 与 purego 两套 vet/test 全绿、`node --check desktop/assets/app.js` 通过；20min；不碰 docs/服务端 | 完成 ctx_6da96bdcf0cd / task_b94a16dfc7ae |
+
+文档（`README.md`、`docs/ARCHITECTURE.md`、`docs/DEPLOY.md`、`docs/PAIRING.md`）由主 agent 在代码合入后统一改，避免两个 worker 同时写同一文件。
+
+### PA-07 规格（旧密码认证退役）
+
+目标：Hub 只剩设备配对一条认证路径，数据库不再创建旧认证表，代码里不再有“为清历史数据而保留”的 store。
+
+必须完成：
+
+1. `server/internal/auth/` 整体删除，新增 `server/internal/token/token.go`（+ `token_test.go`）：`Random(n int) string`（crypto/rand，base64url 无填充，与现有 `NewRandomToken` 行为一致）、`Hash(s string) string`（小写 hex SHA-256）。`internal/store`、`internal/api` 的引用改到新包。
+2. `internal/db/db.go`：v1 迁移删除 `admin_users`、`sessions` 表与 `idx_sessions_expires` 索引（开发阶段不写 DROP 迁移；旧开发库留着空表不影响）。新增 `db_test.go`：临时目录 `Open` 后 `sqlite_master` 里没有 `admin_users`/`sessions`，且 `pairing_*`/`inbox_items`/`blobs` 存在。
+3. `internal/api`：删 `Server.sess`、`Deps.Sessions`、`Server.loginLimiter` 与它的初始化；`reqSession` 去掉 `auth.Session` 内嵌，改为显式字段（设备 ID、原始 token、token 哈希、cookie 过期时间），`withAuth`/`ws.go` 的限流键、`sessionFor`、`handlePair` 的 `ExpiresAt` 跟着改；`janitor.go` 删 `Sessions` 字段与第一段清理及日志；`context.go` 的 limiter 注释改成“配对码猜测”。
+4. `pkg/hub/hub.go`：删 `sess` 字段、`auth` 导入、两处 `Sessions:`；更新提到 sessions 的注释。
+5. `internal/config`：`LoginLimitPerMinute`/`login_limit_per_minute`/`FLOWDROP_LOGIN_LIMIT_PER_MINUTE` 更名为 `PairLimitPerMinute`/`pair_limit_per_minute`/`FLOWDROP_PAIR_LIMIT_PER_MINUTE`（它限制的是 `/auth/pair` 每 IP 请求），Validate 默认值与 `config_test.go` 同步。
+6. `cmd/flowdrop/main.go`：doctor 的明文 HTTP 提示里删掉 "Passwords, "（现在没有密码了）。
+7. 测试：`store_test.go` 去掉只为建 admin 用户而存在的 auth store 初始化；`api_test.go` 删 legacy session fixture 与相关断言、所有 `Sessions:` 字段、`auth.TokenID` 改 `token.Hash`；`pairing_api_test.go` 的 “login route 不存在” 断言保留（防止回退），只改注释措辞。
+8. `go.mod`/`go.sum`：`golang.org/x/crypto` 若已无引用则 `go mod tidy` 移除。
+
+停止条件：任何一步需要改 `docs/`、`desktop/`、`web/`、`android/` 或需要新增依赖时停下回报。范围外发现单独记录，不顺手改。
+
+### DL-02 规格（桌面端旧配置兼容）
+
+目标：`desktop.json` 只有当前格式，`mode` 必填；设置窗不再有“保存了但没应用”的旧状态。
+
+必须完成：
+
+1. `internal/appsettings`：`Default()` 返回 `Mode: ModeLocal`；`Mode` 的 json tag 去掉 `omitempty`；`validateMode` 去掉 `case ""`（空 mode 视为无效并报错）；删除 “older versions keep loading unchanged”“file from an older version” 一类注释（改成描述当前规则）；`Settings` 里 `AdditionalBindAddresses` 的注释同样去掉“旧版文件”措辞。
+2. 测试：删 `TestLegacySingleAddressFileStillLoads`、`TestLegacyFileWithoutModeIsLocal`；所有走 `Save`/`Validate` 的 `Settings{}` 字面量补 `Mode: ModeLocal`（`appsettings_test.go`、`desktop/desktop_login_test.go`、`desktop/pairing_service_test.go`、`desktop/service_test.go`、`desktop/desktop_helpers_test.go`）；`TestValidate*` 表格里 “empty is local” 用例改为断言空 mode 报错；`appsettings_test.go` 里 “stays compatible with older desktop builds” 的注释改成“单地址模式不写该字段”。
+3. `service.go`：删 `State.RestartRequired` 字段与 `GetState` 里的赋值；删 `mode == ""` 回退；`remoteHubMode` 的注释改成“文件可能在运行中被手工改过”，行为保留。
+4. `assets/app.js`：删 `restartBannerShown`、`renderRunMode` 里 `run-mode-restart` 的显示、保存回调里的 `restart_required` 分支（成功一律显示现有成功文案）；`assets/index.html` 删 `#run-mode-restart` 元素。
+5. `service_test.go`：删/改 `RestartRequired` 断言（保留 `Mode`/`RemoteURL`/`Running` 的断言）。
+
+验证命令（Linux 缺 GTK 头文件，用 sysroot）：
+
+```
+SYSROOT=$HOME/.local/share/flowdrop-desktop/sysroot
+export PKG_CONFIG_PATH=$SYSROOT/usr/lib/x86_64-linux-gnu/pkgconfig
+export CGO_CFLAGS="-I$SYSROOT/usr/include -I$SYSROOT/usr/include/x86_64-linux-gnu"
+export CGO_LDFLAGS="-L$SYSROOT/usr/lib/x86_64-linux-gnu"
+gofmt -l . ; go vet -tags gtk3 . ; go test -tags gtk3 . ./internal/...
+CGO_ENABLED=0 go test -tags purego . ./internal/...
+node --check assets/app.js
+```
+
+停止条件：需要改 `docs/`、`server/`、`web/` 或做 GUI 截图时停下回报。
+
+### CLEAN-01 执行结果（2026-11-09 18:30，主 agent 复核）
+
+PA-07（服务端）：
+- 删除 `server/internal/auth/`（Argon2id 密码哈希 + session store），新增 `internal/token`（`Random`/`Hash`），`store`、`api` 的令牌生成与哈希改用它；`sessionIDForToken` 与 `auth.TokenID` 的重复实现合并。
+- 数据库 v1 迁移去掉 `admin_users`、`sessions`、`idx_sessions_expires`；新增 `internal/db/db_test.go`，断言新建库没有这两张表、`MigratedVersion=2`。
+- `api`：删 `Server.sess`、`Deps.Sessions`、`Server.loginLimiter`；`reqSession` 改为显式字段（`DeviceID`/`Token`/`TokenHash`/`ExpiresAt`）；`Janitor` 只做 blob/temp 清理。
+- `pkg/hub`：删 `sess` 字段与两处 `Sessions:`；注释去掉 session 表述。
+- 配置：`login_limit_per_minute`/`FLOWDROP_LOGIN_LIMIT_PER_MINUTE` → `pair_limit_per_minute`/`FLOWDROP_PAIR_LIMIT_PER_MINUTE`。主 agent 复核时发现原 `LoginLimitPerMinute` 其实没有消费方（配对端点误用 `APILimitPerMinute`，文档写的 5/分钟从未生效），追加一步接线：新增 `Server.pairLimiter`，`handlePair` 用它限流，并补 `TestPairRateLimitUsesPairLimitPerMinute`（第 3 次 429，API 流量不受影响）。
+- `go.mod`：`golang.org/x/crypto` 降为 indirect（argon2 已删；`cmd/mdnsprobe` 经 miekg/dns 仍间接用到 ed25519）。
+
+DL-02（桌面端）：
+- `appsettings`：`mode` 必填且始终写出，`Default()` 带 `ModeLocal`，`validateMode` 不再接受空值；`Load` 缺 `mode` 的文件按不可用报错（调用方已有“回退检测默认值并重写”路径）。
+- `State.RestartRequired` 与设置窗的 `restart_required` 横幅（JS 变量、HTML 元素、保存回调分支）删除。
+- 测试：`TestLegacySingleAddressFileStillLoads`/`TestLegacyFileWithoutModeIsLocal` 换成 `TestFileWithoutModeIsRejected`；所有 `Settings{}` 字面量补 `Mode`。
+- `applyNetwork` 原先重建 `Settings` 保存，现显式写 `ModeLocal`（该路径有 `remoteHubMode()` 前置拦截，只在本地模式可达）。
+
+验证（主 agent 实跑，2026-11-09 18:2x）：
+- `cd server && gofmt -l .`（空）、`go vet ./...`、`go test -count=1 ./...`（api/config/db/pairing/storage/store/token/hub 全 ok）、`go build ./...` 通过。
+- `cd desktop`（sysroot pkg-config）：`gofmt -l .` 空、`go vet -tags gtk3 .`、`go test -tags gtk3 -count=1 . ./internal/...`、`CGO_ENABLED=0 go test -tags purego ...` 全绿；`node --check assets/app.js` 通过。
+- `grep`：`admin_users`/`sessions` 只出现在 `db_test.go` 的反向断言；`restart_required`/`RestartRequired`/`TestLegacy`/`login_limit`/`argon2` 在两端代码中已无引用。
+- 文档：`README.md`（升级说明、desktop.json 字段说明、双地址限制）、`docs/ARCHITECTURE.md`（包树、表清单、§4 认证）、`docs/DEPLOY.md`（§3 说明、Tailscale 多监听、§16.6 单地址措辞、配置表键名）、`docs/VERIFICATION.md`（标注历史密码用例已随代码删除）同步；`desktop/assets/index.html` 去掉“单地址是旧方式”的产品文案。
+
+风险记录（本轮未改，单独确认）：`SettingsService.applyNetwork` 保存绑定地址时用新的 `Settings` 字面量覆盖整个文件，会丢掉 `desktop_device_id`/`desktop_device_token`。后果：改一次网络绑定后，下次启动会重新配对，并在设备列表里留下一条旧记录（本机行按名字显示，不影响登录）。这是 DL-01 免码登录引入后与旧保存路径的交互，不是本次清理造成的；修复方式是把新值合并进已加载的 Settings 而不是重建。
+
+未验证：本轮没有需要目视确认的界面变化（删掉的横幅在 `ApplyMode` 热切换后不可达），因此未做隔离容器 GUI 运行；未重新构建/安装桌面二进制；未 commit。

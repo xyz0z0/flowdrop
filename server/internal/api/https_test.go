@@ -53,11 +53,11 @@ func TestHTTPSReverseProxyContract(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	sess := pairing.NewStore(conn)
+	pstore := pairing.NewStore(conn)
 	_, loopback, _ := net.ParseCIDR("127.0.0.1/32")
 	app := New(Deps{
 		Config:         cfg,
-		Pairing:        sess,
+		Pairing:        pstore,
 		Store:          store.New(conn),
 		Storage:        files,
 		Broker:         events.NewBroker(),
@@ -105,7 +105,7 @@ func TestHTTPSReverseProxyContract(t *testing.T) {
 
 	// Pair once locally, then present the code through the TLS origin the user
 	// typed. The pairing store is the only authentication source.
-	code, err := sess.CreateCode(time.Now())
+	code, err := pstore.CreateCode(time.Now())
 	if err != nil {
 		t.Fatalf("create pairing code: %v", err)
 	}

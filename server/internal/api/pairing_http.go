@@ -1,15 +1,13 @@
 package api
 
 import (
-	"crypto/sha256"
-	"encoding/hex"
 	"errors"
 	"net/http"
 	"strings"
 	"time"
 
-	"flowdrop/internal/auth"
 	"flowdrop/internal/pairing"
+	"flowdrop/internal/token"
 )
 
 // HubInfo is the non-secret Hub identity that clients compare before sending a
@@ -49,28 +47,14 @@ func (s *Server) hub() HubInfo {
 // valid until revoked.
 func (s *Server) sessionTTL() time.Duration { return s.cfg.SessionTTL() }
 
-// sessionFor builds the request identity carrier. The old password session
-// store is not consulted.
-func (s *Server) sessionFor(dev pairing.Device, token string, now time.Time) reqSession {
-	expires := now.Add(s.sessionTTL())
+// sessionFor builds the request identity carrier from a paired device.
+func (s *Server) sessionFor(dev pairing.Device, raw string, now time.Time) reqSession {
 	return reqSession{
-		DeviceID: dev.ID,
-		Token:    token,
-		Session: auth.Session{
-			ID:         sessionIDForToken(token),
-			UserID:     dev.ID,
-			CreatedAt:  time.UnixMilli(dev.CreatedAt),
-			LastSeenAt: time.UnixMilli(dev.LastSeenAt),
-			ExpiresAt:  expires,
-		},
+		DeviceID:  dev.ID,
+		Token:     raw,
+		TokenHash: token.Hash(raw),
+		ExpiresAt: now.Add(s.sessionTTL()),
 	}
-}
-
-// sessionIDForToken hashes the token so the rate limiter never holds a raw
-// credential.
-func sessionIDForToken(token string) string {
-	sum := sha256.Sum256([]byte(token))
-	return hex.EncodeToString(sum[:])
 }
 
 // bearerToken returns the Authorization Bearer token, if any. Tokens are only
@@ -135,7 +119,7 @@ func (s *Server) handlePair(w http.ResponseWriter, r *http.Request) {
 	}
 	// Bounded per source IP so pairing cannot be used as a query oracle; the
 	// Hub-wide 5-attempt limit still lives in the pairing store.
-	if !s.limiter.allow("pair:" + s.clientIP(r)) {
+	if !s.pairLimiter.allow("pair:" + s.clientIP(r)) {
 		writeError(w, http.StatusTooManyRequests, "rate_limited", "too many requests")
 		return
 	}
@@ -153,7 +137,7 @@ func (s *Server) handlePair(w http.ResponseWriter, r *http.Request) {
 	}
 
 	now := s.now()
-	token, dev, err := s.pairing.Pair(req.Code, req.DeviceName, now)
+	deviceToken, dev, err := s.pairing.Pair(req.Code, req.DeviceName, now)
 	if err != nil {
 		switch {
 		case errors.Is(err, pairing.ErrLocked):
@@ -169,9 +153,9 @@ func (s *Server) handlePair(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	csrf := auth.NewRandomToken(32)
+	csrf := token.Random(32)
 	expires := now.Add(s.sessionTTL())
-	s.setSessionCookies(w, r, token, csrf, expires)
+	s.setSessionCookies(w, r, deviceToken, csrf, expires)
 
 	hub := s.hub()
 	resp := sessionResponse{
@@ -183,7 +167,7 @@ func (s *Server) handlePair(w http.ResponseWriter, r *http.Request) {
 		Hub:           &hub,
 	}
 	if req.Native {
-		resp.DeviceToken = token
+		resp.DeviceToken = deviceToken
 	}
 	writeJSON(w, http.StatusOK, resp)
 }
@@ -192,7 +176,7 @@ func (s *Server) handlePair(w http.ResponseWriter, r *http.Request) {
 // paired. With a Bearer device token it restores the origin cookies and CSRF
 // value; the token itself is never returned.
 func (s *Server) handleSessionInfo(w http.ResponseWriter, r *http.Request) {
-	rs, token, ok := s.authenticate(r)
+	rs, rawToken, ok := s.authenticate(r)
 	if !ok {
 		if c, err := r.Cookie(sessionCookie); err == nil && c.Value != "" {
 			s.clearSessionCookies(w, r)
@@ -210,16 +194,16 @@ func (s *Server) handleSessionInfo(w http.ResponseWriter, r *http.Request) {
 	bearer := bearerToken(r) != ""
 	if csrf == "" || bearer {
 		if csrf == "" {
-			csrf = auth.NewRandomToken(32)
+			csrf = token.Random(32)
 		}
-		s.setSessionCookies(w, r, token, csrf, rs.Session.ExpiresAt)
+		s.setSessionCookies(w, r, rawToken, csrf, rs.ExpiresAt)
 	}
 
 	hub := s.hub()
 	writeJSON(w, http.StatusOK, sessionResponse{
 		Authenticated: true,
 		CSRFToken:     csrf,
-		ExpiresAt:     rs.Session.ExpiresAt.UnixMilli(),
+		ExpiresAt:     rs.ExpiresAt.UnixMilli(),
 		Limits:        s.limits(),
 		DeviceID:      rs.DeviceID,
 		Hub:           &hub,

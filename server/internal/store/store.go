@@ -10,7 +10,7 @@ import (
 	"strings"
 	"time"
 
-	"flowdrop/internal/auth"
+	"flowdrop/internal/token"
 )
 
 var ErrNotFound = errors.New("not found")
@@ -52,7 +52,7 @@ func New(db *sql.DB) *Store { return &Store{db: db} }
 
 func NewID() string {
 	// 16 random bytes, URL-safe, no client-controlled input.
-	return auth.NewRandomToken(16)
+	return token.Random(16)
 }
 
 const itemSelect = `

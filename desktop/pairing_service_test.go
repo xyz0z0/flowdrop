@@ -291,6 +291,7 @@ func TestListPairedDevicesHidesLocalWindow(t *testing.T) {
 	localID, localToken := pair(desktopDeviceName())
 	pair("手机")
 	if err := appsettings.Save(desktop.settingsPath, appsettings.Settings{
+		Mode:               appsettings.ModeLocal,
 		BindAddress:        "127.0.0.1",
 		Port:               8080,
 		DesktopDeviceID:    localID,
@@ -319,6 +320,7 @@ func TestGetStateLocalDeviceName(t *testing.T) {
 		t.Fatalf("local_device_name = %q without a saved token, want empty", st.LocalDeviceName)
 	}
 	if err := appsettings.Save(desktop.settingsPath, appsettings.Settings{
+		Mode:               appsettings.ModeLocal,
 		BindAddress:        "127.0.0.1",
 		Port:               8080,
 		DesktopDeviceID:    "dev_local",

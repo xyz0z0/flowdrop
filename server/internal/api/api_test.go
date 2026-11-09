@@ -27,13 +27,13 @@ import (
 	"github.com/coder/websocket"
 	"github.com/coder/websocket/wsjson"
 
-	"flowdrop/internal/auth"
 	"flowdrop/internal/config"
 	"flowdrop/internal/db"
 	"flowdrop/internal/events"
 	"flowdrop/internal/pairing"
 	"flowdrop/internal/storage"
 	"flowdrop/internal/store"
+	"flowdrop/internal/token"
 )
 
 // Item is the store's item shape; aliased here for terse test assertions.
@@ -87,24 +87,19 @@ func newHarness(t *testing.T, mutate ...func(*config.Config)) *harness {
 	if err != nil {
 		t.Fatalf("storage: %v", err)
 	}
-	// The legacy password-session store is only the Janitor's expired-row
-	// cleaner (see janitor.go). It holds no credential, is never consulted for
-	// authentication, and is not populated here.
-	legacySessions := auth.NewStore(conn, cfg.SessionTTL())
 	pstore := pairing.NewStore(conn)
 
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 	broker := events.NewBroker()
 	st := store.New(conn)
 	apiSrv := New(Deps{
-		Config:   cfg,
-		Sessions: legacySessions,
-		Pairing:  pstore,
-		Store:    st,
-		Storage:  files,
-		Broker:   broker,
-		UI:       nil,
-		Logger:   logger,
+		Config:  cfg,
+		Pairing: pstore,
+		Store:   st,
+		Storage: files,
+		Broker:  broker,
+		UI:      nil,
+		Logger:  logger,
 	})
 	ts := httptest.NewServer(apiSrv.Handler())
 	t.Cleanup(ts.Close)
@@ -377,7 +372,7 @@ func TestPairWrongCodeIsUniform(t *testing.T) {
 }
 
 // TestAPIRateLimitUsesAPILimitPerMinute pins that the HTTP limit is the generic
-// API limiter (APILimitPerMinute), not the retired login limiter. Pairing's own
+// API limiter (APILimitPerMinute), not a password-login limiter. Pairing's own
 // hub-wide five-attempt lock is reported as pairing_locked and is covered in
 // pairing_api_test.go, so it is deliberately not duplicated here.
 func TestAPIRateLimitUsesAPILimitPerMinute(t *testing.T) {
@@ -402,6 +397,50 @@ func TestAPIRateLimitUsesAPILimitPerMinute(t *testing.T) {
 	}
 }
 
+// TestPairRateLimitUsesPairLimitPerMinute pins that POST /api/v1/auth/pair is
+// bounded by the per-source-IP pairing limiter (PairLimitPerMinute), not by the
+// generic API limiter. With a limit of 2, one successful pairing and one wrong
+// code are still answered normally, the next attempt from the same source is
+// 429 rate_limited, and API traffic from the already paired device is
+// unaffected because it uses the separate API limiter.
+func TestPairRateLimitUsesPairLimitPerMinute(t *testing.T) {
+	h := newHarness(t, func(c *config.Config) {
+		c.PairLimitPerMinute = 2
+		c.APILimitPerMinute = 100
+	})
+	plain := &http.Client{Timeout: 10 * time.Second}
+
+	send := func(code string) (int, string) {
+		t.Helper()
+		req, _ := http.NewRequest(http.MethodPost, h.srv.URL+"/api/v1/auth/pair",
+			strings.NewReader(fmt.Sprintf(`{"code":%q,"device_name":"phone"}`, code)))
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("Origin", h.srv.URL)
+		res, err := plain.Do(req)
+		if err != nil {
+			t.Fatalf("pair: %v", err)
+		}
+		raw, _ := io.ReadAll(res.Body)
+		res.Body.Close()
+		return res.StatusCode, decodePairError(t, raw)
+	}
+
+	h.pair() // 1st pairing attempt, keeps the cookies for the API check below.
+	if status, code := send("zzzz"); status != http.StatusUnauthorized || code != "pairing_invalid" {
+		t.Fatalf("attempt 2 = %d %q, want 401 pairing_invalid", status, code)
+	}
+	if status, code := send("zzzz"); status != http.StatusTooManyRequests || code != "rate_limited" {
+		t.Fatalf("attempt 3 = %d %q, want 429 rate_limited", status, code)
+	}
+
+	// Pairing requests exhausted the pairing limiter, not the API limiter.
+	res := h.do(http.MethodGet, "/api/v1/items?limit=1", nil)
+	res.Body.Close()
+	if res.StatusCode != http.StatusOK {
+		t.Fatalf("API request after pairing limit = %d, want 200", res.StatusCode)
+	}
+}
+
 func TestSessionCookieIsHttpOnlyAndHashed(t *testing.T) {
 	h := newHarness(t)
 	h.pair()
@@ -421,15 +460,15 @@ func TestSessionCookieIsHttpOnlyAndHashed(t *testing.T) {
 		}
 	}
 	// The cookie value is the device token; only its hash may be persisted.
-	token := h.deviceToken
+	deviceToken := h.deviceToken
 	var stored string
 	if err := h.db.QueryRow(`SELECT token_hash FROM paired_devices WHERE id = ?`, h.deviceID).Scan(&stored); err != nil {
 		t.Fatalf("read paired device row: %v", err)
 	}
-	if stored == token {
+	if stored == deviceToken {
 		t.Fatal("plaintext device token stored in paired_devices")
 	}
-	if stored != auth.TokenID(token) {
+	if stored != token.Hash(deviceToken) {
 		t.Fatal("stored token_hash is not the SHA-256 of the device token")
 	}
 }
@@ -1040,24 +1079,6 @@ func TestJanitorRemovesOrphansAndStaleTemp(t *testing.T) {
 	key := strings.Repeat("ab", 16)
 	h.db.Exec(`INSERT INTO blobs(id, original_name, content_type, size_bytes, sha256, storage_key, created_at)
 		VALUES('orphanblob','x.txt','text/plain',3,'deadbeef',?,?)`, key, now)
-	// Legacy password sessions are only cleaned up by the Janitor. This fixture
-	// is explicit historical-table cleanup (not authentication): one expired row
-	// that must go and one unexpired row that must stay.
-	if _, err := h.db.Exec(`INSERT INTO admin_users(id, username, password_hash, created_at, updated_at)
-		VALUES('legacyuser','legacy','unused',0,0)`); err != nil {
-		t.Fatalf("insert legacy admin fixture: %v", err)
-	}
-	if _, err := h.db.Exec(`INSERT INTO sessions(id, user_id, created_at, last_seen_at, expires_at, user_agent)
-		VALUES('expiredsession','legacyuser',0,0,1,''),
-		      ('livesession','legacyuser',0,0,?, '')`, time.Now().Add(time.Hour).UnixMilli()); err != nil {
-		t.Fatalf("insert legacy session fixture: %v", err)
-	}
-	var legacyBefore int
-	h.db.QueryRow(`SELECT COUNT(*) FROM sessions`).Scan(&legacyBefore)
-	if legacyBefore != 2 {
-		t.Fatalf("legacy session fixture = %d rows, want 2", legacyBefore)
-	}
-
 	// A stale temp file and an in-flight one.
 	tmpDir := filepath.Join(h.cfg.DataDir, "tmp")
 	stale := filepath.Join(tmpDir, "stale.part")
@@ -1072,7 +1093,6 @@ func TestJanitorRemovesOrphansAndStaleTemp(t *testing.T) {
 	live.WriteString("in progress")
 
 	j := &Janitor{
-		Sessions:    h.api.sess,
 		Store:       h.store,
 		Storage:     h.files,
 		Logger:      slog.New(slog.NewTextHandler(io.Discard, nil)),
@@ -1085,17 +1105,6 @@ func TestJanitorRemovesOrphansAndStaleTemp(t *testing.T) {
 	h.db.QueryRow(`SELECT COUNT(*) FROM blobs`).Scan(&blobs)
 	if blobs != 0 {
 		t.Fatalf("orphan blob rows remain: %d", blobs)
-	}
-	var sessions int
-	h.db.QueryRow(`SELECT COUNT(*) FROM sessions WHERE id='expiredsession'`).Scan(&sessions)
-	if sessions != 0 {
-		t.Fatal("expired legacy session was not removed")
-	}
-	if err := h.db.QueryRow(`SELECT COUNT(*) FROM sessions WHERE id='livesession'`).Scan(&sessions); err != nil {
-		t.Fatal(err)
-	}
-	if sessions != 1 {
-		t.Fatal("janitor removed an unexpired legacy session")
 	}
 	if _, err := os.Stat(stale); !os.IsNotExist(err) {
 		t.Fatal("stale temp file was not removed")
@@ -1121,7 +1130,6 @@ func TestJanitorRemovesUnreferencedBlobFiles(t *testing.T) {
 	os.Chtimes(p, old, old)
 
 	j := &Janitor{
-		Sessions:    h.api.sess,
 		Store:       h.store,
 		Storage:     h.files,
 		Logger:      slog.New(slog.NewTextHandler(io.Discard, nil)),
@@ -1159,7 +1167,7 @@ func TestJanitorKeepsCommittedBlobs(t *testing.T) {
 	os.Chtimes(p, old, old)
 
 	j := &Janitor{
-		Sessions: h.api.sess, Store: h.store, Storage: h.files,
+		Store: h.store, Storage: h.files,
 		Logger:      slog.New(slog.NewTextHandler(io.Discard, nil)),
 		GracePeriod: time.Minute, TempMaxAge: time.Hour,
 	}

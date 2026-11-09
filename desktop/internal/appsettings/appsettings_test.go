@@ -74,7 +74,7 @@ func TestSaveLoadRoundTrip(t *testing.T) {
 		t.Fatalf("Load(missing) = found=%v err=%v, want found=false err=nil", found, err)
 	}
 
-	want := Settings{BindAddress: "192.168.1.20", Port: 9090}
+	want := Settings{Mode: ModeLocal, BindAddress: "192.168.1.20", Port: 9090}
 	if err := Save(path, want); err != nil {
 		t.Fatalf("Save: %v", err)
 	}
@@ -97,7 +97,7 @@ func TestSaveLoadRoundTrip(t *testing.T) {
 func TestLoadRejectsUnsafeSettings(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "desktop.json")
-	if err := os.WriteFile(path, []byte(`{"bind_address":"0.0.0.0","port":8080}`), 0o600); err != nil {
+	if err := os.WriteFile(path, []byte(`{"mode":"local","bind_address":"0.0.0.0","port":8080}`), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	if _, found, err := Load(path); err == nil || !found {
@@ -107,7 +107,7 @@ func TestLoadRejectsUnsafeSettings(t *testing.T) {
 
 func TestSaveRefusesInvalidSettings(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "desktop.json")
-	if err := Save(path, Settings{BindAddress: "0.0.0.0", Port: 8080}); err == nil {
+	if err := Save(path, Settings{Mode: ModeLocal, BindAddress: "0.0.0.0", Port: 8080}); err == nil {
 		t.Fatal("Save accepted a wildcard bind address")
 	}
 	if _, err := os.Stat(path); !os.IsNotExist(err) {
@@ -117,7 +117,7 @@ func TestSaveRefusesInvalidSettings(t *testing.T) {
 
 func TestSettingsFileHasNoPasswordField(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "desktop.json")
-	if err := Save(path, Settings{BindAddress: "192.168.1.5", Port: 8080}); err != nil {
+	if err := Save(path, Settings{Mode: ModeLocal, BindAddress: "192.168.1.5", Port: 8080}); err != nil {
 		t.Fatal(err)
 	}
 	b, err := os.ReadFile(path)
@@ -135,26 +135,14 @@ func TestSettingsFileHasNoPasswordField(t *testing.T) {
 	}
 }
 
-func TestLegacySingleAddressFileStillLoads(t *testing.T) {
-	dir := t.TempDir()
-	path := filepath.Join(dir, "desktop.json")
-	// Exactly what the previous desktop version wrote: no additional field.
-	legacy := "{\"bind_address\":\"192.168.1.20\",\"port\":8080}"
-	if err := os.WriteFile(path, []byte(legacy), 0o600); err != nil {
+func TestFileWithoutModeIsRejected(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "desktop.json")
+	// A file with no mode field no longer means "local": the mode is required.
+	if err := os.WriteFile(path, []byte(`{"bind_address":"192.168.1.20","port":8080}`), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	got, found, err := Load(path)
-	if err != nil || !found {
-		t.Fatalf("Load(legacy) = found=%v err=%v", found, err)
-	}
-	if got.DualMode() {
-		t.Fatalf("legacy settings became dual mode: %+v", got)
-	}
-	if got.BindAddress != "192.168.1.20" || got.Port != 8080 {
-		t.Fatalf("legacy settings = %+v, want the old bind/port unchanged", got)
-	}
-	if extra := got.AdditionalListen(); extra == nil || len(extra) != 0 {
-		t.Fatalf("AdditionalListen(legacy) = %#v, want a non-nil empty slice (explicit single mode)", extra)
+	if _, found, err := Load(path); err == nil || !found {
+		t.Fatalf("Load(no mode) = found=%v err=%v, want found=true with an error", found, err)
 	}
 }
 
@@ -162,6 +150,7 @@ func TestDualModeRoundTripAndListeners(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "desktop.json")
 	want := Settings{
+		Mode:                    ModeLocal,
 		BindAddress:             "192.168.1.20",
 		Port:                    9090,
 		AdditionalBindAddresses: []string{"100.64.1.2"},
@@ -193,9 +182,9 @@ func TestDualModeRoundTripAndListeners(t *testing.T) {
 		t.Fatalf("AdditionalListen = %v", extra)
 	}
 
-	// Saving the single-address mode again must omit the additional field so the
-	// file stays compatible with older desktop builds.
-	single := Settings{BindAddress: "192.168.1.20", Port: 9090}
+	// Saving the single-address mode again must omit the additional field: single
+	// address mode writes no such field at all.
+	single := Settings{Mode: ModeLocal, BindAddress: "192.168.1.20", Port: 9090}
 	if err := Save(path, single); err != nil {
 		t.Fatal(err)
 	}
@@ -206,6 +195,11 @@ func TestDualModeRoundTripAndListeners(t *testing.T) {
 	if strings.Contains(string(raw), "additional_bind_addresses") {
 		t.Fatalf("single-address settings kept a stale additional field: %s", raw)
 	}
+	if got, found, err := Load(path); err != nil || !found {
+		t.Fatalf("Load(single) = found=%v err=%v", found, err)
+	} else if got.DualMode() || got.AdditionalListen() == nil || len(got.AdditionalListen()) != 0 {
+		t.Fatalf("single-address settings = %+v, want a non-nil empty additional listener set", got)
+	}
 }
 
 func TestValidateDualModeRules(t *testing.T) {
@@ -214,12 +208,12 @@ func TestValidateDualModeRules(t *testing.T) {
 		s    Settings
 		want string
 	}{
-		{"dual", Settings{BindAddress: "192.168.1.2", Port: 8080, AdditionalBindAddresses: []string{"100.64.0.2"}}, ""},
-		{"duplicate", Settings{BindAddress: "192.168.1.2", Port: 8080, AdditionalBindAddresses: []string{"192.168.1.2"}}, "duplicated"},
-		{"two extras", Settings{BindAddress: "192.168.1.2", Port: 8080, AdditionalBindAddresses: []string{"100.64.0.2", "100.64.0.3"}}, "at most one"},
-		{"wildcard extra", Settings{BindAddress: "192.168.1.2", Port: 8080, AdditionalBindAddresses: []string{"0.0.0.0"}}, "wildcard"},
-		{"ipv6 extra", Settings{BindAddress: "192.168.1.2", Port: 8080, AdditionalBindAddresses: []string{"fd7a::1"}}, "IPv4"},
-		{"empty extra", Settings{BindAddress: "192.168.1.2", Port: 8080, AdditionalBindAddresses: []string{""}}, "empty"},
+		{"dual", Settings{Mode: ModeLocal, BindAddress: "192.168.1.2", Port: 8080, AdditionalBindAddresses: []string{"100.64.0.2"}}, ""},
+		{"duplicate", Settings{Mode: ModeLocal, BindAddress: "192.168.1.2", Port: 8080, AdditionalBindAddresses: []string{"192.168.1.2"}}, "duplicated"},
+		{"two extras", Settings{Mode: ModeLocal, BindAddress: "192.168.1.2", Port: 8080, AdditionalBindAddresses: []string{"100.64.0.2", "100.64.0.3"}}, "at most one"},
+		{"wildcard extra", Settings{Mode: ModeLocal, BindAddress: "192.168.1.2", Port: 8080, AdditionalBindAddresses: []string{"0.0.0.0"}}, "wildcard"},
+		{"ipv6 extra", Settings{Mode: ModeLocal, BindAddress: "192.168.1.2", Port: 8080, AdditionalBindAddresses: []string{"fd7a::1"}}, "IPv4"},
+		{"empty extra", Settings{Mode: ModeLocal, BindAddress: "192.168.1.2", Port: 8080, AdditionalBindAddresses: []string{""}}, "empty"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -243,7 +237,7 @@ func TestValidateMode(t *testing.T) {
 		s    Settings
 		want string
 	}{
-		{"empty is local", Settings{BindAddress: "192.168.1.2", Port: 8080}, ""},
+		{"empty is rejected", Settings{BindAddress: "192.168.1.2", Port: 8080}, "运行模式"},
 		{"explicit local", Settings{BindAddress: "192.168.1.2", Port: 8080, Mode: ModeLocal}, ""},
 		{"remote", Settings{BindAddress: "192.168.1.2", Port: 8080, Mode: ModeRemote, RemoteURL: "http://192.168.31.184:8080"}, ""},
 		{"unknown mode", Settings{BindAddress: "192.168.1.2", Port: 8080, Mode: "cloud"}, "无效"},
@@ -302,23 +296,6 @@ func TestValidateRemoteURL(t *testing.T) {
 	}
 }
 
-func TestLegacyFileWithoutModeIsLocal(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "desktop.json")
-	if err := os.WriteFile(path, []byte(`{"bind_address":"192.168.1.20","port":8080}`), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	got, found, err := Load(path)
-	if err != nil || !found {
-		t.Fatalf("Load(legacy) = found=%v err=%v", found, err)
-	}
-	if got.IsRemote() || got.Mode != "" || got.RemoteURL != "" {
-		t.Fatalf("legacy settings = %+v, want local mode with no remote URL", got)
-	}
-}
-
-// TestRemoteURLIsTrimmedAndOnlyKeptInRemoteMode pins the cross-field rule: the
-// stored address never keeps a trailing slash, and switching back to local
-// drops it entirely so a stale address cannot hijack a later start.
 func TestRemoteURLIsTrimmedAndOnlyKeptInRemoteMode(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "desktop.json")
 	remote := Settings{BindAddress: "192.168.1.20", Port: 8080, Mode: ModeRemote, RemoteURL: "http://192.168.31.184:8080/"}
@@ -334,7 +311,7 @@ func TestRemoteURLIsTrimmedAndOnlyKeptInRemoteMode(t *testing.T) {
 	}
 
 	// A non-remote save must not persist a leftover remote URL.
-	stale := Settings{BindAddress: "192.168.1.20", Port: 8080, Mode: ModeLocal, RemoteURL: "http://192.168.31.184:8080"}
+	stale := Settings{Mode: ModeLocal, BindAddress: "192.168.1.20", Port: 8080, RemoteURL: "http://192.168.31.184:8080"}
 	if err := Save(path, stale); err != nil {
 		t.Fatalf("Save(local): %v", err)
 	}
@@ -369,6 +346,7 @@ const validDeviceToken = "0123456789abcdefghijklmnopqrstuvwxyzABCDEFG"
 func TestDeviceIdentityRoundTrip(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "desktop.json")
 	want := Settings{
+		Mode:               ModeLocal,
 		BindAddress:        "192.168.1.20",
 		Port:               8080,
 		DesktopDeviceID:    "dev_9xY-z_1",
@@ -403,6 +381,7 @@ func TestInvalidDeviceTokenIsDropped(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			path := filepath.Join(t.TempDir(), "desktop.json")
 			saved := Settings{
+				Mode:               ModeLocal,
 				BindAddress:        "192.168.1.20",
 				Port:               8080,
 				DesktopDeviceID:    "dev_1",
@@ -436,7 +415,7 @@ func TestInvalidDeviceTokenIsDropped(t *testing.T) {
 func TestInvalidDeviceIDIsDropped(t *testing.T) {
 	for _, id := range []string{"has space", "quote\"", strings.Repeat("a", 65), "a/b", "é"} {
 		path := filepath.Join(t.TempDir(), "desktop.json")
-		if err := os.WriteFile(path, []byte(`{"bind_address":"192.168.1.20","port":8080,"desktop_device_id":`+mustJSON(t, id)+`}`), 0o600); err != nil {
+		if err := os.WriteFile(path, []byte(`{"mode":"local","bind_address":"192.168.1.20","port":8080,"desktop_device_id":`+mustJSON(t, id)+`}`), 0o600); err != nil {
 			t.Fatal(err)
 		}
 		got, found, err := Load(path)
@@ -456,7 +435,7 @@ func TestInvalidDeviceIDIsDropped(t *testing.T) {
 // two values still loads; the missing one stays empty instead of failing.
 func TestDeviceIdentityIsIndependentPerField(t *testing.T) {
 	onlyToken := filepath.Join(t.TempDir(), "token-only.json")
-	if err := os.WriteFile(onlyToken, []byte(`{"bind_address":"192.168.1.20","port":8080,"desktop_device_token":"`+validDeviceToken+`"}`), 0o600); err != nil {
+	if err := os.WriteFile(onlyToken, []byte(`{"mode":"local","bind_address":"192.168.1.20","port":8080,"desktop_device_token":"`+validDeviceToken+`"}`), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	got, found, err := Load(onlyToken)
@@ -468,7 +447,7 @@ func TestDeviceIdentityIsIndependentPerField(t *testing.T) {
 	}
 
 	onlyID := filepath.Join(t.TempDir(), "id-only.json")
-	if err := os.WriteFile(onlyID, []byte(`{"bind_address":"192.168.1.20","port":8080,"desktop_device_id":"dev_1"}`), 0o600); err != nil {
+	if err := os.WriteFile(onlyID, []byte(`{"mode":"local","bind_address":"192.168.1.20","port":8080,"desktop_device_id":"dev_1"}`), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	got, found, err = Load(onlyID)

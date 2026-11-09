@@ -3,8 +3,8 @@ package api
 // Device pairing HTTP/WS contract tests (docs/PAIRING.md, PA-04A).
 //
 // These have their own harness: a real SQLite database in a temp dir, the
-// pairing store, and a loopback listener on an ephemeral port. They do not use
-// the legacy password harness; the old password tests are retired in PA-07.
+// pairing store, and a loopback listener on an ephemeral port. Pairing is the
+// only authentication path; the removed password endpoints must stay removed.
 
 import (
 	"bytes"
@@ -59,6 +59,11 @@ func newPairHarness(t *testing.T) *pairHarness {
 	cfg.MaxUploadBytes = 1 << 20
 	cfg.MinFreeBytes = 0
 	cfg.MaxConcurrentUploads = 2
+	// These tests exercise pairing/store semantics (single use, uniform errors,
+	// the hub-wide lock), not per-source-IP throttling, which has its own test
+	// (TestPairRateLimitUsesPairLimitPerMinute). A realistic per-IP limit would
+	// turn the deliberate wrong-code loops into rate_limited responses.
+	cfg.PairLimitPerMinute = 1000
 
 	conn, err := db.Open(cfg.DataDir)
 	if err != nil {

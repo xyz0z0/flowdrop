@@ -306,9 +306,9 @@ scripts/install-desktop.sh
 ~/.local/bin/flowdrop-desktop
 ```
 
-> **从旧版升级**：先通过托盘菜单「退出 FlowDrop（停止 Hub）」完全退出旧进程，
-> 再执行 `scripts/build-desktop.sh` 和 `scripts/install-desktop.sh`，最后重新启动。
-> 只关闭窗口会收进托盘；SingleInstance 会复用旧进程，直接启动新二进制可能看不到新入口。
+> **替换二进制**：先通过托盘菜单「退出 FlowDrop（停止 Hub）」完全退出正在运行的
+> 实例，再执行 `scripts/build-desktop.sh` 和 `scripts/install-desktop.sh`，最后重新启动。
+> 只关闭窗口会收进托盘；SingleInstance 会复用现有进程，直接启动新二进制看不到新入口。
 
 **直接运行，无需额外准备**：`dist/flowdrop-desktop` 是完整的单文件应用，双击或
 `./dist/flowdrop-desktop` 就会在进程内拉起同一个 Hub 并打开收件箱；不需要先运行
@@ -345,9 +345,10 @@ sudo apt install build-essential pkg-config libgtk-3-dev libwebkit2gtk-4.1-dev
 运行依赖：GTK 3 + WebKitGTK 4.1（`libgtk-3-0t64`、`libwebkit2gtk-4.1-0`、
 `libsoup-3.0-0`、`libjavascriptcoregtk-4.1-0`）。
 
-桌面版自身的设置只保存**绑定地址与端口**（`~/.config/flowdrop/desktop.json`，
-不含设备令牌）。单地址沿用旧的 `bind_address` + `port`；双模式额外写入
-`additional_bind_addresses`（恰好一个 Tailscale 地址），旧版 `desktop.json` 仍可直接读取。
+桌面版自身的设置保存在 `~/.config/flowdrop/desktop.json`（0600）：运行模式 `mode`
+（`local` / `remote`）、绑定地址 `bind_address` + `port`、远程 Hub 地址，以及本机
+免码登录用的设备令牌 `desktop_device_token`。单地址只写 `bind_address` + `port`；
+双模式额外写入 `additional_bind_addresses`（恰好一个 Tailscale 地址）。
 Hub 数据仍在 `~/.local/share/flowdrop/`，与 CLI 共用。
 
 ## CLI
@@ -409,9 +410,8 @@ scripts/build.sh && cd tests && npm install && npx playwright test
 - APK 下载后由 Android 系统引导安装，应用不请求静默安装权限。
 - 单用户、单 Hub；无多租户、无端到端加密、无自动过期。
 - 大文件上限 512 MiB（可配置）；无断点续传，中断需重传。
-- **单地址限制是历史版本行为**：旧版一个 Hub 只能绑定一个具体 IP，LAN 与 Tailscale
-  需重启切换。当前版本支持同一个 Hub 同时监听一个内网地址 + 一个 Tailscale 地址
-  （`additional_listen` / 桌面双模式）；仍不会监听 `0.0.0.0`，也不会在 Hub 侧重绑定
+- **双地址是唯一的多入口方式**：同一个 Hub 可以同时监听一个内网地址 + 一个 Tailscale
+  地址（`additional_listen` / 桌面双模式），不监听 `0.0.0.0`，也不会在 Hub 侧重绑定
   失效地址。**客户端自动选路只有 Android（单 Hub）**，Web 不承诺自动换 origin。
   Tailscale 绑定步骤见上文与 [Android 使用说明](android/README.md)。
 - mDNS 自动发现只在**具体 RFC1918 LAN IPv4 + 明文 HTTP** 时发布；

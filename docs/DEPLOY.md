@@ -104,7 +104,7 @@ flowdrop pair                 # 或：flowdrop pair -config /path/to/config.json
 > 桌面偏好（`desktop.json`）不含密码、会话 Cookie 或 Hub 数据。唯一的凭据是本机免码
 > 登录用的设备令牌（`desktop_device_token`，0600，只用于向本机 Hub 的
 > `/api/v1/auth/session` 以 Bearer 换回该 origin 的会话 Cookie，见 §16.13）。
-> 旧版本留下的 `admin_users`/`sessions` 表只作为历史数据保留，不参与认证。
+> Hub 只有设备配对一条认证路径：新建数据库不含 `admin_users`/`sessions`，也没有登录端点。
 
 手动前台启动验证：
 
@@ -432,7 +432,7 @@ scripts/lan-http.sh --host 100.125.168.63 --port 8080
   日志会显示跳过原因，这是预期行为。
 - **推荐同时绑定**：主监听用 LAN 地址，另加
   `FLOWDROP_ADDITIONAL_LISTEN=100.x.y.z:8080`，同一个 Hub 即可同时提供 LAN 与
-  Tailscale 直连（见 §5.8）。旧版本“一个进程只绑定一个 IP”的限制已是历史行为；
+  Tailscale 直连（见 §5.8）。一个 Hub 进程可以绑定多个具体 IP；
   仍不要用两个共享数据目录的 Hub 绕过。
 - 可选：若愿意用 `tailscale serve` 的 HTTPS，则保持 `cookie_secure=true`，见下一节。
 
@@ -595,7 +595,7 @@ sudo ufw allow 443/tcp
 | `session_ttl_hours` | `FLOWDROP_SESSION_TTL_HOURS` | `168` (7 天) | 会话有效期（滑动续期） |
 | `cookie_secure` | `FLOWDROP_COOKIE_SECURE` | `true` | Cookie 仅 HTTPS 发送 |
 | `discovery_enabled` | `FLOWDROP_DISCOVERY_ENABLED` | 空 = 自动（满足 §5.7 条件时发布） | mDNS/DNS-SD 局域网自动发现；`false` 明确关闭 |
-| `login_limit_per_minute` | `FLOWDROP_LOGIN_LIMIT_PER_MINUTE` | `5` | 每个来源 IP 的配对请求限制（固定窗口，非令牌桶；与全 Hub 5 次错误上限是两件事） |
+| `pair_limit_per_minute` | `FLOWDROP_PAIR_LIMIT_PER_MINUTE` | `5` | 每个来源 IP 的配对请求限制（固定窗口，非令牌桶；与全 Hub 5 次错误上限是两件事） |
 | `api_limit_per_minute` | `FLOWDROP_API_LIMIT_PER_MINUTE` | `600` | 每会话 API 请求 |
 
 > 明文 HTTP 局域网部署（主路径）需要 `FLOWDROP_COOKIE_SECURE=false`；
@@ -858,8 +858,8 @@ origin；其它窗口、其它 origin、未知动作一律忽略。收件箱登�
 
 设置窗口提供两种方式：
 
-1. **只使用一个地址（旧方式）**：内网、Tailscale、其他或回环任选一个具体 IPv4；
-   行为与旧版一致。
+1. **只使用一个地址**：内网、Tailscale、其他或回环任选一个具体 IPv4；
+   只绑定这一个监听。
 2. **同时使用内网和 Tailscale**：分别选一个**内网（LAN）IPv4**和一个
    **Tailscale IPv4**，使用同一个端口。桌面把 LAN 作为主监听、Tailscale 作为
    `hub.Options.AdditionalListen`，由**同一个 Hub** 绑定；不是两个 Hub、不是两个进程，
@@ -874,8 +874,9 @@ origin；其它窗口、其它 origin、未知动作一律忽略。收件箱登�
   不要求也不自动安装 Tailscale。
 - 保存：`~/.config/flowdrop/desktop.json`；除绑定参数外只保存本机免码登录的设备令牌
   （`desktop_device_token`，0600，见 §16.13），Hub 侧只存该令牌的哈希。
-  单地址写旧的 `bind_address` + `port`；双模式额外写
-  `additional_bind_addresses: ["100.x.y.z"]`。旧版文件（无该字段）原样兼容。
+  单地址只写 `bind_address` + `port`；双模式额外写
+  `additional_bind_addresses: ["100.x.y.z"]`。`mode` 是必填字段（`local` / `remote`），
+  文件缺字段或缺文件时桌面按检测到的默认值重写，不做旧格式猜测。
 - Hub 配置：`desktop` 传 `hub.Options{ConfigPath: hub.DefaultConfigPath(),
   Listen: <lan:port>, AdditionalListen: [<tailscale:port>], CookieSecure: false}`。
   `AdditionalListen` 总是非 nil（单地址模式传空 slice），因此 CLI/config.json 里的
@@ -1127,7 +1128,7 @@ Linux桌面`dist/flowdrop-desktop`、CLI `dist/flowdrop`与Android测试包`dist
 
 | 模式 | 行为 |
 |---|---|
-| 本机 Hub（默认，旧文件无 `mode` 字段即视为本机） | 进程内启动 Hub，窗口加载本机 `http://<bind>:<port>/`，可用托盘生成配对码 |
+| 本机 Hub（默认，`"mode":"local"`） | 进程内启动 Hub，窗口加载本机 `http://<bind>:<port>/`，可用托盘生成配对码 |
 | 连接远程 Hub（`"mode":"remote"`） | 不启动本机 Hub（不绑端口、不跑 mDNS、不建数据目录），收件箱窗口直接加载 `remote_url`，配对走该 Hub 页面自带的配对页 |
 
 设置路径：Linux `~/.config/flowdrop/desktop.json`，Windows `%AppData%\flowdrop\desktop.json`；远程地址必须是 `http(s)://host[:port]`，不能带路径、参数或账号。

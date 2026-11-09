@@ -14,7 +14,6 @@ import (
 	"strings"
 	"time"
 
-	"flowdrop/internal/auth"
 	"flowdrop/internal/config"
 	"flowdrop/internal/events"
 	"flowdrop/internal/pairing"
@@ -32,10 +31,8 @@ const (
 
 type Server struct {
 	cfg config.Config
-	// sess is legacy password-session state that only the Janitor and the
-	// pre-pairing tests still compile against. It is never used to authenticate
-	// a request; PA-07 retires it together with the old password tests.
-	sess    *auth.Store
+	// pairing is the only authentication source for API, WS, preview and
+	// download requests.
 	pairing *pairing.Store
 	hubInfo func() HubInfo
 	store   *store.Store
@@ -43,9 +40,11 @@ type Server struct {
 	broker  *events.Broker
 	ui      fs.FS
 	limiter *limiter
-	log     *slog.Logger
+	// pairLimiter bounds pairing attempts per source IP (PairLimitPerMinute);
+	// limiter stays the generic API limit.
+	pairLimiter *limiter
+	log         *slog.Logger
 
-	loginLimiter *limiter
 	uploadSem    chan struct{}
 	trusted      []*net.IPNet
 	allowedHosts map[string]struct{}
@@ -56,8 +55,7 @@ type Server struct {
 }
 
 type Deps struct {
-	Config   config.Config
-	Sessions *auth.Store
+	Config config.Config
 	// Pairing is the device-pairing store; it is the only authentication
 	// source for API, WS, preview and download requests.
 	Pairing *pairing.Store
@@ -79,7 +77,6 @@ func New(d Deps) *Server {
 	}
 	s := &Server{
 		cfg:           d.Config,
-		sess:          d.Sessions,
 		pairing:       d.Pairing,
 		hubInfo:       d.HubInfo,
 		store:         d.Store,
@@ -87,7 +84,6 @@ func New(d Deps) *Server {
 		broker:        d.Broker,
 		ui:            d.UI,
 		log:           log,
-		loginLimiter:  newLimiter(d.Config.LoginLimitPerMinute, time.Minute),
 		uploadSem:     make(chan struct{}, d.Config.MaxConcurrentUploads),
 		trusted:       d.TrustedProxies,
 		allowedHosts:  buildAllowedHosts(d.Config),
@@ -95,6 +91,7 @@ func New(d Deps) *Server {
 		uploadTimeout: 15 * time.Minute,
 	}
 	s.limiter = newLimiter(d.Config.APILimitPerMinute, time.Minute)
+	s.pairLimiter = newLimiter(d.Config.PairLimitPerMinute, time.Minute)
 	return s
 }
 
@@ -261,7 +258,7 @@ func (s *Server) withAuth(next http.HandlerFunc) http.HandlerFunc {
 			writeError(w, http.StatusUnauthorized, "unauthenticated", "pairing required")
 			return
 		}
-		if !s.limiter.allow(rs.Session.ID) {
+		if !s.limiter.allow(rs.TokenHash) {
 			writeError(w, http.StatusTooManyRequests, "rate_limited", "too many requests")
 			return
 		}
