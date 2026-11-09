@@ -101,8 +101,10 @@ flowdrop pair                 # 或：flowdrop pair -config /path/to/config.json
 
 > 说明：配对码不是加密，它只是在可信局域网内的一次性凭据；`hub_id` 也不是明文 HTTP
 > 的身份认证，只是防误连。可信 LAN 明文边界与 Tailscale 前置要求不变。
-> 桌面偏好（`desktop.json`）不保存任何凭据；旧版本留下的 `admin_users`/`sessions` 表
-> 只作为历史数据保留，不参与认证。
+> 桌面偏好（`desktop.json`）不含密码、会话 Cookie 或 Hub 数据。唯一的凭据是本机免码
+> 登录用的设备令牌（`desktop_device_token`，0600，只用于向本机 Hub 的
+> `/api/v1/auth/session` 以 Bearer 换回该 origin 的会话 Cookie，见 §16.13）。
+> 旧版本留下的 `admin_users`/`sessions` 表只作为历史数据保留，不参与认证。
 
 手动前台启动验证：
 
@@ -870,7 +872,8 @@ origin；其它窗口、其它 origin、未知动作一律忽略。收件箱登�
 - 双模式要求两个地址当前都存在于本机网卡上且类型正确（LAN + Tailscale）；
   没有 Tailscale 网卡时双模式不可选，窗口提示仍可使用内网单地址，
   不要求也不自动安装 Tailscale。
-- 保存：`~/.config/flowdrop/desktop.json`，**不含任何凭据**；设备令牌哈希在 Hub 数据库。
+- 保存：`~/.config/flowdrop/desktop.json`；除绑定参数外只保存本机免码登录的设备令牌
+  （`desktop_device_token`，0600，见 §16.13），Hub 侧只存该令牌的哈希。
   单地址写旧的 `bind_address` + `port`；双模式额外写
   `additional_bind_addresses: ["100.x.y.z"]`。旧版文件（无该字段）原样兼容。
 - Hub 配置：`desktop` 传 `hub.Options{ConfigPath: hub.DefaultConfigPath(),
@@ -927,7 +930,9 @@ export no_proxy="$no_proxy,192.168.1.10"   # 换成你的 Hub 绑定 IP
 
 ### 16.9 已知限制（桌面版）
 
-- 仅 Linux；不做 Windows/macOS 打包、开机自启、自动网络重绑定/自动选路、二维码。
+- 桌面版覆盖 Linux 与 Windows（Windows 构建/打包/限制见 §18；两端共用同一套桌面代码，
+  功能一致，差异只在拖拽、托盘、代理直连等平台适配层）；macOS 未支持。
+  不做开机自启、自动网络重绑定/自动选路、二维码。
 - 明文 HTTP 局域网模式下 WebView 同样不是 secure context：自动复制可能被拒，
   Web 端已有「展开可选文本」降级（实测在 WebKitGTK 中 `navigator.clipboard` 可用，
   见 VERIFICATION §13.6）。
@@ -1010,6 +1015,153 @@ v3.1.0 的内部 handler 约定，升级 Wails 后须重验。最新产物摘要
 `docs/VERIFICATION.md` §19；§17–18 保留此前构建、失败复验和扩展验证历史。
 
 
+### 16.12 下载与同名文件（2026-11-09）
+
+- 桌面壳现在接管 WebKitGTK 的 `decide-destination`：每次下载在下载目录
+  （`G_USER_DIRECTORY_DOWNLOAD`，取不到时退回 `~/Downloads`，再退回 `$HOME`）里选一个
+  **当前空闲**的文件名，重名自动变成 `name (1).png`、`name (2).png`……**从不覆盖、也从不
+  删除**已有文件。
+- 修复前的行为：Wails v3.1.0 的 Linux 后端没有接下载，WebKit 按默认规则存到下载目录 +
+  服务器给的文件名，而 `allow-overwrite` 默认是 FALSE；目标已存在时下载失败并会破坏
+  旧文件，表现就是“同一张图下载过一次后，第一次点击把旧图删了，第二次才成功”。
+- 文件名按不可信输入处理：只取最后一个路径分量，去掉 `..`、控制字符、首尾空白与开头
+  的点，超长时截断但保留扩展名；建议名为空时落成 `download`。
+- Windows 走 WebView2 自带的下载流程，不受这段逻辑影响；非 GTK3 构建只在日志里写一行
+  “download handler requires a linux + cgo + gtk3 build”，不改变行为。
+
+### 16.13 无边框窗口与自绘标题栏（2026-11-09）
+
+- 收件箱与设置两个窗口都用 `Frameless: true`：没有系统标题栏，也没有窗口内菜单栏
+  （原 `LinuxWindow.Menu` 已移除，`设置…` 由页面自己的「设置」按钮承担，`在浏览器打开`
+  与 `退出` 在托盘菜单里，`Ctrl+,` 仍走全局快捷键）。
+- 顶部由页面自绘 36px 标题条：左侧品牌标记，右侧最小化/最大化/关闭。标题条颜色直接取
+  页面自己的 token（`var(--bg)` / `var(--fg)` / `var(--line-2)`），与下方页面同色，浅色/
+  深色都自动跟随；设置窗同一规则（`desktop/assets/style.css`）。
+- 拖动：Wails 的 `--wails-draggable` 路径在 GTK3 上拿不到按下时的按键与时间戳（发给合成器
+  的请求 button=0，被静默忽略），所以拖动一度只在按钮点击上"看起来正常"。现在由
+  `desktop/window_drag_linux_gtk3.go` 在 WebView 自己的 `button-press-event` 上直接调用
+  `gtk_window_begin_move_drag`：按下点位于顶部 36px 且不在右侧 132px 按钮区内才起拖，
+  参数就是这次按下的按键/坐标/时间戳（Wayland 下合成器需要的 serial 也来自这次按下）。
+  其它平台为空操作（Windows 用 Wails 自带路径即可拖动）。启动日志里两个窗口各出现一次
+  `window drag: title bar starts a window move on press` 表示已装上。
+- 三个按钮只发送固定 raw message（`flowdrop:window:minimise|maximise|close`）：
+  收件箱窗口仍要求来源是当前 Hub origin，设置窗（`wails://localhost`，仅进程内）无条件
+  允许；页面无法借此调用任何其它原生能力。
+- 收件箱的关闭按钮语义不变：仍有托盘时收进托盘，无托盘时弹出确认退出；设置窗关闭即隐藏。
+- 代价：无边框窗口没有系统阴影/圆角，拖动与缩放的手感由 Wails 与窗口管理器协商。若某个
+  桌面环境下拖动或缩放异常，把两个窗口的 `Frameless` 改回 `false` 即恢复系统装饰（其余
+  代码无需改动），页面里的自绘标题条会随注入脚本一并消失。
+- 标题条高度以 CSS 变量 `--flowdrop-chrome-top`（注入的 `:root` 规则）为准，Web UI 的登录/
+  配对页用 `min-height: calc(100dvh - var(--flowdrop-chrome-top, 0px))`（`web/src/styles.css`），
+  否则「36px 内边距 + 100dvh」会把配对页顶出一个无意义的竖向滚动条；浏览器/手机端该变量
+  不存在，回退为 0px，行为不变。
+- **KDE Plasma Wayland 专用处理**：KWin 会对"自己没有装饰"的窗口按服务端装饰协议补一条
+  标题栏（带最小化/最大化/关闭），叠在无边框窗口上。`desktop/window_frame_linux_gtk3.go`
+  在窗口 realize 时调用 `gdk_wayland_window_announce_csd()` 告诉 KWin"这个窗口自己画边框"
+  （与 magpie 处理 #1283 的方式相同，见其 `internal/gui/titlebar_gtk3.go`），X11/Windows
+  与不支持该协议的合成器上为空操作。从终端启动时，日志里出现
+  `window frame: announced client-side frame to the Wayland compositor` 即表示声明已发出。
+
+### 16.14 本机窗口免码登录与设置窗对话框（2026-11-09）
+
+**免码登录**（`desktop/desktop_login.go`、`main.go` 的 `ensureDesktopLogin`）：桌面收件箱
+窗口加载 Hub 真实 HTTP origin，与手机同一套 cookie 认证，会话 TTL 默认 7 天。桌面壳因此把
+自己当成一个 `native` 客户端：
+
+1. 本地模式下启动时用进程内 `CreatePairingCode()` 取一个一次性码（不显示、不写盘、不写日志）。
+2. 壳自己的 Go 客户端 `POST /api/v1/auth/pair {native:true}`（不带 `Origin`，走服务端对非
+   浏览器客户端的既有放行分支）换回长期设备令牌。
+3. 令牌写进 `desktop.json`（`desktop_device_token`，0600 原子写）——这是这份配置文件里唯一
+   的凭据；`appsettings.Normalize` 只接受 Hub 真实格式（base64url 32 字节），脏值视为未配对。
+4. 收件箱窗口每次加载注入 `desktopBootstrapJS`：先用 cookie 查 `GET /api/v1/auth/session`，
+   未认证才带 `Authorization: Bearer <token>` 再查一次（服务端会重发 cookie），成功重载一次；
+   `sessionStorage` 键 `flowdropBootstrapReloads` 限制最多 2 次重载，避免 cookie 收不下时死循环。
+5. 令牌只经由注入脚本进入页面，不进日志、不进 localStorage、不进 HTML 资产。
+
+配对失败/被撤销时只记一行 `desktop login: 无法与本地 Hub 免码配对…`，收件箱仍可用配对码手动
+登录，启动不阻断。设置页的「已配对设备」里，本机窗口被过滤出来单列成不可撤销的一行
+「本机窗口：本机桌面 · <host>」；撤销它之后下次启动会重新配对。
+
+**设置窗是收件箱的 transient 对话框**（`desktop/window_owner_linux_gtk3.go`）：
+`gtk_window_set_transient_for(inbox)` + `GTK_WIN_POS_CENTER_ON_PARENT`（映射后补算坐标
+`gtk_window_move`），点「设置」时再用 `gtk_window_present_with_time` 提到前台。窗口管理器
+因此把它归为收件箱的对话框（跟随最小化、置于其上、通常不进任务栏）。页脚里与托盘重复的
+「打开收件箱」已删。
+
+**两个必须知道的坑（都在本轮容器实跑里踩到并修掉）**：
+
+- *注入脚本不是互相独立的*。Wails 把 `WebviewWindowOptions.JS` 整段当**一个脚本**执行，注入
+  可能落在 Hub 页面就绪之前的文档上：标题条因为显式等待 `document.body` 能幸存，其后的语句一旦
+  顶层抛错就**整段后续都不执行**（表现为：标题条正常、但「设置」按钮和免码登录都没了，页面停在
+  配对码页）。现在 `joinInjectedScripts` 把每段包进 `try { … } catch (e) { /* flowdrop: isolated
+  snippet */ }`，并把登录引导排在第一位（`inboxInjectedJS`）；`desktop/injected_scripts_test.go`
+  锁住这个结构。
+- *窗口创建时的原生句柄还没有*。Wails 在 `app.Run` 的 GTK 主循环里才真正建窗口，所以
+  `NativeWindow()` 首次可能为 nil，UI-05 的 CSD 声明与设置窗 transient 会静默失败。现在统一走
+  `desktop/native_window_retry.go` 的 `withNativeWindows`：GTK 线程上 80ms 间隔、最多 25 次
+  （约 2 秒）等待句柄，超时只记一行日志并退回默认行为。
+
+**Windows 上必须自己注入**：Wails v3.1.0 只在窗口用 `options.HTML` 创建时才执行
+`WebviewWindowOptions.JS`（`application/webview_window_windows.go` 的 `navigateInitialPage`），
+两个 FlowDrop 窗口都是 URL 创建，所以 Windows 上原本拿不到任何注入脚本（无自绘标题条、无
+「设置」入口、无拖放桥、无免码登录；设置窗自带的标题栏按钮也没绑事件）。现在由
+`desktop/injected_js_windows.go` 在每次 `events.Windows.WebViewNavigationCompleted` 后重新注入
+同一批脚本（`go w.ExecJS(js)`：`ExecJS` 内部用 `InvokeSync`，不能在共享事件分发 goroutine 上
+直接调用）；其它平台 `desktop/injected_js_other.go` 是空操作，Linux/macOS 仍由 `JS:` 选项注入，
+不会重复执行。真实 Windows 11 上的效果尚未验证（只验证了交叉编译与 Linux 无回归）。
+
+**验收（隔离容器，`--network none`，Xvfb + openbox，X11）**：首启即进收件箱（Hub 日志
+`/api/v1/items status=200`、`desktop login` 一行、desktop.json `-rw-------` 含两个新字段、
+日志中 0 次令牌明文）；重启同一 `HOME` 时 `desktop login` 0 次、`items` 仍 200、`paired_devices`
+只有一行且 id 与 desktop.json 一致；点注入的「设置」后 `xprop WM_TRANSIENT_FOR` 等于收件箱
+窗口号、两窗口中心点完全重合；启动日志不再出现 `window frame: native GTK window not available`。
+KWin Wayland 真机上的 transient 任务栏归属与 CSD 效果、Windows、托盘交互仍未在本轮验证。
+
 ## 17. 当前配对版交付（2026-11-08）
 
 Linux桌面`dist/flowdrop-desktop`、CLI `dist/flowdrop`与Android测试包`dist/flowdrop-android-debug.apk`均已重新构建。当前操作不再使用账号密码：完全退出旧桌面实例→运行新版→需要时启用LAN/Tailscale双监听→设置添加设备取码→手机发现/手填地址并配对。每添加一台设备重新生成码，已配对Android会在同一Hub已保存地址间自动重连；Web Cookie仍按origin隔离。三产物SHA及本轮102 JVM、16 Web E2E、隔离Wails与真实Hub回环集成证据见VERIFICATION §20；前文引用旧APK摘要/模拟器/§19拖拽记录均为历史，不能替代本轮真机验收。未自动安装/commit/push，当前debug APK不是商店正式release。真实手机Wi-Fi/Tailscale仍待用户验证。
+
+## 18. 桌面端运行模式与 Windows 构建（2026-11-09）
+
+桌面壳现在有两种运行模式，保存在桌面自己的设置文件里，**在设置页切换后立即生效，不需要重启**（RMT-03）：切到远程会先停本机 Hub 再让收件箱加载远程地址；切回本机会重新启动 Hub，启动失败则保持远程模式并报中文错误，不会写坏已保存配置。切换瞬间会中断本机 Hub 上正在进行的传输/连接。
+
+| 模式 | 行为 |
+|---|---|
+| 本机 Hub（默认，旧文件无 `mode` 字段即视为本机） | 进程内启动 Hub，窗口加载本机 `http://<bind>:<port>/`，可用托盘生成配对码 |
+| 连接远程 Hub（`"mode":"remote"`） | 不启动本机 Hub（不绑端口、不跑 mDNS、不建数据目录），收件箱窗口直接加载 `remote_url`，配对走该 Hub 页面自带的配对页 |
+
+设置路径：Linux `~/.config/flowdrop/desktop.json`，Windows `%AppData%\flowdrop\desktop.json`；远程地址必须是 `http(s)://host[:port]`，不能带路径、参数或账号。
+
+远程模式下本机专属操作（生成配对码、设备列表、撤销设备、改绑定地址/端口）会返回中文提示而不会执行；托盘「在浏览器中打开」指向远程地址；退出只关窗口，不会影响远程 Hub。
+
+### 18.1 Windows 构建与打包（交叉编译，无需 Windows 工具链）
+
+```bash
+scripts/build-desktop-windows.sh            # dist/flowdrop-desktop.exe（amd64，GUI 子系统）
+scripts/build-desktop-windows.sh --arm64    # dist/flowdrop-desktop-arm64.exe
+scripts/build-desktop-windows.sh --console  # 保留控制台，便于看 stderr 日志
+scripts/package-windows.sh                  # dist/flowdrop-windows-amd64.zip（exe + README.txt）
+scripts/package-windows.sh --arm64          # dist/flowdrop-windows-arm64.zip
+```
+
+Windows 侧文件位置：配置 `%AppData%\flowdrop\`（Hub 配置与桌面设置），数据 `%LocalAppData%\flowdrop\`（数据库、附件），日志 `%LocalAppData%\flowdrop\desktop.log`（GUI 构建没有控制台，桌面与 Hub 的 `log`/`slog` 都写这里）。
+
+exe 资源（WIN-07）：构建脚本在链接后调用独立模块 `tools/winres/`（`github.com/tc-hib/winres`，纯 Go，无需 mingw）写入图标（`desktop/assets/icon.png` 的 256/128/64/48/32/16 六种尺寸）、版本信息（FileVersion/ProductVersion `0.1.0.0`、ProductName `FlowDrop`、FileDescription `FlowDrop 流转`，en-US + zh-CN）和 manifest（`asInvoker`、PerMonitorV2 + PerMonitor 高 DPI、longPathAware、Win10/11 supportedOS）。写入是原子的；失败会让构建失败，不会产出无图标 exe。`-verify` 可回读校验：
+
+```bash
+cd tools/winres && go run . -verify -exe ../../dist/flowdrop-desktop.exe
+```
+
+首次构建需要该模块的依赖在 module cache 中（`cd tools/winres && go mod download`，需网络）；之后离线可构建。
+
+Windows 真机上可运行 `scripts/check-windows-exe.ps1` 核对 exe 写入了什么（只读，不启动应用）：
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\check-windows-exe.ps1 .\flowdrop-desktop.exe
+```
+
+它打印 Windows 属性对话框会显示的版本字段与 SHA-256，并把内嵌图标导出为 `exe-icon.png`（应与 `desktop/assets/icon.png` 同一蓝色圆角图标）。期望值：FileVersion/ProductVersion `0.1.0.0`、ProductName `FlowDrop`、FileDescription `FlowDrop 流转`。
+
+拖拽上传：Windows 走 WebView2 原生 HTML5 拖放（Web 层 `web/src/Composer.tsx`/`fileDrop.ts`，用户 2026-11-09 在 Windows 11 真机确认可用），不需要原生桥；Linux WebKitGTK 的 HTML5 drop 不可用，才由 `desktop/filedrop_linux_gtk3.go` 原生 GTK 桥接管。
+
+已知限制：未做代码签名（SmartScreen 会提示）、无开机自启；WebView2 运行库需系统自带（Windows 11 自带）。首次启动需在 Windows 防火墙提示中允许「专用网络」，否则同一局域网设备无法访问本机 Hub。图标与 DPI manifest 已写入 exe，但资源管理器图标缓存、属性对话框和真实高 DPI 观感仍需 Windows 真机确认。

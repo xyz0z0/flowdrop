@@ -24,8 +24,37 @@ const kindLabel: Record<string, string> = {
   file: '文件',
 };
 
+// Rough number of characters that fit on one line of a collapsed card. Used only
+// to estimate how tall a message renders, so it can be kept generous.
+const LINE_CHARS = 40;
+// Lines shown before the text is collapsed.
+const COLLAPSED_LINES = 6;
+// Stable character threshold: above this a text message always gets the toggle.
+const LONG_TEXT_CHARS = 280;
+
+/**
+ * Whether a text message needs an expand/collapse toggle.
+ *
+ * The decision is deliberately conservative: only text that is long by
+ * character count, or that clearly wraps past the collapsed line budget, is
+ * folded. Surrounding whitespace is ignored and short multi-line text stays
+ * short, so no message is ever clipped without a way to reveal it.
+ */
+function needsExpand(raw: string): boolean {
+  const text = raw.replace(/\r\n?/g, '\n').trim();
+  if (!text) return false;
+  if (text.length > LONG_TEXT_CHARS) return true;
+  let lines = 0;
+  for (const line of text.split('\n')) {
+    lines += Math.max(1, Math.ceil(line.length / LINE_CHARS));
+  }
+  return lines > COLLAPSED_LINES;
+}
+
 export const ItemCard = memo(function ItemCard({ item, onDelete, notify }: Props) {
   const [previewOpen, setPreviewOpen] = useState(false);
+  // Per-item: survives re-renders and event-stream updates of the same item.
+  const [textExpanded, setTextExpanded] = useState(false);
   const [copied, setCopied] = useState(false);
   const [confirming, setConfirming] = useState(false);
   // Shown only after an automatic copy failed: the value stays visible and
@@ -46,6 +75,9 @@ export const ItemCard = memo(function ItemCard({ item, onDelete, notify }: Props
 
   const isImage = item.type === 'image' && item.blob;
   const isLink = item.type === 'link';
+  const longText = item.type === 'text' && needsExpand(item.text ?? '');
+  // Stable target for the toggle's aria-controls.
+  const textId = `item-text-${item.id}`;
 
   const doCopy = async (label: string, value: string) => {
     const result = await copyText(value);
@@ -77,9 +109,24 @@ export const ItemCard = memo(function ItemCard({ item, onDelete, notify }: Props
           {item.sender_device ? `${item.sender_device} · ` : ''}
           {new Date(item.created_at).toLocaleString()}
         </span>
+        {longText && (
+          <button
+            type="button"
+            className="ghost text-toggle"
+            aria-expanded={textExpanded}
+            aria-controls={textId}
+            onClick={() => setTextExpanded((v) => !v)}
+          >
+            {textExpanded ? '收起' : '展开全文'}
+          </button>
+        )}
       </div>
 
-      {item.type === 'text' && <p className="text-body">{item.text}</p>}
+      {item.type === 'text' && (
+        <p id={textId} className={longText && !textExpanded ? 'text-body clamp' : 'text-body'}>
+          {item.text}
+        </p>
+      )}
 
       {isLink && item.text && (
         <div className="link-body">

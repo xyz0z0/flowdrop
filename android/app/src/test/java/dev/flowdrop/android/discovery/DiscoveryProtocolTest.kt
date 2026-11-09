@@ -65,6 +65,46 @@ class DiscoveryProtocolTest {
     }
 
     @Test
+    fun `normalizes service type dots casing and local suffix`() {
+        listOf(
+            "._flowdrop._tcp",
+            "._flowdrop._tcp.",
+            "_flowdrop._tcp.local.",
+            "_FLOWDROP._TCP",
+            " _FlowDrop._Tcp. ",
+        ).forEach { type ->
+            assertTrue("expected match: $type", DiscoveryProtocol.matchesServiceType(type))
+        }
+
+        listOf(
+            "_flowdrop._udp.",
+            "_flowdrop._tcp2",
+            "_flowdrop._tcp.foo",
+            "_flowdrop._tcp.local.foo",
+            "_http._tcp.",
+            "",
+            ".",
+        ).forEach { type ->
+            assertFalse("expected reject: $type", DiscoveryProtocol.matchesServiceType(type))
+        }
+    }
+
+    @Test
+    fun `parses an Android 10 leading-dot service type`() {
+        val hub = DiscoveryProtocol.parse(
+            RawService(
+                serviceName = "FlowDrop-bob-hpelitedesk880g6",
+                serviceType = "._flowdrop._tcp",
+                hostAddresses = listOf("192.168.31.184"),
+                port = 8080,
+                txt = mapOf("path" to "/", "scheme" to "http", "v" to "1"),
+            ),
+        )!!
+        assertEquals("bob-hpelitedesk880g6", hub.displayName)
+        assertEquals("http://192.168.31.184:8080", hub.baseUrl)
+    }
+
+    @Test
     fun `rejects incompatible TXT records`() {
         assertNull(DiscoveryProtocol.parse(raw(version = "2")))
         assertNull(DiscoveryProtocol.parse(raw(version = "")))
@@ -158,6 +198,119 @@ class DiscoveryProtocolTest {
     fun `no private IPv4 means no Hub`() {
         assertNull(DiscoveryProtocol.parse(raw(addresses = emptyList())))
         assertNull(DiscoveryProtocol.parse(raw(addresses = listOf("fe80::1", "203.0.113.9"))))
+    }
+
+    @Test
+    fun `accepts a record without any TXT entry`() {
+        // Android 10 NsdServiceInfo often returns no attributes at all. The
+        // record is still only an address hint, so an absent TXT is accepted
+        // while every other rule stays mandatory.
+        val hub = DiscoveryProtocol.parse(
+            RawService(
+                serviceName = "FlowDrop-bob-hpelitedesk880g6",
+                serviceType = DiscoveryProtocol.SERVICE_TYPE,
+                hostAddresses = listOf("192.168.31.184"),
+                port = 8080,
+                txt = emptyMap(),
+            ),
+        )!!
+        assertEquals("bob-hpelitedesk880g6", hub.displayName)
+        assertEquals("http://192.168.31.184:8080", hub.baseUrl)
+    }
+
+    @Test
+    fun `an empty TXT map does not relax the other rules`() {
+        fun noTxt(
+            name: String = "FlowDrop-X",
+            type: String = DiscoveryProtocol.SERVICE_TYPE,
+            addresses: List<String> = listOf("192.168.1.2"),
+            port: Int = 8080,
+        ) = RawService(
+            serviceName = name,
+            serviceType = type,
+            hostAddresses = addresses,
+            port = port,
+            txt = emptyMap(),
+        )
+
+        // Public / loopback / link-local / CGNAT / IPv6 hosts stay rejected.
+        listOf(
+            "8.8.8.8",
+            "127.0.0.1",
+            "169.254.1.1",
+            "100.64.0.1",
+            "::1",
+            "not-an-ip",
+            "",
+        ).forEach { address ->
+            assertNull("$address must not produce a Hub", DiscoveryProtocol.parse(noTxt(addresses = listOf(address))))
+        }
+        assertNull(DiscoveryProtocol.parse(noTxt(addresses = emptyList())))
+
+        // Service type, instance name and port are still enforced.
+        assertNull(DiscoveryProtocol.parse(noTxt(type = "_http._tcp.")))
+        assertNull(DiscoveryProtocol.parse(noTxt(name = "Printer")))
+        assertNull(DiscoveryProtocol.parse(noTxt(name = "FlowDrop-")))
+        assertNull(DiscoveryProtocol.parse(noTxt(port = 0)))
+        assertNull(DiscoveryProtocol.parse(noTxt(port = 65536)))
+    }
+
+    @Test
+    fun `a non-empty TXT map with any wrong value is rejected`() {
+        assertNull(DiscoveryProtocol.parse(raw(version = "2")))
+        assertNull(DiscoveryProtocol.parse(raw(scheme = "https")))
+        assertNull(DiscoveryProtocol.parse(raw(path = "/x")))
+        // Even a single extra-but-wrong key keeps the record strict.
+        assertNull(
+            DiscoveryProtocol.parse(
+                RawService(
+                    serviceName = "FlowDrop-X",
+                    hostAddresses = listOf("192.168.1.2"),
+                    port = 8080,
+                    txt = mapOf("v" to "2", "scheme" to "http", "path" to "/"),
+                ),
+            ),
+        )
+    }
+
+    @Test
+    fun `an empty TXT map still requires an explicit RFC1918 IPv4 host`() {
+        assertNull(
+            DiscoveryProtocol.parse(
+                RawService(
+                    serviceName = "FlowDrop-X",
+                    hostAddresses = listOf("203.0.113.9", "fe80::1"),
+                    port = 8080,
+                    txt = emptyMap(),
+                ),
+            ),
+        )
+        assertEquals(
+            "172.20.10.4",
+            DiscoveryProtocol.parse(
+                RawService(
+                    serviceName = "FlowDrop-X",
+                    hostAddresses = listOf("8.8.8.8", "172.20.10.4"),
+                    port = 8080,
+                    txt = emptyMap(),
+                ),
+            )!!.host,
+        )
+    }
+
+    @Test
+    fun `registry accepts a Hub discovered without TXT`() {
+        val registry = HubDiscoveryRegistry()
+        val hub = registry.found(
+            RawService(
+                serviceName = "FlowDrop-bob-hpelitedesk880g6",
+                hostAddresses = listOf("192.168.31.184"),
+                port = 8080,
+                txt = emptyMap(),
+            ),
+        )!!
+        assertEquals("http://192.168.31.184:8080", hub.baseUrl)
+        assertEquals(1, registry.hubs().size)
     }
 
     @Test

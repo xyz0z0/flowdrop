@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -68,7 +69,11 @@ func newTestService(t *testing.T) (*SettingsService, *hubmgr.Manager, int) {
 	})
 	desktop.settingsPath = os.Getenv("FLOWDROP_DESKTOP_CONFIG")
 	desktop.hubConfigPath = cfgPath
-	desktop.lastStartupErr = ""
+	// main() hands the same manager to both the state and the service; mirror
+	// that so inboxBaseURL() resolves against the test Hub.
+	desktop.manager = m
+	desktop.setStartupError("")
+	desktop.setRemoteHubURL("")
 	desktop.app = nil
 	desktop.inbox = nil
 	desktop.settings = nil
@@ -336,4 +341,379 @@ func freePortOnAddress(t *testing.T, host string) int {
 	port := ln.Addr().(*net.TCPAddr).Port
 	_ = ln.Close()
 	return port
+}
+
+// RMT-03: ApplyMode switches the run mode of the running process immediately.
+// local -> remote really stops the in-process Hub and points every URL consumer
+// at the remote address; remote -> local really starts it again. No restart and
+// no restart_required in the response.
+func TestServiceApplyModeSwitchesAtRuntime(t *testing.T) {
+	svc, m, _ := newTestService(t)
+	localURL := m.URL()
+	savedPath := os.Getenv("FLOWDROP_DESKTOP_CONFIG")
+
+	// The process already runs local mode, so saving local again is a no-op that
+	// must not restart the Hub.
+	st, err := svc.ApplyMode(appsettings.ModeLocal, "")
+	if err != nil {
+		t.Fatalf("ApplyMode(local): %v", err)
+	}
+	if st.RestartRequired || st.Mode != appsettings.ModeLocal || st.RemoteURL != "" {
+		t.Fatalf("ApplyMode(local) = %+v, want local mode with restart_required=false", st)
+	}
+	if got := m.URL(); got != localURL {
+		t.Fatalf("idempotent ApplyMode(local) restarted the Hub: %s -> %s", localURL, got)
+	}
+
+	// local -> remote: the local Hub is stopped here and now.
+	remoteURL := "http://192.168.31.184:8080"
+	st, err = svc.ApplyMode(appsettings.ModeRemote, remoteURL+"/")
+	if err != nil {
+		t.Fatalf("ApplyMode(remote): %v", err)
+	}
+	if st.RestartRequired {
+		t.Fatalf("ApplyMode(remote) = %+v, want restart_required=false after a hot switch", st)
+	}
+	if st.Mode != appsettings.ModeRemote || st.RemoteURL != remoteURL {
+		t.Fatalf("ApplyMode(remote) state = %+v, want mode=remote url=%s", st, remoteURL)
+	}
+	if st.Running || st.URL != "" {
+		t.Fatalf("ApplyMode(remote) state = %+v, want the local Hub reported as stopped", st)
+	}
+	if got := m.URL(); got != "" {
+		t.Fatalf("local Hub still running at %q after switching to remote", got)
+	}
+	// The tray, the native menu and OpenInBrowser all read this dynamically, so
+	// it must already be the new address instead of a cached local one.
+	if got := desktop.remoteHubURL(); got != remoteURL {
+		t.Fatalf("runtime remote URL = %q, want %q", got, remoteURL)
+	}
+	if got := desktop.inboxBaseURL(); got != remoteURL {
+		t.Fatalf("inboxBaseURL = %q, want the remote %q", got, remoteURL)
+	}
+	// The released port must be free again and the old origin must not answer.
+	ln, err := net.Listen("tcp", strings.TrimPrefix(localURL, "http://"))
+	if err != nil {
+		t.Fatalf("port of the stopped Hub is still bound: %v", err)
+	}
+	_ = ln.Close()
+	if res, err := httpClientForTest().Get(localURL + "/api/v1/health"); err == nil {
+		res.Body.Close()
+		t.Fatalf("stopped Hub still answers on %s", localURL)
+	}
+
+	saved, found, err := appsettings.Load(savedPath)
+	if err != nil || !found {
+		t.Fatalf("persisted settings = found=%v err=%v", found, err)
+	}
+	if saved.Mode != appsettings.ModeRemote || saved.RemoteURL != remoteURL {
+		t.Fatalf("persisted settings = %+v, want remote mode and the trimmed URL", saved)
+	}
+	// Switching modes must keep the listen selection the user already had.
+	if saved.BindAddress != "127.0.0.1" || saved.Port == 0 {
+		t.Fatalf("persisted settings lost the listen selection: %+v", saved)
+	}
+
+	// remote -> local: the Hub is started from the saved listen selection.
+	st, err = svc.ApplyMode(appsettings.ModeLocal, "")
+	if err != nil {
+		t.Fatalf("ApplyMode(local): %v", err)
+	}
+	if st.Mode != appsettings.ModeLocal || st.RemoteURL != "" || st.RestartRequired {
+		t.Fatalf("ApplyMode(local) state = %+v, want local mode without a restart", st)
+	}
+	if !st.Running || st.URL == "" {
+		t.Fatalf("ApplyMode(local) state = %+v, want the Hub reported as running", st)
+	}
+	if got := desktop.remoteHubURL(); got != "" {
+		t.Fatalf("runtime remote URL = %q after switching to local, want empty", got)
+	}
+	if got := desktop.inboxBaseURL(); got != m.URL() {
+		t.Fatalf("inboxBaseURL = %q, want the new local %q", got, m.URL())
+	}
+	res, err := httpClientForTest().Get(m.URL() + "/api/v1/health")
+	if err != nil {
+		t.Fatalf("health after switching back to local: %v", err)
+	}
+	res.Body.Close()
+	if res.StatusCode != 200 {
+		t.Fatalf("health after switching back to local = %d, want 200", res.StatusCode)
+	}
+	saved, found, err = appsettings.Load(savedPath)
+	if err != nil || !found || saved.Mode != appsettings.ModeLocal || saved.RemoteURL != "" {
+		t.Fatalf("persisted settings after switching back = %+v found=%v err=%v", saved, found, err)
+	}
+
+	// A missing settings file must be written again without touching the Hub.
+	if err := os.Remove(savedPath); err != nil {
+		t.Fatalf("remove settings: %v", err)
+	}
+	running := m.URL()
+	if _, err := svc.ApplyMode(appsettings.ModeLocal, ""); err != nil {
+		t.Fatalf("ApplyMode(local) without a settings file: %v", err)
+	}
+	if got := m.URL(); got != running {
+		t.Fatalf("idempotent ApplyMode restarted the Hub: %s -> %s", running, got)
+	}
+	if _, found, err := appsettings.Load(savedPath); err != nil || !found {
+		t.Fatalf("idempotent ApplyMode did not save the settings: found=%v err=%v", found, err)
+	}
+}
+
+// TestServiceApplyModeRejectsInvalidInput proves the bridge reuses the settings
+// validation and leaves both the file and the running mode untouched.
+func TestServiceApplyModeRejectsInvalidInput(t *testing.T) {
+	svc, m, _ := newTestService(t)
+	remoteURL := "http://192.168.31.184:8080"
+	if _, err := svc.ApplyMode(appsettings.ModeRemote, remoteURL); err != nil {
+		t.Fatalf("ApplyMode(remote): %v", err)
+	}
+	savedPath := os.Getenv("FLOWDROP_DESKTOP_CONFIG")
+
+	cases := map[string][2]string{
+		"unknown mode":              {"cloud", ""},
+		"remote without an address": {appsettings.ModeRemote, ""},
+		"remote without a scheme":   {appsettings.ModeRemote, "192.168.31.184:8080"},
+		"remote with a path":        {appsettings.ModeRemote, "http://192.168.31.184:8080/hub"},
+	}
+	for name, in := range cases {
+		if _, err := svc.ApplyMode(in[0], in[1]); err == nil {
+			t.Fatalf("ApplyMode(%s) = nil error, want a validation error", name)
+		}
+	}
+	after, found, err := appsettings.Load(savedPath)
+	if err != nil || !found || after.Mode != appsettings.ModeRemote || after.RemoteURL != remoteURL {
+		t.Fatalf("rejected ApplyMode changed the settings: %+v found=%v err=%v", after, found, err)
+	}
+	if got := desktop.remoteHubURL(); got != remoteURL {
+		t.Fatalf("rejected ApplyMode changed the runtime mode: %q, want %q", got, remoteURL)
+	}
+	if got := m.URL(); got != "" {
+		t.Fatalf("rejected ApplyMode started a local Hub at %q", got)
+	}
+}
+
+// TestServiceApplyModeRemoteToLocalStartFailure covers a busy port: the switch
+// must fail with a readable message and leave the app in its working remote mode
+// instead of persisting a half-applied state.
+func TestServiceApplyModeRemoteToLocalStartFailure(t *testing.T) {
+	svc, m, _ := newTestService(t)
+	remoteURL := "http://192.168.31.184:8080"
+	if _, err := svc.ApplyMode(appsettings.ModeRemote, remoteURL); err != nil {
+		t.Fatalf("ApplyMode(remote): %v", err)
+	}
+	savedPath := os.Getenv("FLOWDROP_DESKTOP_CONFIG")
+
+	// Hold the port the saved listen selection asks for.
+	hold, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("occupy a port: %v", err)
+	}
+	defer hold.Close()
+	takenPort := hold.Addr().(*net.TCPAddr).Port
+	saved, found, err := appsettings.Load(savedPath)
+	if err != nil || !found {
+		t.Fatalf("persisted settings = found=%v err=%v", found, err)
+	}
+	saved.Port = takenPort
+	if err := appsettings.Save(savedPath, saved); err != nil {
+		t.Fatalf("persist occupied port: %v", err)
+	}
+
+	if _, err := svc.ApplyMode(appsettings.ModeLocal, ""); err == nil || !strings.Contains(err.Error(), "端口已被占用") {
+		t.Fatalf("ApplyMode(local) with an occupied port = %v, want a port-in-use error", err)
+	}
+	if got := desktop.remoteHubURL(); got != remoteURL {
+		t.Fatalf("runtime remote URL = %q after a failed start, want %q", got, remoteURL)
+	}
+	if got := desktop.inboxBaseURL(); got != remoteURL {
+		t.Fatalf("inboxBaseURL = %q after a failed start, want the remote %q", got, remoteURL)
+	}
+	if got := m.URL(); got != "" {
+		t.Fatalf("local Hub reported running at %q after a failed start", got)
+	}
+	after, found, err := appsettings.Load(savedPath)
+	if err != nil || !found || after.Mode != appsettings.ModeRemote || after.Port != takenPort {
+		t.Fatalf("failed switch changed the settings: %+v found=%v err=%v", after, found, err)
+	}
+	st, err := svc.GetState()
+	if err != nil {
+		t.Fatalf("GetState after a failed switch: %v", err)
+	}
+	if st.Mode != appsettings.ModeRemote || st.RestartRequired || st.Running {
+		t.Fatalf("state after a failed switch = %+v, want the unchanged remote mode", st)
+	}
+}
+
+// TestServiceApplyModeIsRaceFreeWithConcurrentStateReads runs the switch while
+// the settings window polls GetState and the tray/menu paths resolve the inbox
+// URL, which is exactly where the runtime mode is read from several goroutines.
+// Run with -race this pins the locking of desktop.remoteURL.
+func TestServiceApplyModeIsRaceFreeWithConcurrentStateReads(t *testing.T) {
+	svc, m, _ := newTestService(t)
+	remoteURL := "http://192.168.31.184:8080"
+
+	stop := make(chan struct{})
+	var wg sync.WaitGroup
+	for i := 0; i < 4; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for {
+				select {
+				case <-stop:
+					return
+				default:
+				}
+				_, _ = svc.GetState()
+				_ = desktop.inboxBaseURL()
+			}
+		}()
+	}
+	if _, err := svc.ApplyMode(appsettings.ModeRemote, remoteURL); err != nil {
+		close(stop)
+		wg.Wait()
+		t.Fatalf("ApplyMode(remote): %v", err)
+	}
+	if _, err := svc.ApplyMode(appsettings.ModeLocal, ""); err != nil {
+		close(stop)
+		wg.Wait()
+		t.Fatalf("ApplyMode(local): %v", err)
+	}
+	close(stop)
+	wg.Wait()
+	if got := m.URL(); got == "" {
+		t.Fatal("the Hub is not running after switching back to local mode")
+	}
+}
+
+// TestServiceRemoteModeGuardsLocalHub proves that a settings window in remote
+// mode never claims this machine's Hub can generate codes, list devices or
+// rebind: the remote Hub owns all of that.
+func TestServiceRemoteModeGuardsLocalHub(t *testing.T) {
+	svc, _, _ := newTestService(t)
+
+	st, err := svc.ApplyMode(appsettings.ModeRemote, "http://192.168.31.184:8080")
+	if err != nil {
+		t.Fatalf("ApplyMode(remote): %v", err)
+	}
+	if st.Running || st.URL != "" || len(st.URLs) != 0 {
+		t.Fatalf("remote state = %+v, want no local Hub reported as running", st)
+	}
+	if st.BindAddress == "" || st.Port == 0 {
+		t.Fatalf("remote state = %+v, want the saved bind address/port kept", st)
+	}
+
+	wantRemote := func(what string, err error) {
+		t.Helper()
+		if err == nil {
+			t.Fatalf("%s succeeded in remote mode", what)
+		}
+		if !strings.Contains(err.Error(), "远程 Hub 模式") {
+			t.Fatalf("%s error = %v, want the remote-mode message", what, err)
+		}
+	}
+	_, err = svc.CreatePairingCode()
+	wantRemote("CreatePairingCode", err)
+	_, err = svc.PairingCodeActive()
+	wantRemote("PairingCodeActive", err)
+	_, err = svc.ListPairedDevices()
+	wantRemote("ListPairedDevices", err)
+	wantRemote("RevokePairedDevice", svc.RevokePairedDevice("d1"))
+	_, err = svc.ApplyNetwork("127.0.0.1", freePort(t))
+	wantRemote("ApplyNetwork", err)
+	_, err = svc.ApplyNetworkConfig("127.0.0.1", nil, freePort(t))
+	wantRemote("ApplyNetworkConfig", err)
+	_, err = svc.ApplyDualNetwork("192.168.1.10", "100.64.0.1", freePort(t))
+	wantRemote("ApplyDualNetwork", err)
+
+	// Switching back to local starts the Hub again instead of asking for a
+	// restart; the remote address must be dropped.
+	st, err = svc.ApplyMode(appsettings.ModeLocal, "")
+	if err != nil {
+		t.Fatalf("ApplyMode(local): %v", err)
+	}
+	if st.RestartRequired || st.Mode != appsettings.ModeLocal || st.RemoteURL != "" {
+		t.Fatalf("ApplyMode(local) state = %+v, want local mode with restart_required=false", st)
+	}
+	if !st.Running {
+		t.Fatalf("ApplyMode(local) state = %+v, want the local Hub running again", st)
+	}
+}
+
+// TestServiceRemoteShellGetState covers the shipped remote-mode process: no
+// local Hub is started at all, so the state must report remote mode and no
+// running Hub while needing no restart.
+func TestServiceRemoteShellGetState(t *testing.T) {
+	svc, _, _ := newTestService(t)
+	remoteURL := "http://192.168.31.184:8080"
+	// This is what the hot switch leaves behind in remote mode: no local Hub and
+	// the runtime remote URL set.
+	if _, err := svc.ApplyMode(appsettings.ModeRemote, remoteURL); err != nil {
+		t.Fatalf("ApplyMode(remote): %v", err)
+	}
+	if got := desktop.remoteHubURL(); got != remoteURL {
+		t.Fatalf("runtime remote URL = %q, want %q", got, remoteURL)
+	}
+
+	st, err := svc.GetState()
+	if err != nil {
+		t.Fatalf("GetState: %v", err)
+	}
+	if st.Mode != appsettings.ModeRemote || st.RemoteURL != remoteURL {
+		t.Fatalf("GetState = %+v, want remote mode at %s", st, remoteURL)
+	}
+	if st.RestartRequired {
+		t.Fatalf("GetState = %+v, want restart_required=false once the process runs that mode", st)
+	}
+	if st.Running || st.URL != "" {
+		t.Fatalf("GetState = %+v, want running=false and no URL", st)
+	}
+	if st.URLs != nil {
+		t.Fatalf("GetState URLs = %#v, want nil in remote mode", st.URLs)
+	}
+	if st.BindAddress == "" || st.Port == 0 {
+		t.Fatalf("GetState = %+v, want the saved bind address/port returned", st)
+	}
+	if _, err := svc.ListPairedDevices(); err == nil || !strings.Contains(err.Error(), "远程 Hub 模式") {
+		t.Fatalf("ListPairedDevices = %v, want the remote-mode message", err)
+	}
+}
+
+// TestDesktopSettingsFileIsPrivateAndHasNoSession pins the two properties the
+// desktop.json write must keep once the device token lives in it: the file is
+// readable by this user only (0600) and it never carries a browser session
+// cookie or a password-like field, only the device token it may replay.
+func TestDesktopSettingsFileIsPrivateAndHasNoSession(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "desktop.json")
+	token := testDeviceToken // 43 base64url chars, the shape the Hub issues
+	st := appsettings.Settings{
+		BindAddress:        "192.168.1.5",
+		Port:               8080,
+		DesktopDeviceID:    "dev_local",
+		DesktopDeviceToken: token,
+	}
+	if err := appsettings.Save(path, st); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if perm := info.Mode().Perm(); perm != 0o600 {
+		t.Fatalf("desktop.json permissions = %04o, want 0600", perm)
+	}
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	lower := strings.ToLower(string(raw))
+	for _, forbidden := range []string{"flowdrop_session", "password", "secret", "csrf"} {
+		if strings.Contains(lower, forbidden) {
+			t.Fatalf("desktop.json contains %q: %s", forbidden, raw)
+		}
+	}
+	if !strings.Contains(string(raw), token) {
+		t.Fatal("desktop.json is missing the device token it is supposed to keep")
+	}
 }

@@ -7,7 +7,8 @@ package dev.flowdrop.android.discovery
  *   Service type : `_flowdrop._tcp` in the `local.` domain
  *   Instance     : `FlowDrop-<nickname>`
  *   SRV          : the Hub's real HTTP port
- *   TXT          : `v=1`, `scheme=http`, `path=/`
+ *   TXT          : `v=1`, `scheme=http`, `path=/` (an absent TXT map is
+ *                  tolerated when the rest of the record is fully valid)
  *   Addresses    : explicit RFC1918 IPv4 only
  *
  * Nothing secret is ever advertised (no password, cookie, token or path).
@@ -36,8 +37,18 @@ object DiscoveryProtocol {
      * Parses one resolved mDNS service into a usable Hub address.
      *
      * Returns null for anything that is not an explicitly published FlowDrop
-     * Hub: wrong service type or instance name, missing/incompatible TXT,
-     * invalid port, or a host that is not a private LAN IPv4 literal.
+     * Hub: wrong service type or instance name, incompatible TXT, invalid
+     * port, or a host that is not a private LAN IPv4 literal.
+     *
+     * TXT is validated strictly only when the record actually carries TXT
+     * entries: `v=1`, `scheme=http` and `path=/` are all required and any
+     * wrong value rejects the record. An *empty* TXT map is accepted instead
+     * of rejected, because Android 10 `NsdServiceInfo` frequently returns no
+     * attributes at all for a resolved service. This is not a trust
+     * downgrade: a discovery result is only an address hint, the login still
+     * has to be confirmed with the Hub's pairing code, and every other rule
+     * (service type, `FlowDrop-` prefix, port range, explicit RFC1918 IPv4)
+     * stays mandatory.
      */
     fun parse(raw: RawService): DiscoveredHub? {
         if (!matchesServiceType(raw.serviceType)) return null
@@ -47,10 +58,14 @@ object DiscoveryProtocol {
         if (displayName.isEmpty()) return null
 
         // DNS-SD TXT keys are case-insensitive; values are case-sensitive.
-        val txt = raw.txt.entries.associate { (key, value) -> key.trim().lowercase() to value.trim() }
-        if (txt[TXT_VERSION] != REQUIRED_VERSION) return null
-        if (txt[TXT_SCHEME] != REQUIRED_SCHEME) return null
-        if (txt[TXT_PATH] != REQUIRED_PATH) return null
+        // A record without any TXT entry is accepted (Android 10 returns an
+        // empty attribute map), a record with TXT must match all three keys.
+        if (raw.txt.isNotEmpty()) {
+            val txt = raw.txt.entries.associate { (key, value) -> key.trim().lowercase() to value.trim() }
+            if (txt[TXT_VERSION] != REQUIRED_VERSION) return null
+            if (txt[TXT_SCHEME] != REQUIRED_SCHEME) return null
+            if (txt[TXT_PATH] != REQUIRED_PATH) return null
+        }
 
         if (raw.port !in 1..65535) return null
 
@@ -66,9 +81,20 @@ object DiscoveryProtocol {
         )
     }
 
-    /** Accepts `_flowdrop._tcp` with or without the trailing dot. */
+    /**
+     * Accepts `_flowdrop._tcp` with optional surrounding dots, any casing and
+     * an optional trailing `.local` label.
+     *
+     * Some stacks (Android 10 `NsdServiceInfo`) return a leading-dot type such
+     * as `._flowdrop._tcp`, others append the `local.` domain. Both are the
+     * same service type. The comparison stays exact after normalization, so
+     * `_flowdrop._udp`, `_flowdrop._tcp2` or `_flowdrop._tcp.foo` are rejected.
+     */
     fun matchesServiceType(serviceType: String): Boolean {
-        val normalized = serviceType.trim().removeSuffix(".").lowercase()
+        var normalized = serviceType.trim().lowercase().trim('.')
+        if (normalized.endsWith(".local")) {
+            normalized = normalized.removeSuffix(".local").trimEnd('.')
+        }
         return normalized == SERVICE_TYPE_BARE
     }
 
@@ -103,6 +129,47 @@ object DiscoveryProtocol {
             value = (value shl 8) or octet.toLong()
         }
         return value
+    }
+}
+
+/**
+ * Per-instance attempt bookkeeping for `NsdManager.resolveService` retries.
+ *
+ * Plain JVM logic (no Android types) so the retry decision is unit tested:
+ * a resolve may be tried at most [MAX_ATTEMPTS] times for the same service
+ * name, a success clears the counter, and [reset] (used by `stop`/restart)
+ * makes a late failure from an old session answer `false`.
+ */
+class ResolveAttemptTracker(private val maxAttempts: Int = MAX_ATTEMPTS) {
+
+    private val used = HashMap<String, Int>()
+
+    /** Records one started attempt and returns its 1-based number. */
+    fun begin(serviceName: String): Int {
+        val next = (used[serviceName] ?: 0) + 1
+        used[serviceName] = next
+        return next
+    }
+
+    fun attemptsUsed(serviceName: String): Int = used[serviceName] ?: 0
+
+    /** Only a failure of an attempt that was actually started can retry. */
+    fun shouldRetryAfterFailure(serviceName: String): Boolean {
+        val attempts = attemptsUsed(serviceName)
+        return attempts in 1 until maxAttempts
+    }
+
+    fun clear(serviceName: String) {
+        used.remove(serviceName)
+    }
+
+    /** Drops every counter; used when the discovery session ends. */
+    fun reset() {
+        used.clear()
+    }
+
+    companion object {
+        const val MAX_ATTEMPTS = 3
     }
 }
 

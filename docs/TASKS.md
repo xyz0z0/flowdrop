@@ -414,3 +414,392 @@ PA-08I完成并已核对报告/关键测试：原样CLI实际Hub双回环地址�
 PA-09A已启动，全新pi：task_51f0ef2f3668 / ctx_4dcc8b73f345，state ready。其它配对开发/验证任务均已回报，无其它运行worker；当前只等待APK构建。最后文档汇总由主agent在收到APK摘要后完成，未安装/提交。
 
 PA-09A完成并由主agent独立核对SHA：APK 10209256 B，2026-11-08 19:06:26 +0800，dist/flowdrop-android-debug.apk与Gradle原APK摘要均d00a6808ec5f5190354d9d1191e6a4fb1dd23cda8aaed0ca1d62357531c4e5e4。assembleDebug 4s成功、apksigner v2有效（Android Debug证书）、aapt包dev.flowdrop.android/versionCode1/versionName0.1.0/min26/target35。Linux两摘要未变。所有阶段完成，无运行worker；最终文档汇总完成，未安装/commit/push。用户步骤：完全从托盘退出旧版→运行dist桌面→设置双监听→每添加一台设备生成新码→手机App发现/手填并配对；之后该单Hub自动选已保存可用地址。产物、证据与已知显示/真机限制见VERIFICATION §20。
+
+## 配对码消费后 UI 反馈（2026-11-09）
+
+用户反馈：设置窗口生成的四位码在手机成功配对后已失效，但界面仍继续倒计时、没有成功提示，直到过期才消失。目标：设置页在码被消费后 3 秒内自动隐藏并提示；不改配对协议、HTTP 接口或“到期自动清理”的现有语义。
+
+| 任务 | 目标与写入范围 | 验收/依赖 | 预算/停止 | 状态 |
+|---|---|---|---|---|
+| PC-01 | 仅 server/internal/pairing/{pairing.go,pairing_test.go}、server/pkg/hub/pairing.go、desktop/internal/hubmgr/hubmgr.go、desktop/{service.go,pairing_service_test.go}、desktop/assets/{app.js,index.html}：新增本机只读 bridge `PairingCodeActive`（`Store.ActiveCode(now)`、Hub/Manager/SettingsService 透传），设置页每 3 秒刷新时若已显示的码不再有效则清理并显示 banner-ok“配对成功，配对码已使用并自动隐藏”；保留过期、重启、重新生成、Hub 未运行的现有清理路径 | 依赖现有配对 store/schema；`go test ./...`（server、desktop 根包）、`node --check desktop/assets/app.js`、新 store 单测覆盖 active/consumed/expired，service E2E 覆盖创建后 true、配对后 false；不做 GUI、不改 HTTP/API/schema/依赖 | 15–20min；测试300s；完成即停；范围外问题只报不改；报告 /tmp/flowdrop-pc01-report.md | 待派发 |
+
+PC-01 已派发全新 pi：task_6c9db6a829a4 / ctx_c3cb0e11613e，state ready，run_7301d66276fc。等待 worker 回报，不据派发声明修复完成。
+
+PC-01 完成并由主 agent 复核：新增 `Store.ActiveCode` → `Hub.PairingCodeActive` → hubmgr → `SettingsService` 只读桥；设置页 3s 刷新中调用，码被消费后 `clearPairingCode()` 并显示 `id="pairing-status"` 的 banner-ok。`clearPairingCode()` 同时清空成功提示，过期/重启/重新生成/Hub 停止路径保持原语义。主 agent 独立复跑：`server/ go test ./internal/pairing ./pkg/hub` 通过；`desktop/ CGO_ENABLED=0 go test -tags purego . ./internal/hubmgr` 通过；`node --check` 与 gofmt 通过。默认 cgo + GTK4/WebKitGTK 构建仍因宿主缺开发包未验证；未做 GUI、未安装/提交。报告 /tmp/flowdrop-pc01-report.md。
+
+PC-01 构建：主 agent 用 `scripts/build-desktop.sh`（用户 sysroot + gtk3 production）重建 `dist/flowdrop-desktop`，退出0，17077864 B，SHA-256 `85fce3e0e591a433b0416a8f28498e84db012c21a3ea1840fc489b5578fb2f05`，二进制内含 `PairingCodeActive` 与成功提示文案。构建脚本重新生成 `server/internal/webui/dist` 资产与占位文件；占位文件已恢复，未重建 CLI，未替换用户正在运行的进程。
+
+## Android 内网发现与长文本展示（2026-11-09）
+
+用户实测：手机浏览器可打开 Hub；系统日志显示已收到 `FlowDrop-...` 的 PTR，随后 `Resolve service`，但 App 12 秒内没有拿到 resolve 回调；主 agent 在 eno1 抓包只看到手机 `192.168.31.15:5353` 的 PTR 查询和 Hub 的 PTR/SRV/TXT/A 响应，**没有看到针对实例名的 SRV/TXT/A resolve 查询**。Hub 端对 ANY/SRV/TXT/A 的响应正常。另：Linux 收件箱长文本不折叠，撑满列表。
+
+| 任务 | 目标与写入范围 | 验收/依赖 | 预算/停止 | 状态 |
+|---|---|---|---|---|
+| AND-01 | 仅 `android/app/src/main/java/dev/flowdrop/android/discovery/NsdHubDiscovery.kt`（必要时同目录纯逻辑/测试）及 `android/app/src/test/java/dev/flowdrop/android/discovery/**`：为 NSD 增加脱敏 logcat 诊断（tag `FlowDropDiscovery`，记录 found/resolve 开始/成功地址端口/失败错误码/超时/停止，不记码与令牌）；不要在 `onServiceFound` 内同步重入 `resolveService`，改为短延迟；若 `onServiceFound` 的 `NsdServiceInfo` 已有可用 host/port/TXT 则直接解析，否则串行 resolve；resolve 失败或 watchdog 超时对同一服务最多重试 3 次（间隔约 300ms、单次 watchdog 约 2.5s），stop/重搜必须取消旧重试；保持单飞、多播锁与现有 12s 发现窗口 | 现有 Android JVM 测试 + `timeout 300s ./gradlew --offline :app:testDebugUnitTest :app:compileDebugAndroidTestKotlin`；新增纯逻辑测试覆盖重试次数/停止取消（若可抽出）；不构建 APK、不装真机、不做 GUI、不改其它文件 | 15–20min；Gradle 300s；完成即停；范围外只报不改；报告 /tmp/flowdrop-and01-report.md | 待派发 |
+| WEB-01 | 仅 `web/src/ItemCard.tsx`、`web/src/styles.css`：文字条目超过阈值（约 6 行或 280 字）默认折叠，显示“展开/收起”，展开后完整显示；短文本不显示按钮；复制仍复制完整正文；不改协议/后端/桌面 assets | `cd web && npx tsc -b && npm run build`；不做浏览器/GUI；不新增依赖 | 10–15min；检查180s；完成即停；报告 /tmp/flowdrop-web01-report.md | 待派发 |
+
+两者文件不重叠，可并行。均使用全新 pi；禁止 GUI/安装/commit/push；宿主保护规则继续生效。
+
+AND-01 已派发全新 pi：task_00654e3fc088 / ctx_d029c1e80b57，state ready。WEB-01 已派发全新 pi：task_2651791570cb / ctx_836d98d46142，state ready。两者同在 run_7301d66276fc，文件不重叠；等待回报，不据派发声明完成。
+
+WEB-01 完成并由主 agent 复核：`ItemCard.tsx` 增加 280 字/6 行估算折叠与 `展开全文/收起`，`styles.css` 增加 clamp 样式；复制仍用全文。主 agent 复跑 `cd web && npx tsc -b && npm run build` 通过，未做浏览器/GUI。报告 /tmp/flowdrop-web01-report.md。用户补充手机为 Xiaomi 15 / Android 16；AND-01 运行中，等其回报后再决定是否需要自建 mDNS 解析兜底。
+
+AND-01 完成并由主 agent 复核：`NsdHubDiscovery` 增加 `FlowDropDiscovery` 脱敏日志、`onServiceFound` 后 250ms 延迟 resolve、发现结果已完整时直接解析、失败/超时/`usable=false` 最多 3 次重试（2.5s watchdog、300ms 间隔）、stop/重搜用 runId+resolveToken 失效旧回调；`DiscoveryProtocol` 抽出纯逻辑 `ResolveAttemptTracker`。报告第 4 条仍写“不可用结果不重试”，实际代码已按补充要求走 `onAttemptFailed`，以代码为准。主 agent 独立强制重跑 `:app:testDebugUnitTest --rerun-tasks`：106 tests / 0 fail / 0 error / 1 skipped（原有 RealHubPairingTest）。未真机验证。
+
+构建交付：新 APK `dist/flowdrop-android-debug.apk` 10209256 B，SHA-256 `8a325a720da91d837138168d9a80d961f067d8cccc5a31c826dafda251eb0311`，含 `FlowDropDiscovery` 日志与新的 resolve 逻辑；`dist/flowdrop-desktop` 重建后 17077864 B，SHA-256 `4ffd09823de8708ff6a04bb4428c69c8ca5aa828647df13ee439d11dc7913ba9`，含长文本“展开全文”和 PC-01 成功提示。两者均未安装/替换用户运行进程，未 commit/push。
+
+AND-01 补充回报（ctx_32c3ca8f74c3 / task_3cb92e4f2806）已核对：`onAttemptResolved` 接收排队的 `NsdServiceInfo`，`usable=false` 走 `onAttemptFailed`，同一服务最多 3 次后 `resolve abandoned`；源码 mtime 12:42:04 早于 APK 构建 12:42:32，当前交付 APK 已包含该逻辑，无需再次构建。106 tests/0 fail/1 skipped 不变；真机日志仍待用户提供。
+
+AND-01 真机日志（Android 10 设备）：`resolve success host=192.168.31.184 port=8080 usable=false`，三次均同；host/port 正常且 RFC1918，服务名/类型正常，说明 `DiscoveryProtocol.parse` 只剩 TXT 校验可能拒绝。Android 10 的 `NsdServiceInfo.attributes` 很可能为空/未带 TXT。为避免继续盲猜，下一任务做“TXT 缺失兼容 + 日志补全”，明确仍拒绝显式错误的 TXT。
+
+| 任务 | 目标与写入范围 | 验收/依赖 | 预算/停止 | 状态 |
+|---|---|---|---|---|
+| AND-02 | 仅 `android/app/src/main/java/dev/flowdrop/android/discovery/{DiscoveryProtocol.kt,NsdHubDiscovery.kt}` 与 `android/app/src/test/java/dev/flowdrop/android/discovery/DiscoveryProtocolTest.kt`：`DiscoveryProtocol.parse` 在 TXT map 为空时，只要 serviceType/serviceName/port/RFC1918 host 全通过就接受（视为 Android 10/HyperOS 丢失 TXT 的兼容路径）；TXT 非空时仍严格校验 `v=1/scheme=http/path=/`，任一错误值拒绝；`resolve success` 日志补 `type=` 与 `txtKeys=`（不记值以外的敏感信息；TXT 本身无秘密），让下一轮日志能直接区分 TXT 空、type 不匹配或 host 问题。新增/调整纯 JVM 测试：空 TXT 接受、正确 TXT 接受、错误 v/scheme/path 拒绝、非 RFC1918 仍拒绝 | `cd android && timeout 300s ./gradlew --offline :app:testDebugUnitTest :app:compileDebugKotlin`；不构建 APK、不连真机、不做 GUI；不改变已有 `FlowDrop-` 前缀/RFC1918 规则 | 10–15min；检查240s；完成即停；报告 /tmp/flowdrop-and02-report.md | 待派发 |
+
+AND-02 已派发全新 pi：task_14188224d377 / ctx_a9a5166da569，state ready。等回报后再构建 APK。
+
+AND-02 完成并由主 agent 复核：`DiscoveryProtocol.parse` 仅在 TXT map 非空时严格校验三项，空 TXT 接受但 serviceType/`FlowDrop-` 前缀/端口/RFC1918 全部保留；`resolve success` 日志增加 `type=` 与 `txtKeys=`。主 agent 强制重跑 `:app:testDebugUnitTest --rerun-tasks`：111 tests / 0 fail / 0 error / 1 skipped，`compileDebugKotlin` 通过。新 APK `dist/flowdrop-android-debug.apk` 10209256 B，SHA-256 `b2ea8b008d0fc80b250dd3a5844e620caa1328f6954a5b3f982baf9b1e56f8b6`；未安装/真机/GUI，未 commit/push。
+
+## AND-03 Android 10 serviceType 前导点（2026-11-09）
+
+主 agent 直接核对设备：安装包 SHA-256 与 `dist/flowdrop-android-debug.apk` 的 `b2ea8b00...` 一致，`lastUpdateTime` 18:58:57；新日志在 18:59:44 已运行，含 `txtKeys=path,scheme,v`，证明 AND-02 已生效。但日志同时暴露真正拒绝点是 `type=._flowdrop._tcp`（Android 10 返回带前导点的 serviceType），`matchesServiceType` 只去尾部点，所以 serviceType 校验先失败，空 TXT 兼容未命中。
+
+| 任务 | 目标与写入范围 | 验收/依赖 | 预算/停止 | 状态 |
+|---|---|---|---|---|
+| AND-03 | 仅 `android/app/src/main/java/dev/flowdrop/android/discovery/DiscoveryProtocol.kt`、`android/app/src/test/java/dev/flowdrop/android/discovery/DiscoveryProtocolTest.kt`、`NsdHubDiscovery.kt` 的日志行：`matchesServiceType` 规范化时去掉首尾点、转小写，并容忍可选 `.local` 后缀，使 `._flowdrop._tcp` / `._flowdrop._tcp.` / `_flowdrop._tcp.local.` 都匹配 `_flowdrop._tcp`；`resolve success` 日志追加 TXT 实际 map（只含 v/scheme/path，无秘密）以便确认值。新增纯 JVM 测试覆盖前导点/可选 local/错误类型 | `cd android && timeout 300s ./gradlew --offline :app:testDebugUnitTest :app:compileDebugKotlin`；不构建 APK、不连真机、不做 GUI | 8–12min；检查240s；报告 /tmp/flowdrop-and03-report.md | 待派发 |
+
+AND-03 已派发全新 pi：task_0e0dfb085d2a / ctx_367c1e588550，state ready。
+
+AND-03 完成并由主 agent 复核：`matchesServiceType` 改为 trim/lowercase/去首尾点/可选去 `.local` 后精确匹配；`resolve success` 增加 `txt=key=value`。主 agent 强制重跑 `:app:testDebugUnitTest --rerun-tasks`：113 tests / 0 fail / 0 error / 1 skipped，`compileDebugKotlin` 通过。新 APK `dist/flowdrop-android-debug.apk` 10209256 B，SHA-256 `d02cf8896a72f6f8aba74c929cb23547528f5cc8c86893c85904a3addd2e60d4`；当前设备仍装着上一版 `b2ea8b00...`，未自动安装，待用户安装后看 `usable=true`。未 commit/push。
+
+## WEB-02 展开/收起按钮移到标题行右侧（2026-11-09）
+
+用户真机确认 AND-03 后扫描成功（`usable=true`）。同时反馈：长文本展开后“收起”按钮在正文底部，需要下滑才能点。目标：按钮移到卡片标题行右侧，展开后仍在顶部。
+
+| 任务 | 目标与写入范围 | 验收/依赖 | 预算/停止 | 状态 |
+|---|---|---|---|---|
+| WEB-02 | 仅 `web/src/ItemCard.tsx`、`web/src/styles.css`：把“展开全文/收起”从正文下方移到 `.item-head` 标题行末尾并右对齐（`margin-left:auto`），文本加 `id`、按钮 `aria-controls`；折叠阈值/clamp/复制全文行为不变；短文本仍不显示按钮；窄宽度允许换行但不挤压 tag 与时间 | `cd web && npx tsc -b && npm run build`；`git diff --stat` 仅两文件；不做浏览器/GUI/截图；不新增依赖 | 10–15min；检查180s；完成即停；报告 /tmp/flowdrop-web02-report.md | 待派发 |
+
+WEB-02 已派发全新 pi：task_8a49cd752424 / ctx_6a9dbccb7a4a，state ready。等待回报，不据派发声明完成。
+
+WEB-02 完成并由主 agent 复核：`展开全文/收起` 已移入 `.item-head` 末尾，`margin-left:auto` + `flex:0 0 auto` 右对齐不挤压 tag/时间；文本加 `id=item-text-${item.id}`、按钮加 `aria-controls`；`needsExpand` 阈值与 clamp 未改；`.text-toggle` 收紧为 0.78rem/紧凑内边距。主 agent 独立复跑 `cd web && npx tsc -b && npm run build` 均退出 0；`git diff --stat -- web/` 仅两文件（+69/-1）。窄宽度换行未做视觉验证（按约定不做 GUI）。`npm run build` 反复删除的 `server/internal/webui/dist/.placeholder` 已再次恢复。未 commit/push。
+
+## AND-04 Android 长文本折叠与展开按钮（2026-11-09）
+
+用户要求 Android 客户端也支持长文本折叠/展开；按钮位置与桌面端一致（标题行右侧），展开后可原地收起。根因：`ui/ItemCard.kt` 对 text 直接 `maxLines = 30` 截断，无展开入口。
+
+| 任务 | 目标与写入范围 | 验收/依赖 | 预算/停止 | 状态 |
+|---|---|---|---|---|
+| AND-04 | 仅 `ui/ItemCard.kt`、新建 `ui/TextFold.kt`、`res/values/strings.xml`、新建 `test/.../ui/TextFoldTest.kt`：抽纯逻辑 `needsTextExpand`（280 字/6 行、约 18 字每行），text 条目默认折叠 6 行并可展开/收起，按钮放标题行最右端（紧凑 TextButton，展开/收起两态），同行设备·时间改为 `weight(1f)` 可收缩；`rememberSaveable(item.id)` 保持状态；link 仍 3 行截断无按钮；复制仍全文 | `cd android && timeout 420 ./gradlew --offline :app:testDebugUnitTest :app:compileDebugKotlin`；git diff 仅四文件；不构建 APK、不连真机、不做 GUI | 20–25min；检查300s；完成即停；报告 /tmp/flowdrop-and04-report.md | 待派发 |
+
+AND-04 已派发全新 pi：task_1bb55a69f6d9 / ctx_ae613c65397b。等待回报。
+
+AND-04 完成并由主 agent 复核：新建 `ui/TextFold.kt`（`needsTextExpand`：换行归一+trim、>280 字或估算 >6 行，18 字/行）与 `TextFoldTest`（10 用例）；`ItemCard` 正文 `maxLines` 由 30 改为 6（折叠）／`Int.MAX_VALUE`（展开），仅 text 类型在标题行右侧加紧凑 `TextButton`「展开/收起」，`rememberSaveable(item.id)` 保状态，设备·时间 Text 改 `weight(1f)`；strings 增 `action_expand_text`/`action_collapse_text`。主 agent 独立强制重跑 `./gradlew --offline :app:testDebugUnitTest :app:assembleDebug --rerun-tasks`：BUILD SUCCESSFUL，123 tests / 0 fail / 0 error / 1 skipped。APK 复核：`dev.flowdrop.android` 1/0.1.0、min26/target35、V2 签名 Android Debug、dex 含 `needsTextExpand`、资源含“展开/收起”。新 APK `dist/flowdrop-android-debug.apk` 9850366 B，SHA-256 `9ad5ac94c6400bc011bd30e537c35a6c24267fab7e13afb0674387f6ea16d9f8`；比上一版小 358890 B 来自 zip 对齐（未压缩条目 16KB padding）差异，dex/资源体量几乎不变。未安装/真机验证，未 commit/push。
+
+## WIN-0x Windows 桌面版（2026-11-09，用户选择 B：完整 Wails Windows 桌面版）
+
+用户选择做完整 Wails Windows 桌面版，需 Windows 机器验收。现状：`desktop` 其余部分已能在 `GOOS=windows` 下编译通过（主 agent 在 /tmp 副本验证过），当前阻塞点只有两处：server `storage.AvailableBytes` 的 `syscall.Statfs`，以及 `desktop/main.go` 依赖的 `trayWatcherPresent`（`dbus_linux.go`，linux-only）。非 Linux 已有 `filedrop_unsupported.go`、`webview_proxy_unsupported.go`、`a11y_unsupported.go` 桩。
+
+| 任务 | 目标与写入范围 | 验收/依赖 | 预算/停止 | 状态 |
+|---|---|---|---|---|
+| WIN-01 | 仅 `server/internal/storage`：把 `AvailableBytes` 拆成 `statfs_unix.go`（unix，保持 `syscall.Statfs`）与 `statfs_windows.go`（windows，`x/sys/windows.GetDiskFreeSpaceEx`），`storage.go` 只留签名与注释；允许把 `golang.org/x/sys` 提升为直接依赖 | `GOOS=windows GOARCH=amd64/arm64 go build ./...`、`GOOS=darwin GOARCH=arm64 go build ./...`、Linux 原生 `go test ./...` 全绿、gofmt 无输出 | 15–20min；检查300s；完成即停；报告 /tmp/flowdrop-win01-report.md | 待派发 |
+
+WIN-01 已派发全新 pi：task_d158b950832b / ctx_cb66362cc857。
+
+WIN-01 完成并由主 agent 复核：`AvailableBytes` 拆为 `statfs_unix.go`（原 `syscall.Statfs`）与 `statfs_windows.go`（`GetDiskFreeSpaceEx` 的 FreeBytesAvailableToCaller），`storage.go` 仅留调用；`x/sys` 提升为直接依赖，`go mod tidy` 顺带移除了仓库内已无引用的 `x/term`（`grep -rn "x/term" server` 无命中，`go build ./...` 通过）。主 agent 复跑：`GOOS=windows GOARCH=amd64/arm64`、`GOOS=darwin GOARCH=arm64` `go build ./...` 均通过。WIN-01 报告记录的运行期风险：`syncDir` 对目录句柄 `Sync()` 在 Windows 会失败，会让上传提交失败 → 立 WIN-02B 修复。
+
+| 任务 | 目标与写入范围 | 验收/依赖 | 预算/停止 | 状态 |
+|---|---|---|---|---|
+| WIN-02 | 仅新建 `desktop/tray_windows.go`、`desktop/tray_unsupported.go`，改 `desktop/main.go` 的 `application.Options.Windows`（`DisableQuitOnLastWindowClosed:true`、`WndClass`），新建 `scripts/build-desktop-windows.sh`（amd64/`--arm64`/`--console`，默认 `-H windowsgui`，输出 `dist/flowdrop-desktop.exe`）；不引入 wails3 CLI | `GOOS=windows GOARCH=amd64/arm64 go build`、`GOOS=windows go vet`、实际执行脚本产出 exe、Linux 构建不被破坏 | 20–25min；检查300s；报告 /tmp/flowdrop-win02-report.md | 待派发 |
+| WIN-02B | 仅 `server/internal/storage`：`syncDir` 拆为 `sync_unix.go`（保持 `d.Sync()`）与 `sync_windows.go`（打开校验后 Close 返回 nil，注释说明 Windows 不支持目录 fsync）；修 Windows 上传提交失败风险 | `GOOS=windows amd64/arm64 go build ./...`、Linux `go test ./internal/storage/... ./pkg/hub/...` 全绿、gofmt | 10–15min；检查240s；报告 /tmp/flowdrop-win02b-report.md | 待派发 |
+
+两者文件不重叠，可并行。
+
+WIN-02 已派发：task_c1066edb07f7 / ctx_ef898a463ea7。WIN-02B 已派发：task_ba024aa552a5 / ctx_394ae369a8f1。
+
+WIN-02 完成并由主 agent 复核：新增 `tray_windows.go`（Windows 原生通知区，恒 true）与 `tray_unsupported.go`（`!linux && !windows` 保守 false），`main.go` 补 `Windows: {DisableQuitOnLastWindowClosed:true, WndClass:"FlowDropDesktop"}`；新增 `scripts/build-desktop-windows.sh`（amd64 默认、`--arm64`、`--console`、`-trimpath -s -w`、默认 `-H windowsgui`）。主 agent 复核产物：`dist/flowdrop-desktop.exe` 18328576 B，PE32+ x86-64 GUI 子系统，SHA-256 `2146673bd3a505ac1d46a45fab38b55ea24e10a62c51d5133247bac17b331cec`。Windows 真机、WebView2 检测、托盘菜单、签名/manifest 未验证。
+
+WIN-02B 完成并由主 agent 复核：`syncDir` 拆为 `sync_unix.go`（保持 `os.Open`+`Sync`）与 `sync_windows.go`（打开校验后 Close，注释说明目录句柄无 FlushFileBuffers），`storage.go` 只留调用点。`GOOS=windows amd64/arm64 go build ./...` 通过，Linux `go test ./internal/storage/... ./pkg/hub/...` 全绿。Windows 运行期行为仅编译验证。
+
+| 任务 | 目标与写入范围 | 验收/依赖 | 预算/停止 | 状态 |
+|---|---|---|---|---|
+| WIN-03 | 仅 `server/internal/config/config.go`（defaultDataDir）、`server/pkg/hub/hub.go`（DefaultConfigPath）、`desktop/internal/appsettings/appsettings.go`（DefaultPath）、`desktop/main.go`（日志初始化）、新建 `desktop/log_windows.go`/`log_other.go`：配置目录改用 `os.UserConfigDir()`（Linux 等价、Windows 走 %AppData%），数据目录 Windows 走 `os.UserCacheDir()`（%LocalAppData%）；Windows GUI 构建把 stderr 日志同时写入 `%LocalAppData%\flowdrop\desktop.log`，失败只告警不阻止启动；Linux 行为不变 | `GOOS=windows amd64 go build ./...`（server、desktop）、Linux `go test ./internal/config/... ./pkg/hub/...`、`CGO_ENABLED=0 go test -tags purego . ./internal/...`、gofmt；不做 GUI/真机 | 20–25min；检查300s；报告 /tmp/flowdrop-win03-report.md | 待派发 |
+
+WIN-03 已派发：task_486e29607ca2 / ctx_95a87a5cb60d。
+
+WIN-03 完成并由主 agent 复核：`config.defaultDataDir` 增加 `runtime.GOOS=="windows"` → `os.UserCacheDir()`（%LocalAppData%），`hub.DefaultConfigPath` 与 `appsettings.DefaultPath` 改用 `os.UserConfigDir()`（Linux 等价 `$XDG_CONFIG_HOME`/`~/.config`，Windows `%AppData%`）；新增 `desktop/log_windows.go`（`%LocalAppData%\flowdrop\desktop.log`，append）与 `log_other.go`（nil），`main.go` 用包级 `logWriter` 同时写 stderr+文件，打开失败仅告警不阻断。主 agent 复核通过：server `GOOS=windows` 构建、Linux 配置/hub 测试、desktop `GOOS=windows` 编译、purego 构建与测试、gofmt 均无问题。Windows 上日志文件实际生成未真机验证。
+
+| 任务 | 目标与写入范围 | 验收/依赖 | 预算/停止 | 状态 |
+|---|---|---|---|---|
+| WIN-04 | 仅 `desktop/main.go`（Windows 选项加 `AdditionalBrowserArgs: ["--no-proxy-server"]`）与新建 `scripts/package-windows.sh`（调 build 脚本后打 `dist/flowdrop-windows-amd64.zip`，内含 exe 与中文 README.txt；支持 `--arm64`）：解决系统代理劫持本地 Hub 访问，并产出交付包 | `GOOS=windows` 构建/vet、Linux purego 构建、实跑 build+package 并列出 zip 清单、git diff 仅三文件；不做 GUI/真机 | 15–20min；检查300s；报告 /tmp/flowdrop-win04-report.md | 待派发 |
+
+WIN-04 已派发：task_b369ff4c7a0e / ctx_8146e24c727e。
+
+WIN-04 完成并由主 agent 复核：`WindowsOptions` 增加 `AdditionalBrowserArgs: ["--no-proxy-server"]`（exe 内可检出该串），新增 `scripts/package-windows.sh` 产出 `dist/flowdrop-windows-amd64.zip`（7325388 B，SHA-256 `a3813f2db218131e2ff114ba0f139eba5c006600417c735fe62351c38d27bd99`，内含 exe 18332160 B + README.txt 1306 B）与 arm64 包。主 agent 复核发现两处缺口，立 WIN-05：Hub 自身日志仍写 stderr（Windows GUI 无控制台会全丢），README 日志路径写成 `logs\` 而实际是 `desktop.log`。
+
+| 任务 | 目标与写入范围 | 验收/依赖 | 预算/停止 | 状态 |
+|---|---|---|---|---|
+| WIN-05 | 仅 `server/pkg/hub/hub.go`（`Options.Logger`，nil 仍用 newLogger）、`desktop/internal/hubmgr/hubmgr.go`（Manager.Logger 透传）、`desktop/main.go`（构造 hub logger 指向 logWriter，级别取 FLOWDROP_LOG_LEVEL，默认 Info）、`scripts/package-windows.sh`（README 日志路径改为 `%LocalAppData%\flowdrop\desktop.log`） | server `go test ./pkg/hub/... ./internal/...`、`GOOS=windows` 构建、desktop purego 构建与测试、重跑打包并核对 README；不做 GUI/真机 | 15–20min；检查300s；报告 /tmp/flowdrop-win05-report.md | 待派发 |
+
+WIN-05 完成并由主 agent 复核：`hub.Options.Logger`（nil 仍用 `newLogger`，在 `New` 内解析一次）、`hubmgr.Manager.Logger` 透传、`desktop/main.go` 构造 `hubLogger`（级别取 `FLOWDROP_LOG_LEVEL`，默认 Info）指向共享 `logWriter`，`scripts/package-windows.sh` 的 README 日志路径改为 `%LocalAppData%\flowdrop\desktop.log`。worker 另用临时注入 logger 的测试证明 Hub 记录会进入给定 sink（该临时测试未保留）。主 agent 复核 server/desktop 构建与测试均通过。
+
+WIN-06 完成并由主 agent 复核：新增 `webview_proxy_windows.go`（返回 nil，注释说明 `--no-proxy-server` 已在 `AdditionalBrowserArgs` 静态生效），`webview_proxy_unsupported.go` tag 改为 `!windows && (!linux || !cgo || !gtk3)`（原任务给的 `!linux && !windows || !cgo || !gtk3` 在 Windows 会重复声明，worker 按同意图修正）。Windows 构建与 Linux purego 构建均通过。
+
+Windows 交付包（主 agent 重建并核对）：`dist/flowdrop-windows-amd64.zip` 7327329 B，SHA-256 `5ab569f4a3e685ad0b4f028ea6c749752c16d4c457b5fc4f73e1b0566e160f62`，内含 `flowdrop-desktop.exe`（18332672 B，PE32+ x86-64 GUI，含 `--no-proxy-server`）与 README.txt（日志路径已改为单文件、措辞同步）。另有 `dist/flowdrop-windows-arm64.zip` 与两个独立 exe。未签名、无图标/manifest、未 Windows 真机运行；拖拽上传、开机自启、代码签名未做。**未 commit/push。**
+
+## RMT 桌面端远程 Hub 客户端模式（2026-11-09）
+
+用户反馈：Windows 桌面版要连 Linux 上的 Hub；在收件箱配对页输入 Linux Hub 的 4 位码必然失败，因为桌面壳只会启动本机 Hub、窗口加载本机地址，没有“连接已有 Hub”的能力。决定新增运行模式：本机 Hub（默认）/ 连接远程 Hub（远程模式不启动本机 Hub，窗口加载远程地址，配对走该 Hub 页面自带配对页）。模式切换保存后需重启生效（本轮不做热切换）。
+
+| 任务 | 目标与写入范围 | 验收/依赖 | 预算/停止 | 状态 |
+|---|---|---|---|---|
+| RMT-01 | 仅 `desktop/internal/appsettings/appsettings.go(+_test)`、`desktop/main.go`、`desktop/service.go`、`desktop/{service_test.go,pairing_service_test.go}`：Settings 增加 `mode`/`remote_url` 与校验（http/https、无 path/query/userinfo、去尾斜杠、旧文件视为 local）；State 增加 `mode`/`remote_url`/`restart_required`，新增 `ApplyMode`；远程模式启动不 startHub、不绑端口、不跑 mDNS、收件箱加载远程地址、托盘/浏览器打开用远程地址；远程模式守卫本机 Hub 专属方法并返回中文错误 | `CGO_ENABLED=0 go test -tags purego . ./internal/...`、purego 构建、`GOOS=windows` 构建/vet、gofmt；不做 GUI/真机 | 25–30min；检查400s；报告 /tmp/flowdrop-rmt01-report.md | 待派发 |
+| RMT-02 | 仅 `desktop/assets/{index.html,app.js}`（必要时 styles.css）：设置页顶部新增运行模式单选与远程地址输入、保存调用 `ApplyMode`、`restart_required` 时显示常驻 banner；远程模式隐藏本机 Hub 专属区块（绑定/双地址/端口/配对码/设备列表）并显示“当前：远程 Hub · 地址”与打开收件箱/浏览器按钮；轮询跳过本机专属接口且不覆盖用户输入 | `node --check desktop/assets/app.js`；不做 GUI/浏览器 | 20–25min；检查300s；报告 /tmp/flowdrop-rmt02-report.md | 待派发 |
+
+两者文件不重叠（Go vs assets），契约字段由主 agent 固定在 spec 中，可并行。
+
+RMT-01 已派发：task_1b1c68932676 / ctx_15ae02e64beb。RMT-02 已派发：task_f5b5ffc3e545 / ctx_93c517096396。
+
+RMT-01 完成并由主 agent 复核：`appsettings.Settings` 增加 `Mode`/`RemoteURL` 与 `Normalize`/`Validate`（http/https、必须有 Host、禁 userinfo/path/query/fragment、去尾斜杠、非 remote 清空 remote_url、旧文件无 mode 视为 local）；`State` 增加 `Mode`/`RemoteURL`/`RestartRequired`；新增 `ApplyMode`（写回 desktop.json，模式或地址变化时 `RestartRequired=true`，不热切换）；`main.go` 远程模式不 `startHub`、不绑端口、不跑 mDNS、收件箱加载远程地址、托盘/浏览器打开走 `inboxBaseURL()`、首次直接显示收件箱不弹设置；远程模式 7 个本机 Hub 方法返回统一中文错误。`manager.Stop` 在无 Hub 时返回 nil，退出安全。
+
+RMT-02 完成并由主 agent 复核：设置页顶部「运行模式」卡片（本机/远程单选 + 远程地址输入 + 轻校验 + 保存 `ApplyMode` + 常驻重启 banner），远程模式隐藏 `#network-card`/`#pairing-card` 并显示「当前：远程 Hub · 地址」与打开收件箱/浏览器按钮；`refresh()` 在远程模式跳过 `ListPairedDevices`/`PairingCodeActive`，不覆盖用户正在编辑的输入。`node --check` 通过。
+
+主 agent 复核：`CGO_ENABLED=0 go test -tags purego . ./internal/...` 4 包全绿；`grep -rn "runtime.GOOS" desktop` 无命中 → 运行模式逻辑与平台无关，**Linux 桌面版同样获得该能力**（用户要求）。
+
+交付（主 agent 重建）：`dist/flowdrop-desktop` 17102504 B，SHA-256 `6569b6d811fc870f2cf9b9f32185e70b01eda80d01e1d912603b6d96927dc06e`；`dist/flowdrop-windows-amd64.zip` 7334126 B，SHA-256 `ef1951e36a2ce71bf4d9063b8f0a8a4325451fdca591d4ca60bb9402ce5ccb75`；两者均含 `remote hub mode: using` 日志串。构建脚本再次删除的 `server/internal/webui/dist/.placeholder` 已恢复。未 commit/push。
+
+用户真机确认（2026-11-09）：Windows 11 x64 上运行模式正常——可在设置里切到「连接远程 Hub」并连上 Linux Hub。补充文档 `docs/DEPLOY.md §18`（运行模式语义、设置/数据/日志路径、Windows 交叉编译与打包脚本、已知限制：未签名/无图标 manifest/无拖拽/无自启、防火墙需允许专用网络）。仍未 commit/push。
+
+## RMT-03 / WIN-07 热切换与 Windows 资源（2026-11-09）
+
+用户确认 Windows 远程模式可用后要求：远程模式热切换（1）、Windows 图标/DPI manifest/版本信息（3）都做。用户另反馈 Windows 已能拖拽上传——现有实现是 Web 层 HTML5 drop（`web/src/Composer.tsx`、`fileDrop.ts`），WebView2 原生支持，无需原生桥；Linux WebKitGTK 仍需 `desktop/filedrop_linux_gtk3.go` 原生桥。故拖拽项不做代码改动，只更新文档与验收记录（见本节末）。
+
+| 任务 | 目标与写入范围 | 验收/依赖 | 预算/停止 | 状态 |
+|---|---|---|---|---|
+| RMT-03 | 仅 `desktop/main.go`、`desktop/service.go`、`desktop/{service_test.go,pairing_service_test.go,desktop_helpers_test.go}`、`desktop/assets/{app.js,index.html,style.css}`：`ApplyMode` 改为立即生效——本机→远程先 `manager.Stop`（10s 上限）再切 `remoteURL` 并把收件箱 `SetURL` 到远程地址；远程→本机用 `startHub` 启动，失败则不改保存值、窗口留在远程并返回中文错误；成功后保存设置、`restart_required=false`、UI 去掉“需重启”提示；`remoteURL` 跨 goroutine 读取需加锁或原子化 | `CGO_ENABLED=0 go test -race -tags purego . ./internal/...`、`GOOS=windows amd64 go build`/`go vet`、`node --check desktop/assets/app.js`、gofmt；不做宿主 GUI/真机 | 30–35min；检查 400s；报告 /tmp/flowdrop-rmt03-report.md | 待派发 |
+| WIN-07 | 仅新建 `tools/winres/`（独立 go module，依赖 `github.com/tc-hib/winres v0.3.1`）、改 `scripts/build-desktop-windows.sh`（构建后调用生成器）、必要时 `scripts/package-windows.sh`：给 exe 写入图标（`desktop/assets/icon.png` 256×256 多尺寸 ICO）、版本信息（FileVersion/ProductVersion 0.1.0.0、ProductName FlowDrop、FileDescription）、manifest（asInvoker、PerMonitorV2 DPI、Win10+ supportedOS、longPathAware）；用 `winres.WriteToEXE` 纯 Go 后处理，不引入 wails3 CLI/mingw | `GOOS=windows amd64/arm64` 构建后 exe 可被 `winres.LoadFromEXE` 读回 icon/version/manifest；`file` 仍为 PE32+ GUI；Linux `go test ./...` 不受影响；实际跑 `scripts/build-desktop-windows.sh` 与打包脚本；报告 /tmp/flowdrop-win07-report.md | 30–35min；检查 400s；报告 /tmp/flowdrop-win07-report.md | 待派发 |
+
+两任务文件不重叠（desktop Go/assets vs tools+scripts），可并行。禁止事项：不得在宿主桌面启动 GUI/D-Bus 实验、不得 commit/push、不得安装到用户目录、不得杀用户进程、不得改 `docs/`（由主 agent 汇总）。
+
+RMT-03 已派发：task_083f6bda2df0 / ctx_2dbfd8c8e41f。WIN-07 已派发：task_bd871655a220 / ctx_8c19f04199c2。
+
+RMT-03 完成并由主 agent 复核：`ApplyMode` 改为同步热切换——`remoteURL`/`startupErr` 改为 `atomic.Value`，`modeSwitch` 互斥串行化；本机→远程先 `manager.Stop`（10s 超时）成功后才切运行态、`reloadInbox`、保存；远程→本机用 `startHub`，失败返回中文错误且不改保存值、窗口留在远程。UI 去掉“需重启”，保存期间按钮禁用显示“正在切换…”，成功/失败都在卡片内提示；`GetState` 的 `restart_required` 仅剩旧文件兜底。主 agent 复核 `CGO_ENABLED=1 go test -race -tags purego . ./internal/...` 4 包全绿（74 通过），并修正 `errRemoteMode` 里过时的“重启 FlowDrop”措辞。Windows 真机热切换未验证。
+
+WIN-07 完成并由主 agent 复核：新增独立 module `tools/winres/`（`github.com/tc-hib/winres v0.3.1`，纯 Go 后处理，无 wails3 CLI/mingw），给已链接 exe 原子写入图标（256/128/64/48/32/16 六尺寸）、版本信息（`0.1.0.0`、FlowDrop、en-US+zh-CN）与 manifest（asInvoker、PerMonitorV2+PerMonitor、longPathAware、Win10/11 GUID）；`scripts/build-desktop-windows.sh` 构建后盖章并 `-verify`，失败即中止；`package-windows.sh` 仅 README 增加一段。主 agent 复核：两个 exe `winres -verify` 均 10 项资源、`file` 仍为 PE32+ GUI、zip 内容正确、desktop `-race` 4 包全绿、`tools/winres` 测试与 gofmt 干净。资源管理器图标缓存/属性对话框/真实高 DPI 观感需 Windows 真机确认。
+
+本轮最终产物（主 agent 重建，2026-11-09 14:53，未 commit/push）：
+- `dist/flowdrop-desktop`（Linux，含热切换与远程模式）17110696 B，SHA-256 `ab18f27c58bb00bdfce8bcce0fd9e5503fad3100cc73cd499c9c679a2d5c8eee`
+- `dist/flowdrop-desktop.exe`（amd64，含图标/版本/DPI manifest）18376704 B，SHA-256 `87845c235cc4c378482399c878a1a73a60a7a1b19c3587c030357ebe1c80b790`
+- `dist/flowdrop-desktop-arm64.exe` 17095168 B，SHA-256 `3703d00b1c045b80df7015e43efcb34168712e324f4ded5c54138d472c3cf2fd`
+- `dist/flowdrop-windows-amd64.zip` 7346021 B，SHA-256 `1a23a21d2a088946f2e8bdd0a8b414ca0c5ade2a1408c1a81142912205394209`
+- `dist/flowdrop-windows-arm64.zip` 6627177 B，SHA-256 `754b77c16d4759d83193d054e8d65682368467b487a1526a03d1e6a6fbc44bc4`
+
+Windows 真机验收辅助（2026-11-09）：新增只读 `scripts/check-windows-exe.ps1`（打印版本资源/SHA-256、导出内嵌图标为 exe-icon.png，不启动应用），并在 `docs/DEPLOY.md §18.1` 写明用法与期望值。主 agent 已在 Linux 侧完成资源级核对：从 exe 解出 6 个尺寸图标（256/128/64/48/32/16，均为合法 PNG，256/32 已目视确认是正常蓝色圆角图标）、回读版本字段与两份语言、导出 manifest 原文（asInvoker / true/pm / PerMonitorV2,PerMonitor / longPathAware / Win10 11 GUID）均正确。资源管理器图标缓存、属性对话框、真实高 DPI 观感与 Windows 下热切换仍需用户真机执行。
+
+图标占位修复（2026-11-09，用户真机反馈）：用户确认 Windows 热切换正常、版本资源正确（脚本输出与预期一致），但指出 Windows/Linux 的应用与托盘图标都是纯蓝色块。核查：`desktop/assets/icon.png`（256）与 `tray.png`（48）历史上就是单色 #2563EB 圆角方块，没有任何标记，而 `web/public/favicon.svg` 与 Android `ic_launcher_foreground.xml` 早已是白⇄蓝底品牌图形——桌面端是漏了图形的占位资源，不是打包丢失。修复：新增 `scripts/gen-desktop-icons.py`（Pillow，确定性绘制 Android 同款双向箭头，512 应用图标 + 48 托盘，托盘放大到 1.65 保证 16px 可辨），重写两张资源并重建三平台无关的桌面产物。主 agent 复核：从新 exe 解出 6 个尺寸图标均含 ⇄ 图形（256/32 已目视），版本资源仍未变；Windows amd64/arm64 `-verify` 通过。
+
+图标修复后产物（2026-11-09 15:18，未 commit/push）：
+- `dist/flowdrop-desktop` 17135240 B，SHA-256 `112007dd2a88adcfdf1ae0422d086b95e54c980ddb3bae0e5ae8eb8264a2cc22`
+- `dist/flowdrop-desktop.exe` 18407936 B，SHA-256 `f64ed1bb052af1d3fc5ade9c7ea2239d30b92bd7b493034c19c255f5273f2405`
+- `dist/flowdrop-desktop-arm64.exe` 17126400 B，SHA-256 `1462b7fce800ce0e75b74182fbca0ace0c355d3352aae8a8b8ed93f1808c0772`
+- `dist/flowdrop-windows-amd64.zip` 7378677 B，SHA-256 `5024dd96d0ab430998c9b416068c88cc8acc0001a24442a6899e3417d68e1051`
+- `dist/flowdrop-windows-arm64.zip` 6658440 B，SHA-256 `6610b1a40d39fb21c4252919b75f0e08200b30a321ef03016473ad79fc460503`
+
+## DOC-01 平台支持声明同步（2026-11-09）
+
+用户问「Win/Linux 客户端功能是否一致」后确认：文档仍写着「仅 Linux；不做 Windows/macOS 打包」，与 §18 已交付的 Windows 构建矛盾。纯文档一行级修正，由主 agent 直接改，未派 worker。
+
+- `docs/DEPLOY.md` §16.9：改为「桌面版覆盖 Linux 与 Windows（Windows 构建/打包/限制见 §18；两端共用同一套桌面代码，功能一致，差异只在拖拽、托盘、代理直连等平台适配层）；macOS 未支持」，其余限制项（无自启/无自动选路/无二维码）保留。
+- `README.md`：桌面章节标题改为「桌面 App 已交付（Linux + Windows，Wails v3.1.0）」；新增 Windows 产物条目（`dist/flowdrop-windows-{amd64,arm64}.zip`、图标/版本/DPI manifest、拖拽与托盘差异、§18 链接）；「不在 MVP 内」去掉 Windows，只留 macOS 桌面版。
+- `docs/PLAN.md`「实际完成状态」真机验收行：说明改为「桌面版 Linux 与 Windows 均已交付（Windows 见 DEPLOY §18，macOS 未做）」。
+- 未改：`docs/PRD.md`（需求基线）与 `docs/VERIFICATION.md`（历史验证快照）中的同期表述属时间点记录，不回改。
+
+验收：`grep -rn "仅 Linux\|Windows/macOS 桌面版" docs/ README.md` 仅剩 PRD 范围基线与 VERIFICATION 历史记录命中，README/DEPLOY/PLAN 的当前状态声明已无过期表述。未 commit/push，无代码与产物变化。
+
+## ICON-02 Linux 图标仍为蓝块（2026-11-09，用户真机反馈）
+
+用户反馈 Linux 托盘图标与窗口左上角图标仍是蓝色色块。核查结论（非图标资源本身问题）：
+
+1. 用户桌面项 `~/.local/share/applications/flowdrop-desktop.desktop` 的 `Exec` 指向 `~/.local/bin/flowdrop-desktop`，该副本是 **2026-11-08 10:43** 的旧构建，内嵌 tray.png 为旧的纯蓝色占位（旧 18112 B vs 新 1816 B），所以托盘仍是蓝块；本轮重建的 `dist/flowdrop-desktop` 内嵌的已是带 ⇄ 的新图标（已按字节核对）。
+2. 安装脚本从 `deploy/desktop/flowdrop-{48,128,256}.png` 安装启动器/窗口图标，而这三个文件自 2026-11-08 00:39 起一直是**纯蓝占位**，从未随 `desktop/assets/icon.png` 一起更新——即使重装，启动器与任务栏仍是蓝块。
+
+修复（主 agent 直接改）：`scripts/gen-desktop-icons.py` 现在同时渲染 `deploy/desktop/flowdrop-{48,128,256}.png`（与 512 图标同一几何/配色，确定性），已重新生成；`desktop/assets/{icon,tray}.png` 字节未变（哈希 `fd11ebf9…`/`87d06e74…`），因此现有 `dist/` 产物无需重建。目视核对 48px 安装图标与 16/22px 托盘缩略图：⇄ 清晰可辨。
+
+待用户操作：重新运行 `scripts/install-desktop.sh`（会覆盖 `~/.local/bin` 与图标，属用户目录安装，未擅自执行）；若图标缓存未刷新，可 `gtk-update-icon-cache -f -t ~/.local/share/icons/hicolor`。
+
+## DL-01 Linux 桌面下载同名文件被删/覆盖（2026-11-09，用户真机反馈）
+
+用户反馈：图片「下载」与预览里的「下载原图」，若同名文件已下载过一次，第一次点击会把旧文件删掉，第二次点击才下载成功。
+
+定位（主 agent，读 WebKitGTK 文档 + Wails 源码）：Wails v3.1.0 在 Linux GTK3 侧**没有**任何下载处理；WebKitGTK 的 `WebKitDownload::decide-destination` 无处理器时按默认行为存到 `G_USER_DIRECTORY_DOWNLOAD` + `suggested_filename`，而 `allow-overwrite` 默认 FALSE——目标已存在时下载失败并把已有同名文件破坏掉。第二次点击时同名文件已不存在，于是“成功”。这与用户描述的前置条件（“如果这个图片下载过了”）完全吻合；Windows 走 WebView2 自带下载 UI，不受影响。文档依据：<https://webkitgtk.org/reference/webkit2gtk/2.41.2/class.Download.html>（`decide-destination` / `allow-overwrite` 段）。
+
+| 任务 | 目标与写入范围 | 验收/依赖 | 预算/停止 | 状态 |
+|---|---|---|---|---|
+| DL-01 | 新建 `desktop/downloads_linux_gtk3.go`（`linux && cgo && gtk3`）+ `desktop/downloads_unsupported.go` + 纯 Go 命名/去重逻辑与测试；`desktop/main.go` 仅加一处注册调用。在 GTK 主线程给默认 `WebKitWebContext` 挂 `download-started`，再给每个 download 挂 `decide-destination`，把目标设为 Downloads 目录下**唯一**文件名（`name (1).png` 递增），并用 `sanitize` 处理路径分隔符/控制字符/超长名；绝不覆盖或删除已有文件。仅 Linux；不改 web/、server/ | `CGO_ENABLED=0 go test -tags purego . ./internal/...`、`./scripts/build-desktop.sh` 成功、gofmt/vet；定向验证：隔离容器（`flowdrop-dd16-gui:1`，weston）内连续下载同名文件两次 → 两个文件都在且旧文件字节不变；宿主桌面禁止 GUI 实验 | 45min；报告 /tmp/flowdrop-dl01-report.md | 待派发 |
+
+DL-01 已派发：task_fc7bdda8866f / ctx_2f02f4ce7deb（run_7301d66276fc），spec `/tmp/flowdrop-dl01-spec.md`。等待 worker 回报后由主 agent 复核并重建产物。
+
+## UI-01 / UI-02 界面改版（2026-11-09，用户选定：设置窗 + Web 收件箱，跟随系统浅/深色）
+
+用户参考 magpie 提出界面优化；主 agent 核对 magpie 技术栈为 Go + Wails v3（beta.24）+ 手写 HTML/CSS/JS，与本项目同路线（我们 Wails 3.1.0，收件箱是 React）。视觉基线 `docs` 外的 `/tmp/flowdrop-ui-tokens.md`（浅灰底 + 白卡片、12px 圆角、1px 分隔线、胶囊按钮、系统字体、品牌蓝作强调色）。
+
+| 任务 | 目标与写入范围 | 验收/依赖 | 预算/停止 | 状态 |
+|---|---|---|---|---|
+| UI-01 | 仅 `web/src/styles.css` + `App.tsx`/`ItemCard.tsx`/`Composer.tsx`/`Login.tsx` 的布局 class：收件箱改单卡片行式列表、顶部栏/Composer/灯箱/登录页/toast 按 token 重做；保留 `.item` 等类名与所有按钮文案 | `cd web && npm run build`；`cd tests && npm test`（16 项）全绿；无头 Chromium 截登录/收件箱浅色/深色三图 | 40min；报告 /tmp/flowdrop-ui01-report.md | 待派发 |
+| UI-02 | 仅 `desktop/assets/{index.html,style.css}`（必要时 `app.js` ≤3 行 class 切换）：设置窗按 token 重做卡片/模式选择/表单/设备行/横幅，深色跟随系统；保留所有 id 与可见性逻辑 | `node --check desktop/assets/app.js`；`CGO_ENABLED=0 go test -tags purego ./...`；静态截图 2 张 | 35min；报告 /tmp/flowdrop-ui02-report.md | 待派发 |
+
+两任务文件不重叠；都不跑桌面构建（协调者最后统一重建 dist）。禁止：宿主桌面 GUI 实验、commit/push、装用户目录、改测试断言。
+
+UI-01 已派发：task_2420ef7809e1 / ctx_2741da9f41c6；UI-02 已派发：task_da6e46f6cb90 / ctx_3ee897a54a06。两者与 DL-01 文件不重叠。协调者补充：UI-01 的 E2E 用的是 `dist/flowdrop` 内嵌前端，改完必须先 `./scripts/build.sh` 重建该二进制，否则测的是旧 CSS。
+
+UI-02 完成并由主 agent 复核（2026-11-09）：只重写 `desktop/assets/style.css`（103→644 行），index.html/app.js 未动；选中态用 `input:checked + .mode-body` 相邻兄弟，`grep ':has('` 为空，无 WebKit 版本风险；变量全部按 token 定义，样式表内除 `--shadow` 的 rgba 外无 hex 字面量；`[hidden]{display:none!important}` 兜底不影响 app.js。目视浅/深色截图：卡片层次、选中态（浅色 `rgb(37,99,235)` 边 / 深色 `rgb(122,162,247)`）、配对码、设备行、danger 撤销按钮均正常；渲染自检 0 控制台错误、520px 无横向溢出。真实 Wails/WebKitGTK 窗口尚未复核（随协调者统一构建后由用户真机确认）。
+
+## UI-01 / UI-02 / DL-01 完成（2026-11-09 15:52，主 agent 复核并重建）
+
+**UI-01（Web 收件箱）**：重写 `web/src/styles.css`，`App.tsx` 仅新增 `.conn-dot` 与 `.inbox-card` 包裹，逻辑/文案/依赖未变。E2E 16/16 Chromium 全绿（worker 先重建 `dist/flowdrop` 再跑）；浅/深色截图目视：单卡片行式列表、标签胶囊、操作区右对齐、灯箱与 toast 正常，文字对比度普查 86 个元素均 ≥4.5:1。保留 `.topbar-right`，桌面注入的「设置」按钮位置不变（注入按钮自带内联样式）。
+
+**UI-02（设置窗）**：只改 `desktop/assets/style.css`（103→644 行），`index.html`/`app.js` 未动；选中态用 `input:checked + .mode-body`，不依赖 `:has()`；颜色全走 token；`[hidden]{display:none!important}` 兜底。浅/深色截图以真实 `app.js` + stub bridge 渲染，0 控制台错误、520px 无横向溢出。
+
+**DL-01（Linux 下载同名文件）**：新增 `desktop/downloads_linux_gtk3.go`（默认 `WebKitWebContext` 的 `download-started` → 每个 download 的 `decide-destination`，返回 Downloads 目录下唯一路径；显式 `allow_overwrite(FALSE)`；`failed` 只记 domain/code）、`desktop/download_naming.go`+`_test.go`（basename/控制字符/`..`/180 字节截断 + `name (n).ext` 去重 + XDG→`~/Downloads`→`$HOME` 目录解析）、`desktop/downloads_unsupported.go`（非 GTK3 no-op）；`main.go` 增加一处 `installDownloadHandler()`。偏差说明：注册用 `application.InvokeAsync` 而非 `InvokeSync`——app.Run 之前 InvokeSync 会自锁（Wails 早队列只在 Run 内 drain），worker 在容器里用真实 `application.New`+`Run` 路径验证过。隔离容器证据（`flowdrop-dd16-gui:1`，WebKitGTK 2.54.0）：预置 30 字节 `same.png`，连续下载同名响应两次 → 旧 `same.png` 字节不变（sha256 `340e5613…`）+ `same (1).png`、`same (2).png`；未挂 hook 的对照组不产生新文件。
+
+主 agent 复核：`CGO_ENABLED=1 go test -race -tags purego . ./internal/...` 4 包全绿；`CGO_ENABLED=0 go test -tags purego .` 含 5 个下载命名测试全过；gofmt/go vet 干净；`build-desktop.sh`、两个 Windows 构建与打包全部成功，两个 exe `-verify` 均 10 项资源（图标 6 尺寸 + group + 版本双语 + manifest）；产物中确认含 `inbox-card`、`input:checked + .mode-body`、`--accent-soft`、`flowdrop-download-handler`。真实 App 内点击下载与真实 Wails/WebKitGTK 窗口观感仍需用户真机确认。
+
+本轮产物（2026-11-09 15:52，未 commit/push）：
+- `dist/flowdrop-desktop` 17163912 B，SHA-256 `f9023bf58b55311889fb0a553c7b731129f23aa32a1b3d29aef4f011c920bca0`
+- `dist/flowdrop`（CLI，含新 Web UI）11780258 B，SHA-256 `acb344088c381dd45b0b2f1c8d0d7be178bb37cd5941670acc6a5bf4d7748483`
+- `dist/flowdrop-desktop.exe` 18419200 B，SHA-256 `84ca90b0757d3e4010ebe69c180c2379c656296eac32646d728d92631fdb9404`
+- `dist/flowdrop-desktop-arm64.exe` 17137664 B，SHA-256 `4e3c360f115a90baec27ca1c5cdaf7125159ae6d2334ec4ddb51dbc091af6453`
+- `dist/flowdrop-windows-amd64.zip` 7384963 B，SHA-256 `2cac7cc8524a68e58f208898cb3c1e0e8502350adce8e00e3f23c7d307f58cc0`
+- `dist/flowdrop-windows-arm64.zip` 6665341 B，SHA-256 `32c04efc29fd7e7217daebffcfbc2c89534561eb86fcea9c64d2b9ec0bef9937`
+
+文档：`docs/DEPLOY.md` §16.12（下载与同名文件）+ README 桌面特性两条（界面改版、下载重名）。未改 `server/`，Android 产物未重建（本轮无 Android 改动）。
+
+## UI-03 收件箱窗口去掉原生菜单栏（2026-11-09，用户反馈“最上面还有设置/在浏览器打开这一排”）
+
+用户对比 magpie 指出窗口顶部多了一层按钮。确认来源：`openInbox` 给 `application.LinuxWindow{Menu: d.newInboxMenu()}`，Wails GTK3 会把菜单渲染成窗口内的 GtkMenuBar（设置…/在浏览器中打开/退出 FlowDrop）。页面自身已有桌面注入的「设置」按钮，托盘菜单已有「在浏览器中打开」「退出」，`Ctrl+,` 由 `KeyBindings` 全局处理，因此这排是重复入口。
+
+改动（主 agent 直接改，最小面）：`desktop/main.go` 去掉 `Linux: application.LinuxWindow{Menu: ...}` 与 `newInboxMenu()`，并把该窗口的注释改成“不设窗口菜单”的理由；同时把已过期的“下载沿用 WebKit 原生行为”注释改为指向 `downloads_linux_gtk3.go`。已重建并安装：`dist/flowdrop-desktop` 与两个 Windows exe/zip。
+
+复核：`CGO_ENABLED=0 go build -tags purego`、两个平台构建、exe `-verify` 10 项资源均通过。真实窗口内“已无菜单栏”需用户重启后确认；系统标题栏仍在（下一步待用户决定是否做无边框自绘）。
+
+## UI-04 无边框窗口 + 自绘标题栏（2026-11-09，用户确认要做）
+
+用户反馈「按钮上面还有系统标题和图标，magpie 没有」，确认后采用无边框方案。
+
+改动：
+- `desktop/main.go`：收件箱与设置窗都加 `Frameless: true`；收件箱注入 `desktopWindowChromeJS`，设置窗注入 `settingsWindowChromeJS`；`handleRawMessage` 先走 `runWindowAction`。
+- 新增 `desktop/window_chrome.go`：注入式 36px 标题条（品牌标记 + 最小化/最大化/关闭，`--wails-draggable` 拖动、按钮 `none` 排除），以及三个固定 raw message 的校验执行（收件箱要求当前 Hub origin，设置窗进程内无条件）。
+- `desktop/settings_entry.go`：登录页固定「设置」按钮下移 36px，避免被标题条盖住。
+- `desktop/assets/{index.html,style.css,app.js}`：设置窗静态标题条 + 样式 + 三个按钮的 raw message 发送。
+- 标题条只保留品牌标记、不重复写应用名：页面自身的品牌头部已经是唯一的应用名，避免“FlowDrop 流转”在顶部出现两次。
+
+验证：`gofmt`/`go vet`/`CGO_ENABLED=0 go build -tags purego` 通过；两个平台重建与打包成功、exe `-verify` 10 项资源；用无头 Chromium 复刻同一套 CSS/DOM 渲染设置窗与收件箱（浅/深色）确认布局无重叠、无横向溢出、对比度 7.0–13.4:1；设置窗真实 `app.js`（stub bridge）渲染 0 控制台错误。**真实 Wails/WebKitGTK 下的拖动、双击最大化、边缘缩放、贴边行为只能用户真机确认**，异常时把 `Frameless` 改回 false 即可恢复。
+
+产物（2026-11-09 16:03，未 commit/push）：
+- `dist/flowdrop-desktop` 17172104 B，SHA-256 `b882333eebe7ac5c6ad4314adeee38480a5e08553c38f4f92871297175532bd6`
+- `dist/flowdrop-desktop.exe` SHA-256 `ed8ff9d08748675f26b799fbd606c89556afe1b44e947d971c8f41ff1f20d0f1`
+- `dist/flowdrop-desktop-arm64.exe` SHA-256 `950be472ef27c7f69cd6f853bac55c3c75e81385a3ab5de13cfd0a6860575c9a`
+- `dist/flowdrop-windows-amd64.zip` SHA-256 `8c8fcb471e2043e5c9d2eba69ea2b4443bb89c227e605c603918b95471ce3942`
+- `dist/flowdrop-windows-arm64.zip` SHA-256 `513248a41ea2194ac83f0d6134e325c2e8cfb71077b1fc50e6aaed4cad9c6962`
+
+## UI-05 KDE Wayland 下 KWin 仍画标题栏（2026-11-09，用户真机反馈）
+
+现象：无边框版本在 KDE Wayland 上仍被 KWin 补了一条系统标题栏（最小化/最大化/关闭）。对照 magpie 源码 `internal/gui/titlebar_gtk3.go` 找到根因与官方绕法：GTK3 在 Wayland 上会把 undecorated 窗口声明成"由服务端装饰"，KWin 于是补标题栏；magpie 用 `gdk_wayland_window_announce_csd()` 在 realize 时反过来声明"客户端自绘边框"。
+
+修复：新增 `desktop/window_frame_linux_gtk3.go`（`linux && cgo && gtk3`）：在窗口 realize 时（以及之后每次 realize）调用 `gdk_wayland_window_announce_csd`，用 `g_object` 标记保证幂等；`window_frame_unsupported.go` 为其它平台空操作。注册用 `application.InvokeAsync`（窗口在 `app.Run` 之前创建，`InvokeSync` 会像 DL-01 记录的那样自锁），两个窗口创建后各调用一次。
+
+验证：GTK3 构建通过；X11（Xvfb+openbox 容器）下窗口仍无任何系统装饰、两个窗口与自绘标题条正常、无崩溃；`grep 'window frame'` 在 X11 下无输出（符合空操作预期）。KWin Wayland 的真实效果只能用户真机确认。
+
+产物（2026-11-09 16:15，未 commit/push）：`dist/flowdrop-desktop` `e8859d522f7f96ac52d5bdb2a2d9eac8dc403b526c61946fe30681f8fb4d2db4`；`dist/flowdrop-desktop.exe` `e4f8ee122357af8ce7e96e967e5a717f20e5e66f6e0b5d650f7cbb23586ce91b`；arm64 exe `715246d0b2d2452f23366348743b65e49fd1a1718b23889e676b131516cf7414`；zips `56c2e100ce6235e40ecb5c556c2cb89c8a0aa627a69dcbee5fc6c14585ed2ac3` / `48022eef568f689b5d3959e1f1a49bd024b715a31911ffaaea4ed30c4dd83bb3`。
+
+## UI-06 标题条颜色、配对页滚动条（2026-11-09，用户真机反馈 1、2）
+
+现象：① 界面顶部标题条与下方页面颜色不一致（条是白色，页面是浅灰）；② 输入配对码的页面出现竖向滚动条；③ 配对页无法拖动窗口（见 UI-07）。
+
+根因：① 注入的标题条把背景写死成 `#ffffff`（深色 `#232327`），设置窗标题条用的是 `var(--card)`，而两个页面的底色是 `var(--bg)`（`#f4f4f6` / `#1a1a1e`）。② 无边框窗口给 `body` 加了 `padding-top:36px`，而 Web UI 的登录/配对容器是 `min-height:100dvh`，两者相加比视口高 36px，必然出滚动条（设置窗不受影响：`* { box-sizing: border-box }` 让 `body` 的 `min-height:100vh` 包含内边距）。
+
+改动：注入的 `desktopWindowChromeCSS` 改为取页面自己的 token（`var(--bg)`/`var(--fg)`/`var(--line-2)`/`var(--accent)`，带浅色回退），并定义 `--flowdrop-chrome-top: 36px`，标题条高度与 `body` 内边距都取该变量；`desktop/assets/style.css` 的 `.titlebar` 由 `var(--card)` 改为 `var(--bg)`；`web/src/styles.css` 的 `.login-wrap`、`.boot` 改为 `min-height: calc(100dvh - var(--flowdrop-chrome-top, 0px))`（浏览器/手机端无该变量，回退 0px，行为不变）。
+
+证据（隔离容器 `flowdrop-dd16-gui:1` + Xvfb/openbox，新构建实跑）：标题条像素 = `srgb(244,244,246)`，与页面 `--bg` 完全一致（两个窗口均如此）；配对页右侧滚动条消失、配对卡片在标题条下方居中；`desktop/window_chrome_test.go` 断言 token 用法与该高度的共享约定；web E2E 16/16 通过。
+
+## UI-07 配对页标题条拖不动窗口（2026-11-09，用户真机反馈 3）
+
+现象：同一份代码，设置窗能拖动、配对页（收件箱窗口）拖不动。
+
+根因：GTK3 无边框窗口没有标题栏部件，能移动窗口的只有 `gtk_window_begin_move_drag`。Wails 运行时的 `--wails-draggable` 路径在 `wails:drag` 消息里带的是它自己在 `button-press-event` 里记下的按键/根坐标/时间戳；这两个窗口上那份记录始终是空的，于是发给合成器的请求是 button=0，被静默忽略（按钮是普通 DOM click，所以照常工作，看起来像"只有拖动坏了"）。实证：Xvfb+openbox 下用 `xdotool` 拖两个窗口都不动，而同环境里一个最小 PyGObject GTK3 窗口用 `begin_move_drag` 能正常被拖走（100,100 → 175,175），证明不是环境问题。
+
+修复：新增 `desktop/window_drag_linux_gtk3.go`：在 WebView 的 `button-press-event` 上，若主键按下且落点在顶部 36px（`event->y`，逻辑像素）且不在右侧 132px 的按钮区内，就以**这次按下自己的** button/x_root/y_root/time 调 `gtk_window_begin_move_drag`（Wayland 需要的 serial 同源），然后返回 FALSE 让页面照常收到事件；`g_object` 标记保证每个 WebView 只连一次，每次页面加载后重新装一遍。`window_drag_unsupported.go` 为其它平台空操作（Windows 靠 Wails 自带路径）。`main.go` 在创建两个窗口后分别调用 `installTitlebarDrag`。
+
+证据（同一隔离容器）：新增日志两行 `window drag: title bar starts a window move on press`；`xdotool` 拖动后收件箱窗口 (150,60) → (225,110)、设置窗 (250,70) → (310,100)；标题条最右侧关闭按钮仍触发"退出 FlowDrop？"确认框（132px 排除区生效，按钮点击未被拖动手势吞掉）；`go test -tags gtk3 .` 与 `CGO_ENABLED=0 go test -tags purego . ./internal/...` 通过；web E2E 16/16。
+
+未验证：KWin Wayland 真机上的拖动（本地无用户会话权限），需用户重启后拖一下标题条确认。
+
+产物（2026-11-09 16:36，未 commit/push，已 `scripts/install-desktop.sh` 安装到 `~/.local`）：
+- `dist/flowdrop-desktop` 17180392 B，SHA-256 `82323ba3dae45552ea0b26dc3df609621ab83d070f322ed28c9d16b0d0226fcc`
+- `dist/flowdrop`（CLI/Web，含新 Web UI）SHA-256 `6dff26eed30eaa7a1f18cb5063a48f4c5a609ad381849656003ec294b1a02ca4`
+- `dist/flowdrop-desktop.exe` SHA-256 `b21c0dc13c46ec355e7dd61ed779907c620c5e637965eb712812fe73689eeef7`
+- `dist/flowdrop-desktop-arm64.exe` SHA-256 `4515db6b52dc8368b2a889121cfd0c5d7e1a0acff2f939ed30a66537299e60ff`
+- `dist/flowdrop-windows-amd64.zip` SHA-256 `ec5fb59443fca3c224f0ced8f21955c0017fe48af92d7fd7387534f3ef292562`
+- `dist/flowdrop-windows-arm64.zip` SHA-256 `160fcef935b6ea4e1e1d52a24135e2ec4948760af43d0ea7191aa18f72f98ca6`
+
+## DL-01 桌面窗口免码登录（2026-11-09，用户反馈"都在一台机器上为什么还要配对"）
+
+现象与结论：桌面收件箱窗口加载的是 Hub 真实 HTTP origin，与手机同一套认证（配对码 → HttpOnly cookie），桌面壳刻意不给它特权通道。但 Cookie 会话 TTL 默认 168h（`SessionTTLHours`），设备令牌本身长期有效，因此桌面每 7 天要"设置窗生成码 → 收件箱输码"重配一次；用户认为这不该是人工步骤。
+
+方案（不改服务端、不改 `docs/PAIRING.md` 冻结接口）：桌面壳把自己当 `native` 客户端——启动时用进程内 `CreatePairingCode()` 得到的码，由壳自己的 Go HTTP 客户端 `POST /api/v1/auth/pair{native:true}` 换 `device_token`，存进 desktop.json（`appsettings.Save` 已是原子 0600 写）；之后每次收件箱页面加载注入引导脚本：无有效 cookie 时用 `Authorization: Bearer` 请求 `GET /api/v1/auth/session`（服务端按冻结契约重发 cookie），成功即 reload，已登录则不动。令牌长期有效，只在首次/被撤销后才重新配对；设置页把本机设备显示为不可撤销的一行。
+
+| 编号 | 单一目标 / 允许写入 | 验收、预算与停止条件 | 状态 |
+|---|---|---|---|
+| DL-01A | 免码登录 Go 侧：`desktop/internal/appsettings/**`、新增 `desktop/desktop_login.go` + 测试 | 配对助手/引导脚本/设备名纯函数 + httptest 单测；vet 与定向测试全绿；15–20min；不碰 main.go/service.go/资产/服务端，失败即停 | 完成 ctx_b9c67b40789c / task_c8e6e7496e1c；主 agent 复核通过（见下） |
+| DW-01 | 设置窗作为收件箱的附属对话框：新增 `desktop/window_owner_*.go`、`desktop/assets/index.html`、`desktop/assets/app.js` | transient+居中+present 三个原生助手；删掉页脚与托盘重复的「打开收件箱」；不碰 main.go；15min | 完成 ctx_468848ea259e / task_0316aa42accc；接线并入 DL-01B（`main.go` 只有一个 writer） |
+| DL-01B | 接线：`desktop/main.go` 启动流程与收件箱 JS 链、`desktop/service.go` 设备列表过滤 | 本地模式永远先开收件箱（仅 Hub 启动失败才显示设置窗）；容器内实跑确认自动登录、重启后仍登录、设备列表只有一行「本机桌面」 | 完成 ctx_8704d33392db / task_55dc01d59783 + 追加 ctx_9b0aeb253b00（sessionStorage 2 次重载上限）；主 agent 复核：gofmt 干净、gtk3 4 包测试全过 |
+| DW-02 | 接线 DW-01 到 `desktop/main.go` 的窗口创建 | 为避免 `main.go` 并发写入，已并入 DL-01B 的同一份规格 | 并入 DL-01B |
+| DL-01C | 构建交付 + 用户验收说明 | ctx_1101549b48cb / task_f0bf68c9ba89：构建成功（`315beba2…`），但页面侧 3 项 FAIL（首启/重启都停在配对页、设置窗取不到），证据缺 run 日志；根因由主 agent 定位 | 失败（已由 DL-01D/E 修复） |
+| DL-01D | 注入脚本互相隔离 + 登录引导排最前（主 agent 直接修复，`desktop/main.go`、新增 `injected_scripts_test.go`） | 容器 3/3 首启即登录（`/api/v1/items` 200）、`desktop log in` 只一次；单测断言 5 段隔离且 bootstrap 在前 | 完成 |
+| DL-01E | 原生窗口句柄竞态修复（主 agent 直接修复，新增 `native_window_retry.go`，改 `window_frame_linux_gtk3.go`、`window_owner_linux_gtk3.go` + 静态测试） | 容器实测 `window frame` 不再报 not available、`WM_TRANSIENT_FOR` = 收件箱窗口号、居中偏差 0px | 完成 |
+
+风险记录（本轮不修，单独确认）：核对 Wails v3.1.0 源码，`WebviewWindowOptions.JS` 只在 Linux（`webview_window_linux.go:527`）与 macOS 注入；Windows 路径仅在 `HTML` 模式使用它（`webview_window_windows.go:2835`），URL 模式未注入。若属实，Windows 上无边框窗口的注入标题条与「设置」入口从未生效，需要单独排查与修复。
+
+### DL-01D 注入脚本互相隔离（2026-11-09，主 agent 直接修复）
+
+现象（DL-01C 容器实跑）：首启与重启都停在四位配对码页，`/api/v1/items` 一次都没请求；日志显示免码配对本身成功（`POST /api/v1/auth/pair` 200、`desktop login` 一行、desktop.json 0600 含令牌），设置窗里也没有注入的「设置」按钮。
+
+定位：Wails 把 `WebviewWindowOptions.JS` 整段当**一个脚本**执行。容器里这次注入落在首个文档上（早于 Hub 页面就绪）：`desktopWindowChromeJS` 因为显式等待 `document.body` 而幸存（标题条正常出现），紧随其后的 snippet 在顶层抛错，于是**同一脚本后续语句全部不执行**——设置入口、文件拖放桥、登录引导依次丢失。用逐个 snippet 后插 `fetch('/probe-…')` 的临时探针复现：带探针的构建里 5 段全部执行、登录成功；不带探针的生产构建稳定只发 1 次 session 请求。探针已全部移除。
+
+修复：`joinInjectedScripts` 把每段脚本包进 `try { … } catch (e) { /* flowdrop: isolated snippet */ }`，并把登录引导排到最前（`inboxInjectedJS`）。这样任何一段顶层失败只损失该功能，页面的登录不再依赖别人的执行结果。新增 `injected_scripts_test.go`：断言每段被隔离、顺序保留、bootstrap 在 chrome/设置入口之前、令牌只出现一次。
+
+证据（同一隔离容器，`--network none`，Xvfb+openbox）：修复后连续 3 次首启都是 `items=200` 且发生一次 reload（引导用 Bearer 换 cookie），设置入口按钮出现在页面头部；重启同一 `HOME` 时 `desktop login` 出现 0 次、`items=200` 仍成立、`paired_devices` 只有 1 行且 id 与 desktop.json 一致。
+
+### DL-01E 原生窗口句柄竞态（2026-11-09，主 agent 直接修复）
+
+现象：容器里每次启动都打印两次 `window frame: native GTK window not available; KWin may draw its own title bar`，偶尔还有 `settings dialog: native GTK window not available`。即 UI-05 的 CSD 声明与设置窗 transient 都可能在窗口原生句柄还没创建时放弃。
+
+修复：新增 `desktop/native_window_retry.go` 的 `withNativeWindows(what, windows, apply)`——在 GTK 线程上以 80ms 间隔重试最多 25 次（约 2 秒），全部就绪才执行；超时只记一行日志、退回默认行为。`ownWindowFrame` 与 `attachSettingsDialog`/`presentSettingsDialog` 改用它；`window_owner_linux_gtk3.go` 里随之无用的 `nativeGtkWindow` 删除，静态测试改为断言使用该重试助手。
+
+证据：同一容器里 `window frame` 失败日志消失；点击页面注入的「设置」按钮后设置窗 780×760 出现，`xprop WM_TRANSIENT_FOR` = 收件箱窗口号 `0x40000e`，两个窗口中心点都是 (640,450)（居中偏差 0px）。
+
+未验证：KWin Wayland 真机上的 transient 任务栏归属与 CSD 效果、Windows、托盘交互；`Ctrl+,` 在容器里没有触发（合成按键拿不到 GTK 加速器焦点），所以 transient 是通过页面「设置」按钮验证的。
+
+### DL-01 交付产物（2026-11-09 17:25，未 commit/push，未安装）
+
+最终产物（2026-11-09 17:33，含 WIN-01；已 `scripts/install-desktop.sh` 安装）：
+- `dist/flowdrop-desktop` 17674312 B，SHA-256 `949b0e883981e2dd8727cb18a9cee68d7192ae3fdf3ebdf777094ba6ae27d7eb`（`~/.local/bin/flowdrop-desktop` 同值）
+- `dist/flowdrop-desktop.exe` `e8904220e902c4607bc91ff5ca534a1d1dddda6efc1a84b63b92e828500aa3fa`
+- `dist/flowdrop-desktop-arm64.exe` `99ff6282a84c6718eb34d05e5802e5e5f65736d18b05cbc7c7ddaf72edc21959`
+- `dist/flowdrop-windows-amd64.zip` `92d1aa8581afd0caed9484ff229aec006e96166d3c99ab828cf260bcc55a824a`
+- `dist/flowdrop-windows-arm64.zip` `ba7dd58adcd8198ebbdd16e8b00cb5b2c8f316702ae179df59e36e1abff6ff3b`
+- 最终构建的容器冒烟（同镜像、`--network none`）：`items=200`、`desktop login` 1 行、`window frame` 失败 0 次、点「设置」后 `WM_TRANSIENT_FOR=0x40000e`（收件箱）。
+- 重装前的一次安装（`ae3295fb…`）已被上面这版覆盖。
+
+验收：`gofmt -l` 空；`go vet -tags gtk3 .`；`go test -tags gtk3 . ./internal/...` 与 `CGO_ENABLED=0 go test -tags purego . ./internal/...` 全绿。容器证据：首启 `items=200` + 一次 reload、`desktop login` 一行、desktop.json `-rw-------`、日志 0 次令牌明文；重启 `desktop login` 0 次且 `paired_devices` 仅 1 行、id 一致；设置窗 `WM_TRANSIENT_FOR=0x40000e`、中心点重合。未验证：KWin Wayland 真机、Windows、托盘。
+
+用户待办：从托盘彻底退出旧实例再重启验证。
+
+已安装（2026-11-09 17:29，用户确认）：`scripts/install-desktop.sh` → `~/.local/bin/flowdrop-desktop`，SHA-256 与 `dist/flowdrop-desktop` 一致（`ae3295fb…`）。WIN-01 接线后 Linux 产物会重建一次并覆盖安装（行为不变，只多一次空操作调用）。
+
+## WIN-01 Windows 上恢复被注入的页面脚本（2026-11-09，用户要求修复）
+
+- 只读核对 Wails v3.1.0：`WebviewWindowOptions.JS` 在 Windows 上只被 `options.HTML` 分支使用（`webview_window_windows.go:2835/2845`），两个窗口都用 URL 创建，因此 Windows 上：收件箱（无边框）没有注入的标题条/最小化/关闭/「设置」入口/拖放桥/免码登录引导；设置窗自带的标题栏按钮也没人绑事件（`settingsWindowChromeJS` 从未执行）。Hub runtime 走 `navigationCompleted` 的 `execJS`，所以 `window._wails` 存在、原始消息可发，只是按钮与脚本缺失。
+- 方案：新增 `desktop/injected_js_windows.go`，在每个窗口的 `events.Windows.WebViewNavigationCompleted` 回调里注入与 Linux 相同的脚本（`go w.ExecJS(js)`，避开 `ExecJS` 内部 `InvokeSync` 在 UI 线程上的自锁）；其它平台 `injected_js_other.go` 空操作，`main.go` 各加一行调用；`JS:` 选项保持不变（Linux/macOS 仍靠它）。静态测试锁住结构与两个窗口的调用。
+- 验收：Linux gtk3/purego 的 vet 与测试全绿、gofmt 干净；Windows amd64/arm64 交叉编译与打包成功并记录 SHA-256。**真实 Windows 行为未验证**（无 Windows 机器），只能确认可编译。
+- 状态：完成（ctx_dd345b918ba8 / task_fd4fe9af4947）。新增 `desktop/injected_js_windows.go`、`desktop/injected_js_other.go`、`desktop/injected_js_install_test.go`（worker 把任务里给的 `injected_js_test.go` 改名：`_js` 后缀会被 Go 当 GOOS 静默忽略，首版 0 测试在跑）；`main.go` 两个窗口各加一行 `installInjectedJS`，`JS:` 选项保持不变。交叉编译四个 Windows 产物成功。

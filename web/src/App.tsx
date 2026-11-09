@@ -213,6 +213,7 @@ export function App() {
         </div>
         <div className="topbar-right">
           <span className={`conn conn-${conn}`} title={connLabel(conn)}>
+            <span className="conn-dot" aria-hidden />
             {connLabel(conn)}
           </span>
           <button className="ghost" onClick={onLogout} type="button">
@@ -274,16 +275,20 @@ export function App() {
             </p>
           </div>
         )}
-        <ul className="item-list">
-          {items.map((item) => (
-            <ItemCard
-              key={item.id}
-              item={item}
-              onDelete={onDelete}
-              notify={notify}
-            />
-          ))}
-        </ul>
+        {items.length > 0 && (
+          <div className="inbox-card">
+            <ul className="item-list">
+              {items.map((item) => (
+                <ItemCard
+                  key={item.id}
+                  item={item}
+                  onDelete={onDelete}
+                  notify={notify}
+                />
+              ))}
+            </ul>
+          </div>
+        )}
         {nextCursor && (
           <button className="more" onClick={() => void loadMore()} disabled={loadingMore} type="button">
             {loadingMore ? '加载中…' : '加载更早的内容'}

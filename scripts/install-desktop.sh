@@ -82,6 +82,6 @@ Notes:
   - Runtime dependencies: GTK 3 and WebKitGTK 4.1 (package names below).
       Debian/Ubuntu: libgtk-3-0t64 libwebkit2gtk-4.1-0 libsoup-3.0-0
   - Hub data lives in \${XDG_DATA_HOME:-~/.local/share}/flowdrop
-    Desktop preference (bind address/port only): \${XDG_CONFIG_HOME:-~/.config}/flowdrop/desktop.json
+    Desktop preference (bind/port + this window's device token, mode 0600): \${XDG_CONFIG_HOME:-~/.config}/flowdrop/desktop.json
   - Uninstall with: scripts/install-desktop.sh --uninstall
 MSG

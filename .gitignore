@@ -24,3 +24,7 @@
 
 # generated Vite config output
 /web/vite.config.js
+
+# python caches
+__pycache__/
+*.pyc

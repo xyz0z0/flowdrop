@@ -4,7 +4,10 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log"
 	"net/url"
+	"slices"
+	"strings"
 	"sync"
 	"time"
 
@@ -58,38 +61,78 @@ type InterfaceOption struct {
 
 // State is everything the settings window renders.
 type State struct {
-	Running       bool              `json:"running"`
-	URL           string            `json:"url"`
-	URLs          []string          `json:"urls"`
-	AccessURLs    []AccessURL       `json:"access_urls"`
-	BindAddress   string            `json:"bind_address"`
-	Additional    []string          `json:"additional_addresses"`
-	DualMode      bool              `json:"dual_mode"`
-	DualAvailable bool              `json:"dual_available"`
-	Port          int               `json:"port"`
-	LastError     string            `json:"last_error"`
-	StartupError  string            `json:"startup_error"`
-	ConfigPath    string            `json:"config_path"`
-	Interfaces    []InterfaceOption `json:"interfaces"`
-	HasTailscale  bool              `json:"has_tailscale"`
-	TrayAvailable bool              `json:"tray_available"`
-	ProxyWarning  string            `json:"proxy_warning"`
+	// Mode is the saved run mode: "local" (the default, including settings
+	// files written before modes existed) or "remote".
+	Mode string `json:"mode"`
+	// RemoteURL is the saved remote Hub base URL in remote mode, otherwise "".
+	RemoteURL string `json:"remote_url"`
+	// RestartRequired is true only when the saved mode/address still differs
+	// from the mode this process actually runs in. ApplyMode switches at
+	// runtime, so a successful switch always reports false; a true value here is
+	// the legacy "saved by an older build, not applied yet" state.
+	RestartRequired bool              `json:"restart_required"`
+	Running         bool              `json:"running"`
+	URL             string            `json:"url"`
+	URLs            []string          `json:"urls"`
+	AccessURLs      []AccessURL       `json:"access_urls"`
+	BindAddress     string            `json:"bind_address"`
+	Additional      []string          `json:"additional_addresses"`
+	DualMode        bool              `json:"dual_mode"`
+	DualAvailable   bool              `json:"dual_available"`
+	Port            int               `json:"port"`
+	LastError       string            `json:"last_error"`
+	StartupError    string            `json:"startup_error"`
+	ConfigPath      string            `json:"config_path"`
+	Interfaces      []InterfaceOption `json:"interfaces"`
+	HasTailscale    bool              `json:"has_tailscale"`
+	TrayAvailable   bool              `json:"tray_available"`
+	ProxyWarning    string            `json:"proxy_warning"`
 	// AccessibilityWarning explains that this launch had to disable the
 	// AT-SPI bridge because the session's accessibility bus was broken. It is
 	// empty when accessibility is enabled.
 	AccessibilityWarning string `json:"accessibility_warning"`
+	// LocalDeviceName is the name this window itself is paired under
+	// ("本机桌面 · host") in local mode once a device token is saved, otherwise
+	// "". It is shown as a non-revocable row above the phone/tablet devices:
+	// the window logs in with that token, so there is no code to type and no way
+	// to revoke it without locking this window out (revoking it here would only
+	// make the shell pair itself again on the next start).
+	LocalDeviceName string `json:"local_device_name"`
 }
 
 // GetState returns the current shell state for the settings window.
 func (s *SettingsService) GetState() (State, error) {
-	st := State{
-		ConfigPath:    desktop.settingsPath,
-		StartupError:  desktop.lastStartupErr,
-		TrayAvailable: desktop.trayAvailable,
-		URLs:          []string{},
-		AccessURLs:    []AccessURL{},
-		Additional:    []string{},
+	// The saved file is authoritative for the mode the next start will use; the
+	// running process only tells whether that mode is already active.
+	saved, savedOK := loadSavedSettings()
+	mode, remoteURL := appsettings.ModeLocal, ""
+	if savedOK {
+		mode = saved.Mode
+		if mode == "" {
+			mode = appsettings.ModeLocal
+		}
+		if mode == appsettings.ModeRemote {
+			remoteURL = saved.RemoteURL
+		}
 	}
+	st := State{
+		Mode:            mode,
+		RemoteURL:       remoteURL,
+		RestartRequired: remoteURL != desktop.remoteHubURL(),
+		ConfigPath:      desktop.settingsPath,
+		StartupError:    desktop.startupError(),
+		TrayAvailable:   desktop.trayAvailable,
+		URLs:            []string{},
+		AccessURLs:      []AccessURL{},
+		Additional:      []string{},
+	}
+	if !savedOK {
+		// No usable file: report what this process actually does.
+		if remote := desktop.remoteHubURL(); remote != "" {
+			st.Mode, st.RemoteURL = appsettings.ModeRemote, remote
+		}
+	}
+	remote := st.Mode == appsettings.ModeRemote
 	list, listErr := network.List()
 	for _, i := range list {
 		st.Interfaces = append(st.Interfaces, InterfaceOption{
@@ -106,7 +149,7 @@ func (s *SettingsService) GetState() (State, error) {
 	st.HasTailscale = network.HasTailscale(list)
 	st.DualAvailable = dualModeAvailable(list)
 
-	if s.manager != nil {
+	if !remote && s.manager != nil {
 		snap := s.manager.Status()
 		st.Running = snap.Running
 		st.URL = snap.URL
@@ -118,14 +161,21 @@ func (s *SettingsService) GetState() (State, error) {
 			st.LastError = hubmgr.FriendlyError(errors.New(snap.LastError))
 		}
 	}
-	// When the Hub failed to start there is no running config; show what the
-	// user asked for so the failing address/port is visible and editable.
-	if !st.Running && desktop.settingsPath != "" {
-		if saved, found, err := appsettings.Load(desktop.settingsPath); err == nil && found {
-			st.BindAddress = saved.BindAddress
-			st.Port = saved.Port
-			st.Additional = append([]string{}, saved.AdditionalBindAddresses...)
-		}
+	// In remote mode this process owns no Hub, so nothing here is running: the
+	// window must not show local URLs that do not exist.
+	if remote {
+		st.Running = false
+		st.URL = ""
+		st.URLs = nil
+		st.AccessURLs = nil
+	}
+	// When the Hub failed to start (or does not exist in remote mode) there is
+	// no running config; show what the user asked for so the failing or hidden
+	// address/port stays visible and editable.
+	if !st.Running && savedOK {
+		st.BindAddress = saved.BindAddress
+		st.Port = saved.Port
+		st.Additional = append([]string{}, saved.AdditionalBindAddresses...)
 	}
 	st.DualMode = len(st.Additional) > 0
 	// Only actual bound URLs are shown as usable. Configured addresses that are
@@ -133,7 +183,9 @@ func (s *SettingsService) GetState() (State, error) {
 	if st.Running {
 		st.AccessURLs = describeAccessURLs(list, st.URLs)
 	}
-	if st.BindAddress != "" {
+	// The proxy advice is about reaching this machine's Hub from a phone; in
+	// remote mode there is no local listener to reach.
+	if st.BindAddress != "" && !remote {
 		host := st.BindAddress
 		if inbox := preferredAccessURL(list, st.URLs); inbox != "" {
 			if u, err := url.Parse(inbox); err == nil {
@@ -143,10 +195,159 @@ func (s *SettingsService) GetState() (State, error) {
 		st.ProxyWarning = desktopProxyWarning(host)
 	}
 	st.AccessibilityWarning = desktopAccessibilityWarning(desktop.a11yFallbackReason())
+	// Only a local Hub has this window as a device: in remote mode the token is
+	// either absent or belongs to another Hub's database.
+	if !remote && savedOK && saved.DesktopDeviceToken != "" {
+		st.LocalDeviceName = desktopDeviceName()
+	}
 	if listErr != nil && st.LastError == "" {
 		st.LastError = listErr.Error()
 	}
 	return st, nil
+}
+
+// loadSavedSettings reads desktop.json for the window. A missing or unusable
+// file is not an error here: the window still has to render, and GetState falls
+// back to what this process actually does.
+func loadSavedSettings() (appsettings.Settings, bool) {
+	if desktop.settingsPath == "" {
+		return appsettings.Settings{}, false
+	}
+	saved, found, err := appsettings.Load(desktop.settingsPath)
+	if err != nil || !found {
+		if err != nil {
+			log.Printf("read desktop settings for state: %v", err)
+		}
+		return appsettings.Settings{}, false
+	}
+	return saved, true
+}
+
+// remoteHubMode reports that no local Hub exists to drive: either this process
+// already runs in remote mode, or an older build saved remote mode without
+// applying it (until such a file is switched, the local Hub is about to go away).
+// Both cases must answer the pairing/network methods with a readable error
+// instead of pretending to work.
+func (s *SettingsService) remoteHubMode() bool {
+	if s.runningRemote() {
+		return true
+	}
+	saved, found := loadSavedSettings()
+	return found && saved.IsRemote()
+}
+
+// runningRemote reports whether this process currently runs against a remote Hub
+// (and owns no local one).
+func (s *SettingsService) runningRemote() bool { return desktop.remoteHubURL() != "" }
+
+// errRemoteMode is the settings bridge's answer in remote mode: this machine
+// runs no Hub, so pairing and network changes belong to the remote one.
+func errRemoteMode() error {
+	return errors.New("当前为远程 Hub 模式，本机没有 Hub；请先在「运行模式」里切回「本机 Hub」再操作")
+}
+
+// ApplyMode saves the run mode (local Hub or an existing remote Hub) and applies
+// it to the running process right away: switching local -> remote stops the
+// in-process Hub, switching remote -> local starts it, and both reload the inbox
+// window and every other URL consumer (tray, native menu, browser) without a
+// restart. The returned State already reports the new mode with
+// restart_required=false. When a step fails the saved settings stay as they were
+// and the process keeps the mode it was working in.
+func (s *SettingsService) ApplyMode(mode, remoteURL string) (State, error) {
+	// A switch stops/starts the Hub and reloads the window: two switches must
+	// never interleave. remoteURL readers do not take this lock, so tray/JS
+	// callbacks are never blocked behind a switch in progress.
+	desktop.modeSwitch.Lock()
+	defer desktop.modeSwitch.Unlock()
+
+	saved, found := loadSavedSettings()
+	if !found {
+		// Seed the listen selection from the running Hub (or the built-in
+		// default) so saving a mode never loses the address/port the user uses.
+		saved = appsettings.Default()
+		if s.manager != nil {
+			if cfg := s.manager.Config(); cfg.BindAddress != "" && cfg.Port != 0 {
+				saved.BindAddress = cfg.BindAddress
+				saved.Port = cfg.Port
+				saved.AdditionalBindAddresses = append([]string(nil), cfg.AdditionalBindAddresses...)
+			}
+		}
+	}
+	next := saved
+	next.Mode = strings.TrimSpace(mode)
+	next.RemoteURL = remoteURL
+	next = next.Normalize()
+	// One validation path for the mode and the remote URL: appsettings owns the
+	// rules, the bridge never keeps a copy of them.
+	if err := next.Validate(); err != nil {
+		return s.mustState(), err
+	}
+
+	// Idempotent: this process already runs exactly this mode and address, so
+	// only the file has to agree (saving it again in that case is not needed and
+	// no Hub is stopped or started).
+	if s.runningRemote() == next.IsRemote() && desktop.remoteHubURL() == next.RemoteURL {
+		if !found || !sameSettings(saved, next) {
+			if err := appsettings.Save(desktop.settingsPath, next); err != nil {
+				return s.mustState(), fmt.Errorf("保存运行模式失败：%w", err)
+			}
+		}
+		return s.mustState(), nil
+	}
+
+	if next.IsRemote() {
+		return s.switchToRemote(next)
+	}
+	return s.switchToLocal(next)
+}
+
+// switchToRemote stops this process's Hub and points the shell at the remote one.
+// The runtime mode, the window and the saved file only change once the Hub is
+// really down, so a failed stop leaves the app working in local mode.
+func (s *SettingsService) switchToRemote(next appsettings.Settings) (State, error) {
+	if s.manager != nil {
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		err := s.manager.Stop(ctx)
+		cancel()
+		if err != nil {
+			return s.mustState(), fmt.Errorf("停止本机 Hub 失败：%s", hubmgr.FriendlyError(err))
+		}
+	}
+	// From here on the Hub is gone: finish the switch so the shell is never left
+	// half-way, then report a save failure separately.
+	desktop.setRemoteHubURL(next.RemoteURL)
+	desktop.setStartupError("")
+	// reloadInbox also refreshes hubOrigin, so the file-drop bridge and the
+	// native message guard follow the new origin instead of the old one.
+	desktop.reloadInbox(next.RemoteURL)
+	if err := appsettings.Save(desktop.settingsPath, next); err != nil {
+		return s.mustState(), fmt.Errorf("本机 Hub 已停止并切到远程 Hub，但保存桌面设置失败：%w", err)
+	}
+	return s.mustState(), nil
+}
+
+// switchToLocal starts this process's Hub from the saved listen selection
+// (BindAddress/Port/Additional). A failed start keeps the runtime remote mode,
+// the remote inbox window and the saved settings exactly as they were.
+func (s *SettingsService) switchToLocal(next appsettings.Settings) (State, error) {
+	if err := startHub(s.manager, next, desktop.hubConfigPath); err != nil {
+		return s.mustState(), fmt.Errorf("启动本机 Hub 失败：%s", hubmgr.FriendlyError(err))
+	}
+	desktop.setRemoteHubURL("")
+	desktop.setStartupError("")
+	desktop.reloadInbox(preferredHubURL(s.manager))
+	if err := appsettings.Save(desktop.settingsPath, next); err != nil {
+		return s.mustState(), fmt.Errorf("本机 Hub 已启动，但保存桌面设置失败：%w", err)
+	}
+	return s.mustState(), nil
+}
+
+// sameSettings compares two normalized settings field by field (Settings holds a
+// slice, so it is not comparable with ==).
+func sameSettings(a, b appsettings.Settings) bool {
+	return a.Mode == b.Mode && a.RemoteURL == b.RemoteURL &&
+		a.BindAddress == b.BindAddress && a.Port == b.Port &&
+		slices.Equal(a.AdditionalBindAddresses, b.AdditionalBindAddresses)
 }
 
 // desktopAccessibilityWarning turns the recorded bridge-disable reason into a
@@ -245,6 +446,9 @@ func (s *SettingsService) ApplyDualNetwork(lanAddress, tailscaleAddress string, 
 // success. If the new selection cannot be bound, the previous configuration is
 // started again so the app is not left without a Hub.
 func (s *SettingsService) applyNetwork(bindAddress string, additional []string, port int) (State, error) {
+	if s.remoteHubMode() {
+		return s.mustState(), errRemoteMode()
+	}
 	if err := appsettings.ValidateBindAddress(bindAddress); err != nil {
 		return s.mustState(), err
 	}
@@ -299,7 +503,7 @@ func (s *SettingsService) applyNetwork(bindAddress string, additional []string, 
 		return s.mustState(), fmt.Errorf("Hub 已按新地址启动，但保存桌面设置失败：%w", err)
 	}
 
-	desktop.lastStartupErr = ""
+	desktop.setStartupError("")
 	if desktop.app != nil {
 		inbox := s.manager.URL()
 		if fresh, err := network.List(); err == nil {
@@ -364,6 +568,9 @@ func pairingError(err error) error {
 // lifetime, one use, leading zeros kept). It is only returned to this window:
 // there is no HTTP endpoint that generates a code, and it is never logged.
 func (s *SettingsService) CreatePairingCode() (PairingCode, error) {
+	if s.remoteHubMode() {
+		return PairingCode{}, errRemoteMode()
+	}
 	if s.manager == nil {
 		return PairingCode{}, errHubNotRunning()
 	}
@@ -374,9 +581,32 @@ func (s *SettingsService) CreatePairingCode() (PairingCode, error) {
 	return PairingCode{Code: code.Code, ExpiresAt: code.ExpiresAt}, nil
 }
 
+// PairingCodeActive reports whether the running Hub still has an unused,
+// unexpired pairing code. The settings window polls it so a code a phone has
+// just consumed is removed within one refresh instead of waiting for the 120s
+// countdown; only a boolean crosses the bridge.
+func (s *SettingsService) PairingCodeActive() (bool, error) {
+	if s.remoteHubMode() {
+		return false, errRemoteMode()
+	}
+	if s.manager == nil {
+		return false, errHubNotRunning()
+	}
+	active, err := s.manager.PairingCodeActive()
+	if err != nil {
+		return false, pairingError(err)
+	}
+	return active, nil
+}
+
 // ListPairedDevices returns the devices paired with this Hub so the settings
-// window can show their names and times and offer revocation.
+// window can show their names and times and offer revocation. The window's own
+// device (the one this process logs in with, see LocalDeviceName) is left out on
+// purpose: it is shown as a separate, non-revocable row.
 func (s *SettingsService) ListPairedDevices() ([]PairedDevice, error) {
+	if s.remoteHubMode() {
+		return nil, errRemoteMode()
+	}
 	if s.manager == nil {
 		return nil, errHubNotRunning()
 	}
@@ -384,8 +614,22 @@ func (s *SettingsService) ListPairedDevices() ([]PairedDevice, error) {
 	if err != nil {
 		return nil, pairingError(err)
 	}
+	localID := ""
+	if saved, found := loadSavedSettings(); found {
+		localID = saved.DesktopDeviceID
+	}
+	return visibleDevices(devices, localID), nil
+}
+
+// visibleDevices maps the Hub's device records to the settings view and drops
+// the local window's own record. It is a plain function so the filtering rule
+// can be tested without a running Hub.
+func visibleDevices(devices []hub.PairedDevice, localDeviceID string) []PairedDevice {
 	out := make([]PairedDevice, 0, len(devices))
 	for _, d := range devices {
+		if localDeviceID != "" && d.ID == localDeviceID {
+			continue
+		}
 		out = append(out, PairedDevice{
 			ID:         d.ID,
 			Name:       d.Name,
@@ -393,12 +637,15 @@ func (s *SettingsService) ListPairedDevices() ([]PairedDevice, error) {
 			LastSeenAt: d.LastSeenAt,
 		})
 	}
-	return out, nil
+	return out
 }
 
 // RevokePairedDevice revokes one paired device through the running Hub, which
 // also invalidates its HTTP session and open WebSocket.
 func (s *SettingsService) RevokePairedDevice(id string) error {
+	if s.remoteHubMode() {
+		return errRemoteMode()
+	}
 	if s.manager == nil {
 		return errHubNotRunning()
 	}
@@ -413,9 +660,10 @@ func (s *SettingsService) OpenInbox() {
 	desktop.showInbox()
 }
 
-// OpenInBrowser opens the running Hub URL in the default browser.
+// OpenInBrowser opens the inbox URL in the default browser: the remote Hub in
+// remote mode, otherwise the running local Hub.
 func (s *SettingsService) OpenInBrowser() (string, error) {
-	hubURL := preferredHubURL(s.manager)
+	hubURL := desktop.inboxBaseURL()
 	if hubURL == "" {
 		return "", errors.New("Hub 未运行")
 	}

@@ -124,6 +124,10 @@ type Options struct {
 	DiscoveryEnabled *bool
 	// AllowedHosts overrides the Host allowlist. nil keeps configuration.
 	AllowedHosts []string
+	// Logger overrides the Hub's own logger. nil keeps the default stderr
+	// logger (newLogger). Embedders such as the desktop pass theirs so Hub
+	// records land in the same sink as the shell's.
+	Logger *slog.Logger
 }
 
 // Hub is one embeddable FlowDrop Hub instance. Methods are safe for concurrent
@@ -208,7 +212,10 @@ func New(opts Options) (*Hub, error) {
 		return nil, err
 	}
 
-	log := newLogger()
+	log := opts.Logger
+	if log == nil {
+		log = newLogger()
+	}
 	h := &Hub{
 		cfg:      cfg,
 		log:      log,
@@ -617,6 +624,11 @@ func DefaultConfigPath() string {
 	}
 	if v := os.Getenv("XDG_CONFIG_HOME"); v != "" {
 		return filepath.Join(v, "flowdrop", "config.json")
+	}
+	// os.UserConfigDir is exactly $XDG_CONFIG_HOME or ~/.config on Linux, so
+	// this matches the manual join below, and %AppData% on Windows.
+	if dir, err := os.UserConfigDir(); err == nil {
+		return filepath.Join(dir, "flowdrop", "config.json")
 	}
 	home, err := os.UserHomeDir()
 	if err != nil {

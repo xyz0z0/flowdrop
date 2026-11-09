@@ -44,7 +44,7 @@
 - **复制降级**：明文 HTTP 或剪贴板权限被拒时，复制失败会展开可选中的文本
   （正文/链接/SHA-256），不抛未捕获异常、不谎报成功。
 
-**Linux 桌面 App 已交付（Wails v3.1.0）**
+**桌面 App 已交付（Linux + Windows，Wails v3.1.0）**
 
 - 双击启动即在本进程内拉起**同一个 Go Hub**（`flowdrop/pkg/hub`，不另起进程、
   不复制 Hub 逻辑），直接打开现有 React 收件箱窗口。
@@ -77,6 +77,15 @@
   （安装到 `~/.local`，不需 sudo，不写开机自启）。构建与运行说明见
   [docs/DEPLOY.md §16](docs/DEPLOY.md)；桌面双监听实测见
   [docs/VERIFICATION.md §14](docs/VERIFICATION.md)。
+- **界面（2026-11-09 改版）**：设置窗口与 Web 收件箱统一视觉，浅色/深色跟随系统
+  （`prefers-color-scheme`），收件箱改为单卡片行式列表，操作按钮与状态胶囊统一尺寸。
+- **下载与同名文件**：Linux 桌面下载重名时自动落成 `name (1).png`、`name (2).png`，
+  不覆盖也不删除已有文件（见 [DEPLOY §16.12](docs/DEPLOY.md)）。
+- **Windows 桌面版**：同一套桌面代码交叉编译为 `dist/flowdrop-windows-{amd64,arm64}.zip`
+  （单 exe，已写入图标、`0.1.0.0` 版本信息与 PerMonitorV2 DPI manifest）。功能与 Linux
+  一致，差异只在平台适配层：拖拽走 WebView2 原生 HTML5、托盘由系统通知区提供（关闭
+  窗口必定可收进托盘）、WebView 代理直连用 `--no-proxy-server` 启动参数。构建、打包与
+  已知限制见 [docs/DEPLOY.md §18](docs/DEPLOY.md)。
 
 **Android 原生客户端已交付**
 
@@ -92,7 +101,7 @@
 
 - 内容自动过期（默认 7 天等），仅保留 `expires_at` 字段但**不自动删除**，
   见 PRD §15.3。
-- 扫码配对、Tailscale 管理 API 自动枚举设备、全网段扫描、Windows/macOS 桌面版、
+- 扫码配对、Tailscale 管理 API 自动枚举设备、全网段扫描、macOS 桌面版、
   开机自启、Web 跨 origin 自动切换登录态、多个 Hub 实例。
 - APK 自动发布监听目录、搜索、批量传输、断点续传。
 - 自建 NAT 穿透、公网匿名分享、多用户/团队协作、端到端加密。

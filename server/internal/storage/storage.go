@@ -12,7 +12,6 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
-	"syscall"
 	"time"
 )
 
@@ -122,11 +121,7 @@ func (s *Store) RemoveTemp(path string) error {
 
 // AvailableBytes reports free bytes on the filesystem holding the data dir.
 func (s *Store) AvailableBytes() (uint64, error) {
-	var st syscall.Statfs_t
-	if err := syscall.Statfs(s.root, &st); err != nil {
-		return 0, err
-	}
-	return st.Bavail * uint64(st.Bsize), nil
+	return availableBytes(s.root)
 }
 
 // CleanupTemp removes temp files older than maxAge that are not active.
@@ -243,11 +238,5 @@ func validKey(key string) bool {
 	return true
 }
 
-func syncDir(dir string) error {
-	d, err := os.Open(dir)
-	if err != nil {
-		return err
-	}
-	defer d.Close()
-	return d.Sync()
-}
+// syncDir is defined per platform in sync_unix.go (real fsync) and
+// sync_windows.go (directory fsync is not supported by Windows).

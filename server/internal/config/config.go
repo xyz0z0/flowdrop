@@ -9,6 +9,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"time"
@@ -77,9 +78,18 @@ func Default() Config {
 	}
 }
 
+// defaultDataDir picks the data directory: XDG_DATA_HOME, then on Windows
+// %LocalAppData%, then ~/.local/share.
 func defaultDataDir() string {
 	if v := os.Getenv("XDG_DATA_HOME"); v != "" {
 		return filepath.Join(v, "flowdrop")
+	}
+	// Windows has no XDG_DATA_HOME and no ~/.local/share convention; per-user
+	// application data belongs under %LocalAppData% (roaming-free AppData).
+	if runtime.GOOS == "windows" {
+		if dir, err := os.UserCacheDir(); err == nil {
+			return filepath.Join(dir, "flowdrop")
+		}
 	}
 	home, err := os.UserHomeDir()
 	if err != nil {

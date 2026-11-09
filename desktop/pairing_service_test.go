@@ -21,6 +21,9 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"flowdrop/desktop/internal/appsettings"
+	"flowdrop/pkg/hub"
 )
 
 func pairingHTTP(t *testing.T, method, url, body string, mutate ...func(*http.Request)) (int, []byte) {
@@ -88,6 +91,11 @@ func TestSettingsPairingBridgeEndToEnd(t *testing.T) {
 	if d := time.Until(time.UnixMilli(code.ExpiresAt)); d < 60*time.Second || d > 130*time.Second {
 		t.Fatalf("code expiry %v is not ~120s away", d)
 	}
+	// The settings page polls this to know whether the code it displays is
+	// still usable; right after creation it must say yes.
+	if active, err := svc.PairingCodeActive(); err != nil || !active {
+		t.Fatalf("PairingCodeActive after create = %v, %v; want true, nil", active, err)
+	}
 
 	// A phone pairs with that code over the frozen HTTP route.
 	base := m.URL()
@@ -106,6 +114,11 @@ func TestSettingsPairingBridgeEndToEnd(t *testing.T) {
 	}
 	if paired.DeviceID == "" || paired.DeviceToken == "" {
 		t.Fatalf("pair response missing device id/token: %s", body)
+	}
+	// The code is consumed now, so the local bridge reports it inactive well
+	// before its 120s deadline: that is what hides the code in the UI.
+	if active, err := svc.PairingCodeActive(); err != nil || active {
+		t.Fatalf("PairingCodeActive after pair = %v, %v; want false, nil", active, err)
 	}
 
 	// The settings list shows the device with its name and both timestamps.
@@ -158,6 +171,9 @@ func TestSettingsPairingBridgeEndToEnd(t *testing.T) {
 	if _, err := svc.CreatePairingCode(); err == nil || !strings.Contains(err.Error(), "Hub 未运行") {
 		t.Fatalf("CreatePairingCode with stopped Hub = %v, want the Hub-not-running message", err)
 	}
+	if _, err := svc.PairingCodeActive(); err == nil || !strings.Contains(err.Error(), "Hub 未运行") {
+		t.Fatalf("PairingCodeActive with stopped Hub = %v, want the Hub-not-running message", err)
+	}
 	if _, err := svc.ListPairedDevices(); err == nil || !strings.Contains(err.Error(), "Hub 未运行") {
 		t.Fatalf("ListPairedDevices with stopped Hub = %v, want the Hub-not-running message", err)
 	}
@@ -197,7 +213,7 @@ func TestSettingsAssetsPairDevicesInsteadOfPasswords(t *testing.T) {
 		t.Fatal(err)
 	}
 	page := string(html)
-	for _, want := range []string{`id="pair-add"`, `id="pairing-code-value"`, `id="device-list"`} {
+	for _, want := range []string{`id="pair-add"`, `id="pairing-code-value"`, `id="pairing-status"`, `id="device-list"`} {
 		if !strings.Contains(page, want) {
 			t.Errorf("settings page is missing %s", want)
 		}
@@ -223,5 +239,120 @@ func TestSettingsAssetsPairDevicesInsteadOfPasswords(t *testing.T) {
 	}
 	if !strings.Contains(script, "clearPairingCode") {
 		t.Error("settings script has no code-clearing path")
+	}
+	// A consumed code must be hidden by the authoritative local answer, with a
+	// success banner, not by guessing from the countdown or the device list.
+	for _, want := range []string{"PairingCodeActive", "pairing-status", "配对成功，配对码已使用并自动隐藏。"} {
+		if !strings.Contains(script, want) {
+			t.Errorf("settings script is missing %q", want)
+		}
+	}
+}
+
+// TestVisibleDevicesHidesLocalWindow pins the filtering rule: the window's own
+// device record never appears in the revocable list (it is shown as a separate
+// informational row instead).
+func TestVisibleDevicesHidesLocalWindow(t *testing.T) {
+	devices := []hub.PairedDevice{
+		{ID: "dev_local", Name: "本机桌面 · host", CreatedAt: 1, LastSeenAt: 2},
+		{ID: "dev_phone", Name: "手机", CreatedAt: 3, LastSeenAt: 4},
+	}
+	got := visibleDevices(devices, "dev_local")
+	if len(got) != 1 || got[0].ID != "dev_phone" || got[0].Name != "手机" {
+		t.Fatalf("visibleDevices = %+v, want only the phone", got)
+	}
+	if len(visibleDevices(devices, "")) != 2 {
+		t.Fatal("visibleDevices without a saved local id dropped a device")
+	}
+	if len(visibleDevices(devices, "dev_unknown")) != 2 {
+		t.Fatal("visibleDevices dropped a device that is not the local window")
+	}
+	if got := visibleDevices(nil, "dev_local"); got == nil {
+		t.Fatal("visibleDevices returned nil; the settings page expects an array")
+	}
+}
+
+// TestListPairedDevicesHidesLocalWindow runs the same rule through the real
+// bridge: two devices exist on the Hub, the desktop.json identifies one of them
+// as this window, and only the other one is listable/revocable.
+func TestListPairedDevicesHidesLocalWindow(t *testing.T) {
+	svc, m, _ := newTestService(t)
+	pair := func(name string) (string, string) {
+		code, err := m.CreatePairingCode()
+		if err != nil {
+			t.Fatalf("CreatePairingCode: %v", err)
+		}
+		deviceID, token, err := pairDesktopDevice(&http.Client{Timeout: 10 * time.Second}, m.URL(), name, code.Code)
+		if err != nil {
+			t.Fatalf("pair %q: %v", name, err)
+		}
+		return deviceID, token
+	}
+	localID, localToken := pair(desktopDeviceName())
+	pair("手机")
+	if err := appsettings.Save(desktop.settingsPath, appsettings.Settings{
+		BindAddress:        "127.0.0.1",
+		Port:               8080,
+		DesktopDeviceID:    localID,
+		DesktopDeviceToken: localToken,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	devices, err := svc.ListPairedDevices()
+	if err != nil {
+		t.Fatalf("ListPairedDevices: %v", err)
+	}
+	if len(devices) != 1 || devices[0].Name != "手机" {
+		t.Fatalf("ListPairedDevices = %+v, want only the phone (the local window is not revocable)", devices)
+	}
+}
+
+// TestGetStateLocalDeviceName covers the informational row: it is set only in
+// local mode and only once a device token is saved.
+func TestGetStateLocalDeviceName(t *testing.T) {
+	svc, _, _ := newTestService(t)
+	st, err := svc.GetState()
+	if err != nil {
+		t.Fatalf("GetState: %v", err)
+	}
+	if st.LocalDeviceName != "" {
+		t.Fatalf("local_device_name = %q without a saved token, want empty", st.LocalDeviceName)
+	}
+	if err := appsettings.Save(desktop.settingsPath, appsettings.Settings{
+		BindAddress:        "127.0.0.1",
+		Port:               8080,
+		DesktopDeviceID:    "dev_local",
+		DesktopDeviceToken: testDeviceToken,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	st, err = svc.GetState()
+	if err != nil {
+		t.Fatalf("GetState: %v", err)
+	}
+	if st.LocalDeviceName != desktopDeviceName() {
+		t.Fatalf("local_device_name = %q, want %q", st.LocalDeviceName, desktopDeviceName())
+	}
+	// Remote mode: the token belongs to no Hub this process owns, so the row
+	// must stay empty even though one is stored.
+	if err := appsettings.Save(desktop.settingsPath, appsettings.Settings{
+		Mode:               appsettings.ModeRemote,
+		RemoteURL:          "http://192.168.1.9:8080",
+		BindAddress:        "127.0.0.1",
+		Port:               8080,
+		DesktopDeviceID:    "dev_local",
+		DesktopDeviceToken: testDeviceToken,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	st, err = svc.GetState()
+	if err != nil {
+		t.Fatalf("GetState in remote mode: %v", err)
+	}
+	if st.Mode != appsettings.ModeRemote {
+		t.Fatalf("mode = %q, want remote", st.Mode)
+	}
+	if st.LocalDeviceName != "" {
+		t.Fatalf("local_device_name = %q in remote mode, want empty", st.LocalDeviceName)
 	}
 }

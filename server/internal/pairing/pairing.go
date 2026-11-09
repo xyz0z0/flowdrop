@@ -173,6 +173,23 @@ func (s *Store) createCode(now time.Time, gen func() (string, error)) (Code, err
 	return Code{Code: code, ExpiresAt: expiresAt}, nil
 }
 
+// ActiveCode reports whether a code that can still be used exists: a row that
+// is neither consumed nor expired. Only a boolean leaves the store, so the
+// settings window can drop a code a phone has just consumed without ever
+// reading the code or its hash back. An empty table is a normal (false, nil).
+func (s *Store) ActiveCode(now time.Time) (bool, error) {
+	var one int
+	err := s.db.QueryRow(`SELECT 1 FROM pairing_codes WHERE used_at IS NULL AND expires_at > ? LIMIT 1`,
+		now.UnixMilli()).Scan(&one)
+	if errors.Is(err, sql.ErrNoRows) {
+		return false, nil
+	}
+	if err != nil {
+		return false, fmt.Errorf("check active pairing code: %w", err)
+	}
+	return true, nil
+}
+
 // Pair consumes code and registers a device. Exactly one caller can win per
 // code: consumption is a conditional UPDATE whose affected-row count decides
 // the winner, so concurrent and cross-process attempts are safe.

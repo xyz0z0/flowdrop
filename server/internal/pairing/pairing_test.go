@@ -94,6 +94,48 @@ func TestPairRejectsExpiredCode(t *testing.T) {
 	}
 }
 
+// TestActiveCodeTracksConsumptionAndExpiry covers the read-only local bridge
+// the settings window polls: it must answer from the store itself, so a code a
+// phone consumed disappears at once instead of waiting out the countdown.
+func TestActiveCodeTracksConsumptionAndExpiry(t *testing.T) {
+	s, _ := newStore(t)
+
+	// No code at all is a normal "nothing to show", not an error.
+	if active, err := s.ActiveCode(baseTime); err != nil || active {
+		t.Fatalf("ActiveCode on empty store = %v, %v; want false, nil", active, err)
+	}
+
+	code, err := s.CreateCode(baseTime)
+	if err != nil {
+		t.Fatalf("create code: %v", err)
+	}
+	if active, err := s.ActiveCode(baseTime.Add(time.Second)); err != nil || !active {
+		t.Fatalf("ActiveCode with a fresh code = %v, %v; want true, nil", active, err)
+	}
+
+	// Pairing consumes the code, so the next poll says it is gone even though
+	// the 120s deadline has not passed yet.
+	if _, _, err := s.Pair(code.Code, "phone", baseTime.Add(2*time.Second)); err != nil {
+		t.Fatalf("pair: %v", err)
+	}
+	if active, err := s.ActiveCode(baseTime.Add(3 * time.Second)); err != nil || active {
+		t.Fatalf("ActiveCode after pair = %v, %v; want false, nil", active, err)
+	}
+
+	// An untouched code stops being active at expires_at, matching Pair's own
+	// `expires_at > now` boundary.
+	second, err := s.CreateCode(baseTime)
+	if err != nil {
+		t.Fatalf("create second code: %v", err)
+	}
+	if active, err := s.ActiveCode(time.UnixMilli(second.ExpiresAt - 1)); err != nil || !active {
+		t.Fatalf("ActiveCode just before expires_at = %v, %v; want true, nil", active, err)
+	}
+	if active, err := s.ActiveCode(time.UnixMilli(second.ExpiresAt)); err != nil || active {
+		t.Fatalf("ActiveCode at expires_at = %v, %v; want false, nil", active, err)
+	}
+}
+
 func TestPairGlobalLockAfterFiveWrongCodes(t *testing.T) {
 	s, _ := newStore(t)
 	code, err := s.CreateCode(baseTime)

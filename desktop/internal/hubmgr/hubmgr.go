@@ -7,6 +7,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"net"
 	"strings"
 	"sync"
@@ -73,6 +74,9 @@ type Manager struct {
 	cfg     Config
 	hub     *hub.Hub
 	lastErr string
+	// Logger is handed to every Hub this manager creates so Hub records use
+	// the embedder's sink. nil keeps the Hub's own default (stderr) logger.
+	Logger *slog.Logger
 	// lifetime is the Hub's context: Hub.Start treats it as the Hub lifetime
 	// and shuts down when it is cancelled. The manager owns it so a caller's
 	// short-lived startup context can never stop a healthy Hub later.
@@ -123,6 +127,8 @@ func (m *Manager) startLocked(cfg Config) error {
 		// Leave discovery at the Hub's automatic default: it still refuses to
 		// advertise loopback, Tailscale or wildcard binds.
 		DiscoveryEnabled: nil,
+		// nil keeps the Hub's default stderr logger.
+		Logger: m.Logger,
 	})
 	if err != nil {
 		m.lastErr = err.Error()
@@ -225,6 +231,19 @@ func (m *Manager) CreatePairingCode() (hub.PairingCode, error) {
 		return hub.PairingCode{}, hub.ErrClosed
 	}
 	return m.hub.CreatePairingCode()
+}
+
+// PairingCodeActive reports whether the running Hub still has a usable local
+// pairing code, so the settings window can hide a consumed one. A manager
+// without a running Hub reports hub.ErrClosed instead of answering as if no
+// code existed.
+func (m *Manager) PairingCodeActive() (bool, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.hub == nil {
+		return false, hub.ErrClosed
+	}
+	return m.hub.PairingCodeActive()
 }
 
 // ListPairedDevices returns the devices paired with the running Hub, with their

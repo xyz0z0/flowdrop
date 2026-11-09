@@ -6,6 +6,7 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -26,6 +27,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -62,7 +64,11 @@ fun ItemCard(
     val context = LocalContext.current
     var confirming by remember { mutableStateOf(false) }
     var enlarged by remember { mutableStateOf(false) }
+    // Per-item: survives list recycling and returns with the same item id.
+    var textExpanded by rememberSaveable(item.id) { mutableStateOf(false) }
     val clipboard = stringResource(R.string.action_copied)
+    // Links keep their 3-line preview; only plain text entries can be folded.
+    val longText = item.type == "text" && needsTextExpand(item.text.orEmpty())
 
     Card(
         modifier = Modifier.fillMaxWidth(),
@@ -82,7 +88,22 @@ fun ItemCard(
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis,
+                    modifier = Modifier.weight(1f),
                 )
+                if (longText) {
+                    TextButton(
+                        onClick = { textExpanded = !textExpanded },
+                        contentPadding = PaddingValues(horizontal = 8.dp, vertical = 0.dp),
+                    ) {
+                        Text(
+                            stringResource(
+                                if (textExpanded) R.string.action_collapse_text
+                                else R.string.action_expand_text,
+                            ),
+                            style = MaterialTheme.typography.labelMedium,
+                        )
+                    }
+                }
             }
 
             when {
@@ -91,7 +112,11 @@ fun ItemCard(
                     Text(
                         item.text.orEmpty(),
                         style = MaterialTheme.typography.bodyLarge,
-                        maxLines = if (item.isLink) 3 else 30,
+                        maxLines = when {
+                            item.isLink -> 3
+                            textExpanded -> Int.MAX_VALUE
+                            else -> 6
+                        },
                         overflow = TextOverflow.Ellipsis,
                     )
                     if (item.isLink) {

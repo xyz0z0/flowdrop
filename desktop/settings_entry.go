@@ -97,7 +97,7 @@ const desktopSettingsEntryJS = `(function () {
   var BTN_STYLE = "font:inherit;font-size:0.8rem;line-height:1.2;padding:0.35rem 0.7rem;" +
     "border:1px solid var(--border,#c9ced6);border-radius:8px;background:var(--surface,#fff);" +
     "color:var(--text,#15181d);cursor:pointer;white-space:nowrap;";
-  var FIXED_STYLE = "position:fixed;top:calc(0.6rem + env(safe-area-inset-top));right:0.7rem;" +
+  var FIXED_STYLE = "position:fixed;top:calc(36px + 0.6rem + env(safe-area-inset-top));right:0.7rem;" +
     "z-index:2147483647;box-shadow:0 1px 3px rgba(0,0,0,0.25);";
 
   function openSettings(ev) {

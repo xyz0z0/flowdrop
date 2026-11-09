@@ -43,3 +43,13 @@ func (s *Store) RevokeDevice(id string) error
 ## 分阶段
 
 PA-01核心、PA-02 Android纯地址选择器、PA-03 Web页并行。PA-04接Hub HTTP/WS与本机API依赖PA-01。PA-05 Android网络/存储与UI按文件再拆，依赖PA-02及冻结接口。PA-06桌面设置依赖PA-04。之后密码入口退役、跨地址定向验证、构建分别派发。每个新任务全新pi，登记TASKS后派发；不并发改同文件。GUI只在独立容器/专用VM，禁止宿主临时DBus/portal/a11y/Xvfb及改KDE/RustDesk。不得自动安装commit/push。
+
+## 2026-11-09 补充：桌面壳窗口免码登录（不改上面的冻结接口）
+
+桌面壳的收件箱窗口加载的是 Hub 真实 HTTP origin，与手机同一套配对/cookie 认证。为免掉"设置窗生成码 → 收件箱输码"的人工步骤（会话 TTL 默认 7 天，桌面会周期性重配），桌面壳把自己当成一个新的 `native` 客户端：
+
+- 启动时用进程内 `CreatePairingCode()` 得到一个码（不显示、不写盘、不写日志，120 秒有效，仍是一次性），由壳自己的 Go HTTP 客户端 `POST /api/v1/auth/pair`，body 带 `native:true`，**不带 Origin**（走服务端对非浏览器客户端的既有放行分支）。
+- 响应里的 `device_token` 存进 `desktop.json`（0600 原子写），是这份配置文件里唯一的凭据。
+- 收件箱窗口每次加载注入一小段脚本：先用 Cookie 查 `GET /api/v1/auth/session`，未认证才用 `Authorization: Bearer <device_token>` 再查一次（该接口在 Bearer 下重发 Cookie，见上文），成功后重载一次页面；`sessionStorage` 有 2 次重载上限，避免 Cookie 收不下时死循环。
+- 因此本机窗口的设备记录长期有效：不再周期性配对；撤销它之后，下次启动会重新配对一次（设置页把它显示为不可撤销的「本机窗口」一行，并从可撤销列表里过滤掉）。
+- 不新增端点、不改错误码、不改 `hub`/`device_id` 语义；手机/浏览器的配对流程完全不变。

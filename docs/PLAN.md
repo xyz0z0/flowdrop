@@ -113,7 +113,7 @@ P1/P2（自动过期、设备管理等）不实现。
 | M5 局域网自动发现 | ✅ Hub 端完成 | mDNS 发布、配置开关、地址/网卡限制、生命周期与真实探针验证完成；Android 发现 UI 与真机待验收 |
 | M6 Linux 桌面 App | ✅ 交付 | Wails v3.1.0 + GTK3；Hub 同进程嵌入；收件箱/设置双窗口、托盘、关闭→托盘、退出停 Hub、地址切换、首次密码、上传/下载/剪贴板/外链均实测；`dist/flowdrop-desktop` 已生成 |
 | M7 桌面 LAN + Tailscale 双监听 | ✅ 交付（本轮） | Hub `additional_listen`/`URLs()` + 桌面双模式；真实 LAN+Tailscale 同端口双地址共享数据/会话/WS；失败回滚；单地址旧方式与 desktop.json 兼容；最终二进制与摘要见 VERIFICATION §14 |
-| 真机验收 | ⏳ 待用户 | Android 原生 App、真实 Wi-Fi 明文 HTTP、移动网络 Tailscale、跨设备自动发现未进行；桌面版仅 Linux，Windows/macOS 未做 |
+| 真机验收 | ⏳ 待用户 | Android 原生 App、真实 Wi-Fi 明文 HTTP、移动网络 Tailscale、跨设备自动发现未进行；桌面版 Linux 与 Windows 均已交付（Windows 见 DEPLOY §18，macOS 未做） |
 | M8 Linux 整窗文件拖拽 | ✅ 已交付，用户确认真机可用 | 修正原生动作协商与异步接收；最新 GTK Wayland 拖入/重复发送与 X11 核心回归通过，下载 SHA 一致；用户确认真实 KDE/Dolphin 拖拽可用，见 VERIFICATION §19；此前扩展场景见 §18 |
 
 详细命令与实际输出、已知限制、待真机验收清单见 `docs/VERIFICATION.md`。

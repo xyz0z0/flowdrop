@@ -120,6 +120,18 @@ func (h *Hub) CreatePairingCode() (PairingCode, error) {
 	return store.CreateCode(time.Now())
 }
 
+// PairingCodeActive reports whether a still-usable local pairing code exists.
+// The settings window polls it so a code that a phone has just consumed
+// disappears within one refresh instead of waiting for its own countdown. Only
+// a boolean crosses the bridge; the code and its hash stay in the store.
+func (h *Hub) PairingCodeActive() (bool, error) {
+	store, err := h.localPairing()
+	if err != nil {
+		return false, err
+	}
+	return store.ActiveCode(time.Now())
+}
+
 // ListPairedDevices returns the paired devices with their names and
 // created/last-seen timestamps. The raw device tokens are never part of this
 // view (the store only keeps hashes).

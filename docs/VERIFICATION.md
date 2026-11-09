@@ -1101,7 +1101,7 @@ dist/flowdrop-desktop
 scripts/install-desktop.sh
 ```
 
-桌面偏好（仅绑定地址+端口）：`${XDG_CONFIG_HOME:-~/.config}/flowdrop/desktop.json`；
+桌面偏好（绑定地址+端口；本机免码登录后另存一个设备令牌，0600）：`${XDG_CONFIG_HOME:-~/.config}/flowdrop/desktop.json`；
 Hub 数据：`${XDG_DATA_HOME:-~/.local/share}/flowdrop/`（与 CLI 共用，靠数据目录独占写锁互斥）。
 
 ### 13.10 回归确认（本轮未破坏既有交付）
