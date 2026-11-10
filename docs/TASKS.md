@@ -1075,3 +1075,10 @@ UX-01 完成并由主 agent 复核（2026-11-10，worker 17min，dispatch `ctx_b
 未验证（单列）：`-tags gtk3` 的 GTK 编译与测试、真实 Wails/WebKitGTK 窗口内「远程 Hub 卡片」warning 观感、真实跨网环境（Windows → Linux 192.168.31.x 不可达 / Tailscale 可达）端到端；本机无 GTK 与宿主机 GUI 实验禁令，本轮不做。
 
 未做：未重建 `dist/` 产物、未安装（构建交付另安排）；未 commit/push。UX-02 现在可以排期（依赖已落地，仍须与 UX-01 串行写 `desktop/service.go`）。
+
+UX-01 交付（主 agent，2026-11-10）：
+
+- 代码：Linux 侧独立复核并落地，`gofmt -l` 无输出；`PKG_CONFIG_PATH` 指向用户 sysroot 后 `go vet -tags gtk3 ./...` 通过、`go test -tags gtk3 -count=1 ./...` 四包全 ok（含新增 8 项探测/网段冲突测试）；`node --check desktop/assets/app.js` 通过。提交 `dbe310e`，已 push 到 `origin/main`。
+- 构建：`scripts/build-desktop-windows.sh` → `dist/flowdrop-desktop.exe` 18,553,344 B，sha256 `b5ed863e40af4fee19e5218c4641013ee39c610894dde83e88f4fc5916ae495c`；经 tailnet 临时 HTTP 送到 Windows `D:\vibe-space\flowdrop\dist\flowdrop-desktop-new.exe`，`certutil` 哈希一致。
+- 未验证：真实窗口内的 warning 观感与"填 LAN 地址 → 报错不保存 / 填 tailnet 地址 → 保存并显示冲突提示"的真实跨网端到端；替换运行中实例需用户手动退出旧进程（PID 25492）后改名换入。
+- Windows 侧 worktree `ux-01-remote-probe` 已 `worktree rm --force` 回收。
