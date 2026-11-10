@@ -50,6 +50,11 @@ type Settings struct {
 	// one: the Tailscale address, while BindAddress is the LAN address. Single
 	// address mode writes no such field at all.
 	AdditionalBindAddresses []string `json:"additional_bind_addresses,omitempty"`
+	// AutoBind asks the Hub to bind every eligible local IPv4 (RFC1918 LAN and
+	// Tailscale CGNAT) on the BindAddress/Port listener's port, rescanning every
+	// few seconds. It owns the complete address set, so it is mutually
+	// exclusive with AdditionalBindAddresses. A missing field means manual mode.
+	AutoBind bool `json:"auto_bind,omitempty"`
 	// DesktopDeviceID is the Hub's record ID for this desktop, learned when the
 	// shell paired itself as a native client. It is not a credential: it is only
 	// used to notice that the saved device was revoked or replaced.
@@ -71,10 +76,12 @@ var (
 )
 
 // Default returns the starting point used before the user ever saved settings:
-// local mode on loopback and 8080. The caller normally replaces BindAddress
-// with a detected LAN or Tailscale address.
+// local mode on loopback and 8080, with auto binding on so a fresh install
+// serves every local address (LAN, Tailscale and container bridges) instead of
+// making the user pick addresses by hand. The caller normally replaces
+// BindAddress with a detected LAN or Tailscale address.
 func Default() Settings {
-	return Settings{Mode: ModeLocal, BindAddress: "127.0.0.1", Port: 8080}
+	return Settings{Mode: ModeLocal, BindAddress: "127.0.0.1", Port: 8080, AutoBind: true}
 }
 
 // IsRemote reports whether the desktop shell should connect to an existing Hub
@@ -208,6 +215,12 @@ func Save(path string, s Settings) error {
 	return os.Rename(tmpName, path)
 }
 
+// ErrAutoBindWithAdditional refuses a saved selection that asks for both auto
+// binding and an explicit extra address: auto binding already covers every
+// eligible local address, so an extra one would be a second, contradicting
+// source of truth.
+var ErrAutoBindWithAdditional = errors.New("自动绑定模式下不能再选额外地址（自动绑定会覆盖本机所有可用局域网/Tailscale 地址）")
+
 // Validate rejects values the Hub or the desktop window cannot use: a wildcard
 // bind would expose every interface, and a non-IPv4 bind is out of scope for
 // this Linux desktop milestone. Additional addresses must describe a real
@@ -224,6 +237,9 @@ func (s Settings) Validate() error {
 	if err := ValidatePort(s.Port); err != nil {
 		return err
 	}
+	if err := ValidateAutoBindSelection(s.AutoBind, s.AdditionalBindAddresses); err != nil {
+		return err
+	}
 	if len(s.AdditionalBindAddresses) > 1 {
 		return fmt.Errorf("additional bind addresses: at most one extra address is supported (dual mode is LAN + Tailscale), got %d", len(s.AdditionalBindAddresses))
 	}
@@ -236,6 +252,16 @@ func (s Settings) Validate() error {
 			return fmt.Errorf("additional bind address %q is duplicated; the two listeners must be different addresses", addr)
 		}
 		seen[addr] = true
+	}
+	return nil
+}
+
+// ValidateAutoBindSelection rejects the auto-binding/manual-extra combination
+// on its own, so the settings bridge can apply the same rule before it restarts
+// the Hub instead of keeping a second copy of the message.
+func ValidateAutoBindSelection(autoBind bool, additional []string) error {
+	if autoBind && len(additional) > 0 {
+		return ErrAutoBindWithAdditional
 	}
 	return nil
 }

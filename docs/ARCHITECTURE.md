@@ -35,7 +35,8 @@ FlowDrop Hub（Go 单进程）
    + `FLOWDROP_COOKIE_SECURE=false`（`cookie_secure=false` 时通配监听 `0.0.0.0` / `::` / 空 host
    会被服务端拒绝），用户已接受可信家庭 LAN 的明文边界。需要同时支持 LAN 与 Tailscale 时，
    同一个 Hub 可再显式绑定一个 `additional_listen`（具体 IP:端口），仍拒绝通配。
-   每个实际监听 IP 会自动加入 Host 白名单，`FLOWDROP_ALLOWED_HOSTS` 仅用于补充 mDNS 名 /
+   需要让地址集合跟着网络自己变时，可在主监听端口上开 `auto_bind`（§12.4）。
+   每个**实际绑定**的 IP 会自动加入 Host 白名单，`FLOWDROP_ALLOWED_HOSTS` 仅用于补充 mDNS 名 /
    主机名 / Tailscale MagicDNS 名。跨网/不可信网络仍用 Tailscale 或 TLS 反代。
 5. **安全默认**：所有内容接口（含图片预览、下载、WS）统一会话鉴权；修改操作同时校验 Origin 与 CSRF 双提交令牌。
 6. **能力边界要诚实**：非安全上下文下浏览器可能禁用剪贴板等 API；前端必须降级而不是报错或谎报成功。
@@ -323,9 +324,11 @@ Hub origin 的页面因此请求到 Hub 本身（404/SPA），**到不了资产�
 
 ### 11.7 已知取舍
 
-- 默认单监听；可选 LAN + Tailscale 双监听（同一 Hub/端口/数据库）。Hub 侧不支持自动网络
-  重绑定：地址失效或端口冲突时用户需修改设置并重启（桌面会先 Stop 再 Start，
-  失败则尝试恢复原配置）。客户端自动选路只在 Android 单 Hub 上实现（LAN 优先、
+- 默认单监听；可选 LAN + Tailscale 双监听（同一 Hub/端口/数据库）。显式地址集合（`listen` /
+  `additional_listen`）不支持自动网络重绑定：地址失效或端口冲突时用户需修改设置并重启
+  （桌面会先 Stop 再 Start，失败则尝试恢复原配置）。运行时自动变化的地址集合由 §12.4 的
+  `auto_bind` 提供，它尝试派生监听失败不回滚主监听。
+  客户端自动选路只在 Android 单 Hub 上实现（LAN 优先、
   失败再 Tailscale，只重试连接不重放写操作）。
 - 不同监听地址（不同 host）之间的浏览器 Cookie 不自动共享；这是 WebView/浏览器规则，
   不做跨 origin 登录态注入。
@@ -361,7 +364,29 @@ Hub origin 的页面因此请求到 Hub 本身（404/SPA），**到不了资产�
 
 - Host/Origin/CSRF/认证/限流仍由同一个 handler 执行；每个监听 IP 自动进入 Host 白名单。
 - 不新增任何网络管理/Settings HTTP 端点：桌面设置只经进程内 `wails://` bridge 调用。
-- 不监听 `0.0.0.0`/`::`，不做自动网络切换或自动重绑定。
+- 不监听 `0.0.0.0`/`::`，不做客户端自动选路（Hub 端的自动地址集合见 §12.4）。
 - mDNS 只广播符合条件的 RFC1918 LAN 监听，Tailscale 监听永不冒充 LAN 入口。
 - Android 与 CLI 的 HTTP 协议只为配对新增 `/api/v1/auth/pair`；Android 只需在任一可达
   地址完成一次配对，之后由客户端按保存的候选地址（LAN 优先，其次 Tailscale）自动选路。
+
+### 12.4 自动绑定（`auto_bind`）
+
+配置 `auto_bind`（env `FLOWDROP_AUTO_BIND`）或 `hub.Options.AutoBind *bool`（桌面传入，非 nil 即覆盖
+配置）。与 §12.2 的显式地址不同，**自动绑定的地址集合是运行时的**：Hub 启动时先同步绑定
+当前扫描到的 RFC1918 / Tailscale（`100.64/10`）IPv4，以及**地址本身是 RFC1918 的容器/虚拟网桥地址**
+（docker0、`br-*`、virbr 等，与 LocalSend 对齐），排除回环、链路本地与公网地址；之后每 5 秒重扫并就地增删监听。
+
+- **派生监听失败不回滚**：主监听（`listen`）和 `additional_listen` 先按 §12.2 全有或全无地绑定
+  成功；此后每个派生地址单独 best-effort，失败只 warn 并在下一轮重扫重试，`Start` 仍返回成功。
+  即：显式地址失败 = `serve` 失败；自动地址失败 = 那一个地址不可用而已。
+- **Host 白名单是动态的**：每个真正绑定成功的地址经 `api.Server.SetBoundHosts` 更新白名单
+  （连同回环名、主监听与 `additional_listen` 的 IP），因此自动上线的地址立刻可访问、
+  下线后不再放行；未命中仍是 421。
+- **共享同一套服务栈**：所有自动监听复用同一个 `http.Server`/handler、数据库、会话与 WebSocket 广播；
+  地址消失时只关闭该监听，该地址上的在途请求会中断（客户端重试即可）。
+- **端口约束**：派生监听必须与主监听同端口；主监听使用端口 `0`（临时端口）时自动绑定禁用。
+  `URLs()` 包含自动绑定的监听，mDNS 随新地址集合重新发布（仍只广播合格 RFC1918 地址）。
+- **广播集合 ≠ 绑定集合**：容器网桥地址只服务、不广播——它为同机容器访问 Hub 而绑，手机即使解析到
+  `172.17.0.1` 也连不上，所以自动绑定的 `KindVirtual` 地址会从 mDNS 的地址列表里剔除
+  （`filterAdvertised`），而 `URLs()`、HTTP 监听与 Host 白名单仍使用完整集合；显式
+  `listen`/`additional_listen` 的地址不受该过滤影响，仍按历史行为参与广播。

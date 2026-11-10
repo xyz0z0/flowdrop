@@ -58,6 +58,7 @@ import (
 	"flowdrop/internal/db"
 	"flowdrop/internal/discovery"
 	"flowdrop/internal/events"
+	"flowdrop/internal/netbind"
 	"flowdrop/internal/pairing"
 	"flowdrop/internal/storage"
 	"flowdrop/internal/store"
@@ -127,6 +128,20 @@ type Options struct {
 	// logger (newLogger). Embedders such as the desktop pass theirs so Hub
 	// records land in the same sink as the shell's.
 	Logger *slog.Logger
+	// AutoBind overrides the configured auto_bind: nil keeps the config value,
+	// non-nil forces it. When enabled the Hub binds every eligible local IPv4
+	// (RFC1918 LAN and Tailscale CGNAT) on the primary listener's port, in
+	// addition to the configured listeners. Auto-bound listeners are best
+	// effort: a failure is logged and retried on the next rescan instead of
+	// failing Start. Explicit additional_listen keeps its all-or-nothing
+	// semantics.
+	AutoBind *bool
+	// AutoBindInterval overrides the rescan period (default 5s). Tests use a
+	// small value; zero means the default.
+	AutoBindInterval time.Duration
+	// Scan overrides the address source used by auto binding (nil means
+	// netbind.Scan). Tests inject a deterministic list.
+	Scan func() ([]netbind.Addr, error)
 }
 
 // Hub is one embeddable FlowDrop Hub instance. Methods are safe for concurrent
@@ -162,6 +177,16 @@ type Hub struct {
 	janitor        chan struct{} // closed when the janitor goroutine exits
 	baseURL        string
 	urls           []string
+
+	// Auto binding state (see autobind.go). autoListeners is keyed by the
+	// "host:port" target and also appears in listeners, so Stop closes it.
+	autoBind         bool
+	autoBindInterval time.Duration
+	scan             func() ([]netbind.Addr, error)
+	autoListeners    map[string]net.Listener
+	autoOrder        []string                // last scanned target order, for URLs()
+	autoKinds        map[string]netbind.Kind // kind of each auto-bound "host:port", for the mDNS filter
+	autoBindDone     chan struct{}           // closed when the rescan goroutine exits
 
 	stopOnce sync.Once
 	stopDone chan struct{}
@@ -202,6 +227,9 @@ func New(opts Options) (*Hub, error) {
 		v := *opts.DiscoveryEnabled
 		cfg.DiscoveryEnabled = &v
 	}
+	if opts.AutoBind != nil {
+		cfg.AutoBind = *opts.AutoBind
+	}
 	if opts.AllowedHosts != nil {
 		cfg.AllowedHosts = append([]string(nil), opts.AllowedHosts...)
 	}
@@ -216,9 +244,13 @@ func New(opts Options) (*Hub, error) {
 		log = newLogger()
 	}
 	h := &Hub{
-		cfg:      cfg,
-		log:      log,
-		stopDone: make(chan struct{}),
+		cfg:              cfg,
+		log:              log,
+		stopDone:         make(chan struct{}),
+		autoBind:         cfg.AutoBind,
+		autoBindInterval: opts.AutoBindInterval,
+		scan:             opts.Scan,
+		autoListeners:    make(map[string]net.Listener),
 	}
 
 	ok := false
@@ -409,22 +441,15 @@ func (h *Hub) Start(ctx context.Context) error {
 	// One http.Server serves every listener, so all of them share the exact same
 	// handler, store, paired devices, broker, rate limiters and upload semaphore.
 	for _, ln := range bound {
-		ln := ln
-		addr := ln.Addr().String()
-		go func() {
-			err := srv.Serve(ln)
-			if err == nil || errors.Is(err, http.ErrServerClosed) {
-				return
-			}
-			// A concurrent Stop closes the listener underneath Serve; that is a
-			// normal shutdown, not a failure.
-			h.mu.Lock()
-			stopped := h.stopped
-			h.mu.Unlock()
-			if !stopped {
-				h.log.Error("http server stopped unexpectedly", "listen", addr, "err", err)
-			}
-		}()
+		go h.serveListener(srv, ln)
+	}
+
+	// Auto-bound listeners are best effort and never fail Start: a port that
+	// cannot be bound right now is retried by the rescan loop. They are bound
+	// before the first mDNS registration so the published record already lists
+	// them.
+	if h.autoBind {
+		h.startAutoBind(srv, hubCtx)
 	}
 
 	go func() {
@@ -447,10 +472,7 @@ func (h *Hub) Start(ctx context.Context) error {
 	// to get a port never appears on the LAN. Advertised ports are the ones the
 	// OS actually assigned (relevant for :0), and only eligible RFC1918 plain
 	// HTTP listeners are announced.
-	boundAddrs := make([]string, len(bound))
-	for i, ln := range bound {
-		boundAddrs[i] = ln.Addr().String()
-	}
+	boundAddrs := h.advertisedAddrs()
 	disc := startDiscovery(hubCtx, h.cfg, boundAddrs, h.log)
 	h.mu.Lock()
 	if h.stopped {
@@ -514,6 +536,7 @@ func (h *Hub) shutdown(ctx context.Context) error {
 	h.baseURL = ""
 	cancel := h.cancel
 	janitorDone := h.janitor
+	autoBindDone := h.autoBindDone
 	h.mu.Unlock()
 
 	// Withdraw the mDNS record before HTTP closes so clients do not keep a
@@ -524,6 +547,12 @@ func (h *Hub) shutdown(ctx context.Context) error {
 	// Cancelling closes WebSocket request contexts and stops the janitor.
 	if cancel != nil {
 		cancel()
+	}
+	// Cancelling also ends the auto-bind rescan loop, which stops its ticker on
+	// the way out. Waiting here means it cannot bind a listener after the set
+	// saved above was closed, and the ticker never outlives the Hub.
+	if autoBindDone != nil {
+		<-autoBindDone
 	}
 
 	var err error

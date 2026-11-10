@@ -697,3 +697,90 @@ func freePortOn(t *testing.T, host string) int {
 	_ = ln.Close()
 	return port
 }
+
+// TestAutoBindConfigIsApplied proves the desktop's auto-bind switch reaches the
+// Hub: with AutoBind=true the Hub still starts on the primary address, reports
+// the live URLs and is reachable. Auto-bound listeners are best effort, so the
+// primary listener alone is the guaranteed part; the test only asserts that the
+// switch never breaks start/status, and that auto_bind in the Hub config file
+// cannot contradict the desktop's explicit choice.
+func TestAutoBindConfigIsApplied(t *testing.T) {
+	// An operator config file asking for the opposite must be overridden.
+	dir := t.TempDir()
+	cfgPath := filepath.Join(dir, "config.json")
+	if err := os.WriteFile(cfgPath, []byte(`{"auto_bind":false}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	m := New()
+	cfg := Config{
+		ConfigPath:  cfgPath,
+		DataDir:     filepath.Join(dir, "data"),
+		BindAddress: "127.0.0.1",
+		Port:        freePort(t),
+		AutoBind:    true,
+	}
+	clearFlowdropEnv(t)
+	base := startEphemeral(t, m, cfg)
+
+	st := m.Status()
+	if !st.Running {
+		t.Fatalf("Status().Running = false with AutoBind=true: %+v", st)
+	}
+	urls := m.URLs()
+	if len(urls) == 0 {
+		t.Fatalf("URLs() is empty with AutoBind=true: %+v", st)
+	}
+	if urls[0] != base {
+		t.Fatalf("URLs() = %v, want the primary loopback listener %q first", urls, base)
+	}
+	if got := m.Config().AutoBind; !got {
+		t.Fatalf("Config().AutoBind = false after starting with AutoBind=true")
+	}
+	// The primary listener really serves the Hub.
+	requireHealth(t, base)
+}
+
+// TestAutoBindDisabledKeepsSingleListener is the regression guard: AutoBind=false
+// behaves exactly as before (one listener, no extra URLs), and an auto_bind:true
+// left in the Hub config file cannot turn it on behind the desktop's back.
+func TestAutoBindDisabledKeepsSingleListener(t *testing.T) {
+	dir := t.TempDir()
+	cfgPath := filepath.Join(dir, "config.json")
+	if err := os.WriteFile(cfgPath, []byte(`{"auto_bind":true}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	m := New()
+	cfg := Config{
+		ConfigPath:  cfgPath,
+		DataDir:     filepath.Join(dir, "data"),
+		BindAddress: "127.0.0.1",
+		Port:        freePort(t),
+	}
+	clearFlowdropEnv(t)
+	base := startEphemeral(t, m, cfg)
+
+	st := m.Status()
+	if !st.Running || st.URL != base {
+		t.Fatalf("Status after AutoBind=false start = %+v, want running URL=%s", st, base)
+	}
+	if urls := m.URLs(); len(urls) != 1 || urls[0] != base {
+		t.Fatalf("URLs() = %v, want only the primary listener %q", urls, base)
+	}
+	if m.Config().AutoBind {
+		t.Fatal("Config().AutoBind = true, want the desktop's false to win over the config file")
+	}
+	requireHealth(t, base)
+}
+
+// requireHealth fails unless /healthz answers 200 on base.
+func requireHealth(t *testing.T, base string) {
+	t.Helper()
+	resp, err := (&http.Client{Timeout: 5 * time.Second}).Get(base + "/healthz")
+	if err != nil {
+		t.Fatalf("GET %s/healthz: %v", base, err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("GET %s/healthz = %d, want 200", base, resp.StatusCode)
+	}
+}

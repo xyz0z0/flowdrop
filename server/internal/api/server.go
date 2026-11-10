@@ -12,6 +12,7 @@ import (
 	"net/url"
 	"path"
 	"strings"
+	"sync"
 	"time"
 
 	"flowdrop/internal/config"
@@ -48,7 +49,14 @@ type Server struct {
 	uploadSem    chan struct{}
 	trusted      []*net.IPNet
 	allowedHosts map[string]struct{}
-	now          func() time.Time
+
+	// boundHosts is the Host set derived from the Hub's currently bound
+	// listeners; SetBoundHosts replaces it wholesale as listeners come and go.
+	// allowedHosts above is static and always stays valid.
+	boundMu    sync.RWMutex
+	boundHosts map[string]struct{}
+
+	now func() time.Time
 
 	// uploadTimeout bounds a single upload request, including slow clients.
 	uploadTimeout time.Duration
@@ -120,6 +128,55 @@ func buildAllowedHosts(cfg config.Config) map[string]struct{} {
 	return m
 }
 
+// SetBoundHosts replaces the Host values derived from the Hub's currently
+// bound listeners. It is safe to call concurrently with serving requests and
+// may be called repeatedly as listeners come and go. An empty slice clears the
+// dynamic set; hostnames from config (allowed_hosts) and the loopback names
+// stay valid regardless.
+func (s *Server) SetBoundHosts(hosts []string) {
+	next := make(map[string]struct{}, len(hosts))
+	for _, raw := range hosts {
+		if host := normalizeBoundHost(raw); host != "" {
+			next[host] = struct{}{}
+		}
+	}
+	s.boundMu.Lock()
+	s.boundHosts = next
+	s.boundMu.Unlock()
+}
+
+// normalizeBoundHost applies hostCheck's Host normalization (drop the port,
+// lower-case, strip IPv6 brackets) and rejects values that must never widen the
+// allow-list: empty strings, anything carrying a path/space, and wildcard binds
+// (0.0.0.0 / ::), which are deliberately not trusted just because we bound them.
+func normalizeBoundHost(raw string) string {
+	h := raw
+	if host, _, err := net.SplitHostPort(h); err == nil {
+		h = host
+	}
+	h = strings.ToLower(strings.Trim(h, "[]"))
+	if h == "" || strings.ContainsAny(h, "/ ") {
+		return ""
+	}
+	if ip := net.ParseIP(h); ip != nil && ip.IsUnspecified() {
+		return ""
+	}
+	return h
+}
+
+// hostAllowed reports whether a normalized host (lower-case, no port, no
+// brackets) is acceptable as a Host header or Origin host. The static set from
+// config is checked first, then the listener-derived dynamic set.
+func (s *Server) hostAllowed(host string) bool {
+	if _, ok := s.allowedHosts[host]; ok {
+		return true
+	}
+	s.boundMu.RLock()
+	_, ok := s.boundHosts[host]
+	s.boundMu.RUnlock()
+	return ok
+}
+
 // Handler builds the full route tree with middleware applied.
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
@@ -178,7 +235,7 @@ func (s *Server) hostCheck(next http.Handler) http.Handler {
 			host = h
 		}
 		host = strings.ToLower(strings.Trim(host, "[]"))
-		if _, ok := s.allowedHosts[host]; !ok {
+		if !s.hostAllowed(host) {
 			writeError(w, http.StatusMisdirectedRequest, "host_not_allowed",
 				"this Host is not in allowed_hosts; add it to config if intentional")
 			return
@@ -302,7 +359,7 @@ func (s *Server) originAllowed(r *http.Request) bool {
 		return false
 	}
 	host := strings.ToLower(u.Hostname())
-	if _, ok := s.allowedHosts[host]; !ok {
+	if !s.hostAllowed(host) {
 		return false
 	}
 	// Also require the origin host to match the Host header, so a page loaded

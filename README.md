@@ -41,8 +41,16 @@
   A 只含绑定的那个 LAN IPv4，TXT 仅 `v=1,scheme=http,path=/`。
   `FLOWDROP_DISCOVERY_ENABLED=false` 可关闭；回环、Tailscale 100.64/10、通配地址、
   HTTPS 反代入口不会冒充 LAN 广播。协议细节见 [docs/DEPLOY.md §5.7](docs/DEPLOY.md)。
+- **自动绑定本机所有可用地址（可热更新）**：`auto_bind=true` 时 Hub 在主监听端口的**同一端口**上
+  绑定本机当前全部 RFC1918 局域网与 Tailscale 地址，每 5 秒重扫网卡——新地址自动上线、
+  消失的地址自动下线，不用改配置重启；`flowdrop doctor` 能先看到实际会绑哪些地址。
+  派生地址尽力而为，与显式 `additional_listen` 的全有或全无不同，见 [docs/DEPLOY.md §5.9](docs/DEPLOY.md)。
 - **复制降级**：明文 HTTP 或剪贴板权限被拒时，复制失败会展开可选中的文本
   （正文/链接/SHA-256），不抛未捕获异常、不谎报成功。
+- **命令行投递**：`flowdrop login` 把本机登记为设备（同机默认在本地数据库生成配对码），
+  `flowdrop send` 投递文件、`--text`/`--text -`、`--link`，`--json` 输出 NDJSON；
+  供 agent 与脚本使用，与 Hub 是同一个二进制。用法见
+  [docs/DEPLOY.md §3.1](docs/DEPLOY.md)。
 
 **桌面 App 已交付（Linux + Windows，Wails v3.1.0）**
 
@@ -50,7 +58,9 @@
   不复制 Hub 逻辑），直接打开现有 React 收件箱窗口。
 - 图形式「设置」窗口：选择真实本机 IPv4（LAN / Tailscale 自动标注）、端口，
   一键重启 Hub；也可选择「同时使用内网和 Tailscale」，分别选一个内网 IPv4 和一个
-  Tailscale IPv4（同端口、同一 Hub、同一数据库）。窗口只把**真正绑定成功**的 URL
+  Tailscale IPv4（同端口、同一 Hub、同一数据库）。也可勾选「自动绑定本机所有可用地址」
+  （`auto_bind`，见 [docs/DEPLOY.md §5.9](docs/DEPLOY.md)），
+  此时无需手选地址，窗口会列出 Hub 当前**真实**绑定的地址并实时刷新。窗口只把**真正绑定成功**的 URL
   列为可用，并标注地址类型；无 Tailscale 网卡时明确提示不能选双模式，仍可用内网单地址。
 - **主窗口可直接进入设置**：登录前后收件箱窗口都有明确的「设置」按钮（登录页右上角、
   登录后位于顶部栏「退出」旁），窗口原生菜单也有「设置…」，快捷键 `Ctrl+,`。
@@ -86,6 +96,16 @@
   一致，差异只在平台适配层：拖拽走 WebView2 原生 HTML5、托盘由系统通知区提供（关闭
   窗口必定可收进托盘）、WebView 代理直连用 `--no-proxy-server` 启动参数。构建、打包与
   已知限制见 [docs/DEPLOY.md §18](docs/DEPLOY.md)。
+
+**命令行投递（agent / 脚本）**
+
+- 二进制：`scripts/build.sh` 的产物 `dist/flowdrop`，与 Hub 同一个二进制。
+- 同机：`flowdrop login -config ~/.config/flowdrop/config.json`（不带 `--code`，
+  配对码在本地数据库生成），凭据存 `~/.config/flowdrop/cli.json`（0600，可撤销）。
+- 投递：`flowdrop send [--json] FILE...`、`--text TEXT|-`（stdin ≤64 KiB）、
+  `--link URL`、`--name NAME -`（stdin 当文件）；退出码 0/1/2，不自动重试。
+- 临时调用：`FLOWDROP_HUB` + `FLOWDROP_TOKEN` 不落盘。
+- 完整说明、异机 `--code` 配对与实测命令：[docs/DEPLOY.md §3.1](docs/DEPLOY.md)。
 
 **Android 原生客户端已交付**
 

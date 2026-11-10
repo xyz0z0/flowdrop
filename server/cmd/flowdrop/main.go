@@ -4,6 +4,8 @@
 //
 //	flowdrop serve [-config path]     start the hub (default)
 //	flowdrop pair [-config path]      generate a one-time device pairing code
+//	flowdrop login                      pair this machine and save the CLI credentials
+//	flowdrop send FILE...|--text|--link  send items to the hub from the terminal
 //	flowdrop doctor                   check data dir, DB, pairing and free space
 //	flowdrop version                  print version
 package main
@@ -16,12 +18,14 @@ import (
 	"net"
 	"os"
 	"os/signal"
+	"strconv"
 	"syscall"
 	"time"
 
 	"flowdrop/internal/config"
 	"flowdrop/internal/db"
 	"flowdrop/internal/discovery"
+	"flowdrop/internal/netbind"
 	"flowdrop/internal/pairing"
 	"flowdrop/internal/storage"
 	"flowdrop/pkg/hub"
@@ -52,6 +56,10 @@ func run(args []string) int {
 		err = runDoctor(args)
 	case "backup":
 		err = runBackup(args)
+	case "login":
+		return runLogin(args)
+	case "send":
+		return runSend(args)
 	case "version", "--version", "-v":
 		fmt.Println("flowdrop", version)
 	case "help", "--help", "-h":
@@ -74,13 +82,18 @@ func usage() {
 	fmt.Fprint(os.Stderr, `FlowDrop Hub
 
   flowdrop serve [-config FILE]      start the hub (default listen 127.0.0.1:8080)
+                                     (multi-address auto binding: see flowdrop doctor)
   flowdrop pair [-config FILE]       create a one-time pairing code shown here only
                                      (2 minutes, single use, a new code voids the old one)
   flowdrop doctor [-config FILE]     check data dir, database, pairing state and free space
+  flowdrop login [--hub URL] [--code CODE]  pair this machine and save device credentials
+                                     (no --code: the code is generated in the local database)
+  flowdrop send FILE... [--text TEXT|-] [--link URL]  send files, text or a link to the hub
   flowdrop backup OUT.tar.gz         consistent snapshot of database + attachments
   flowdrop version                   print version
 
 Configuration comes from the JSON file (if present), then FLOWDROP_* env vars.
+auto_bind=true also binds every eligible LAN/Tailscale IPv4 on the primary port.
 See docs/DEPLOY.md for HTTPS, Tailscale Serve and systemd setup.
 `)
 }
@@ -186,6 +199,7 @@ func runDoctor(args []string) error {
 	for _, addr := range listens[1:] {
 		report("additional listen", true, addr)
 	}
+	reportAutoBind(cfg, report)
 	report("data_dir", true, cfg.DataDir)
 
 	conn, err := db.Open(cfg.DataDir)
@@ -284,6 +298,76 @@ func runDoctor(args []string) error {
 	}
 	fmt.Println("No blocking problems found.")
 	return nil
+}
+
+// reportAutoBind shows what auto_bind would actually do right now. It only reads
+// the config and this machine's addresses: nothing is bound, the Hub is not
+// started and the data dir is untouched, so doctor stays a read-only probe.
+func reportAutoBind(cfg config.Config, report func(name string, good bool, detail string)) {
+	if !cfg.AutoBind {
+		report("auto_bind", true, "off")
+		return
+	}
+	listens := cfg.Listens()
+	port := ""
+	if len(listens) > 0 {
+		if _, p, err := net.SplitHostPort(listens[0]); err == nil {
+			port = p
+		}
+	}
+	if port == "" || port == "0" || !isPortNumber(port) {
+		report("auto_bind", false, "WARN: primary listener uses port 0; auto binding is disabled")
+		return
+	}
+	addrs, err := netbind.Scan()
+	if err != nil {
+		report("auto_bind", false, "on but scan failed: "+err.Error())
+		return
+	}
+	explicit := make(map[string]struct{}, len(listens))
+	for _, addr := range listens {
+		explicit[canonicalAddr(addr)] = struct{}{}
+	}
+	var targets []string
+	for _, addr := range netbind.Targets(addrs, port) {
+		if _, ok := explicit[canonicalAddr(addr)]; ok {
+			continue // already covered by listen/additional_listen
+		}
+		targets = append(targets, addr)
+	}
+	if len(targets) == 0 {
+		report("auto_bind", true, "on, no eligible LAN or Tailscale address right now")
+		return
+	}
+	report("auto_bind", true, "on")
+	for _, addr := range targets {
+		report("auto_bind target", true, addr)
+	}
+}
+
+func isPortNumber(port string) bool {
+	for _, r := range port {
+		if r < '0' || r > '9' {
+			return false
+		}
+	}
+	return port != ""
+}
+
+// canonicalAddr normalises a "host:port" listener so an explicit address and an
+// auto-bound one compare equal despite spelling (010.0.0.1:08080 vs 10.0.0.1:8080).
+func canonicalAddr(addr string) string {
+	host, port, err := net.SplitHostPort(addr)
+	if err != nil {
+		return addr
+	}
+	if ip := net.ParseIP(host); ip != nil {
+		host = ip.String()
+	}
+	if n, err := strconv.Atoi(port); err == nil {
+		port = strconv.Itoa(n)
+	}
+	return net.JoinHostPort(host, port)
 }
 
 func humanBytes(n int64) string {

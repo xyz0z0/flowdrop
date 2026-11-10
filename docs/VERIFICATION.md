@@ -1878,3 +1878,208 @@ APK由`timeout 240s ./gradlew --offline :app:assembleDebug`成功构建（4s）�
 3. 设置点「添加设备」生成码。电脑内容窗口与每台手机分别配对，每添加一台设备都重新生成码（上一成功码不可重用）。手机安装`dist/flowdrop-android-debug.apk`，同Wi-Fi可发现，异地首次手填Tailscale地址；本轮未做扫码/TS节点枚举。
 4. 配对后Android记住同一Hub的候选地址，启动/回前台/失联优先LAN后Tailscale；断开的上传/发送不自动重放，需要用户重试。浏览器仍按origin保存Cookie。
 5. 用户真机确认配对、文字/图片/文件双向收发与离家/回家切换；本轮没有替用户执行该步骤。
+
+## 21. agent 投递 CLI（`flowdrop login` / `flowdrop send`，2026-11-09，本轮）
+
+需求：让同机 agent 直接把文件/文字投递到 FlowDrop。主 agent 决策为**只加 CLI，服务端零改动**：完全复用既有配对、Bearer + cookie jar + CSRF 双提交和 `/api/v1/items/{upload,text}`，不新增端点、不改鉴权语义。
+
+### 21.1 交付内容
+
+| 文件 | 说明 |
+|---|---|
+| `server/internal/sendcli/sendcli.go` | 客户端包：凭据读写（0600 原子写）、`Pair`、`Connect`（Bearer→CSRF/cookie/limits）、`SendFile/SendReader/SendText`、`*Error`/`ErrUnauthorized`/`ErrNoCredentials` |
+| `server/cmd/flowdrop/send_cmd.go` | `login`（hub 推导/本地生成码/设备名/凭据保存）与 `send`（文件、`--text [TEXT\|-]`、`--link`、`--name -` stdin spool、`--json` NDJSON、退出码 0/1/2、429 停发并标 `skipped`） |
+| `server/cmd/flowdrop/main.go` | 子命令分发与 usage（+9 行） |
+| 测试 | `sendcli_test.go`(13)、`send_cmd_test.go`(21)，均打真实 `api.New` + SQLite + storage 的 httptest Hub，不 mock 客户端 |
+
+契约修正：`store.Blob` 实际序列化文件名为 `blob.name`，主 agent 将冻结接口的 `original_name` 改为 `name` 并删除 worker 加的兼容 `UnmarshalJSON`。
+
+### 21.2 自动测试（本轮实际执行）
+
+| 命令 | 结果 |
+|---|---|
+| `gofmt -l ./cmd/flowdrop ./internal/sendcli` | 无输出 |
+| `go vet ./cmd/flowdrop/... ./internal/sendcli/...` | 通过 |
+| `go test ./cmd/flowdrop/... ./internal/sendcli/... -count=1` | 21 + 13 PASS，0 FAIL / 0 SKIP |
+| `go test -race ./cmd/flowdrop/... ./internal/sendcli/... -count=1` | 通过 |
+| `go build ./...` | 通过 |
+
+### 21.3 主 agent 独立真实端到端（非 worker 证据）
+
+临时 `mktemp` 配置 + 临时 data_dir + `127.0.0.1:52029` 独立 Hub（不涉及用户实例与 `~/.config/flowdrop`）：
+
+- `flowdrop login -config <tmp>/config.json`（**不带 `--hub`/`--code`**，同机本地生成码）→ rc=0，`cli.json` 权限 `600`，hub/设备名/device_id 正确。
+- `flowdrop send --json <payload.txt>` → rc=0，NDJSON 中 `blob.sha256=39cb23ab…e352d`、`size_bytes=40`。
+- Bearer 鉴权下载 → rc=0，两端 SHA-256 与字节数一致。
+- `printf 'hello from agent' | flowdrop send --text -` → rc=0，stdin 文本条目。
+- `flowdrop send --link https://example.com/agent` → rc=0。
+- 仅按 PID 停止该临时 Hub，`ps` 确认已退出，临时目录删除；未触碰其它 flowdrop 进程。
+
+### 21.4 产物
+
+| 产物 | 字节 | SHA-256 |
+|---|---:|---|
+| `dist/flowdrop` | 12320930 | `d32cf3bf60e34fa249ef33e11b862ab8803c82a00d805b3b83762c5170e62a82` |
+
+`timeout 240 bash scripts/build.sh` rc=0（版本 0.1.0，2026-11-09）。未安装、未 commit、未 push。
+
+### 21.5 文档
+
+- `docs/DEPLOY.md` §3.1「命令行设备（同机 agent / 脚本投递）」：二进制来源、`login` 同机/异机路径、凭据位置与权限、`send` 全部形态与退出码、429/撤销行为、`FLOWDROP_HUB`+`FLOWDROP_TOKEN` 不落盘用法、明文 HTTP 提醒、实测命令清单。
+- `README.md`：功能列表一条 bullet + 「命令行投递（agent / 脚本）」小节（指向 §3.1）。
+
+### 21.6 未验证项（单列，不当作通过）
+
+- 真实 HTTP 429 限流下的 `skipped` 分支（只有单元测试路径，未在真实 Hub 上打满限流）。
+- 设置里撤销 CLI 设备后 `send` 的提示（代码与单测覆盖，未在真实桌面实例上撤销验证）。
+- HTTPS / `cookie_secure=true` 的 Hub（本次只测明文回环）。
+- 指向桌面 App 真实配置与 data_dir 的 `login`（本次只用临时配置）。
+- 超过 `max_upload_bytes` 的大文件与服务端 413/507 真实响应。
+- Windows/macOS 上的 CLI 路径与 hostname 行为。
+
+### 21.7 用户验收步骤
+
+1. 生成/更新 CLI：`bash scripts/build.sh`，得到 `dist/flowdrop`。
+2. 同机用它登录：`dist/flowdrop login -config ~/.config/flowdrop/config.json`。
+3. 投递：`dist/flowdrop send --json <文件>`，或 `printf 'x' | dist/flowdrop send --text -`。
+4. 需要撤销时在桌面设置里删除 `cli-<主机名>` 设备，再重新 `login`。
+
+## 22. 自动绑定与热更新（`auto_bind`，2026-11-09，本轮）
+
+需求：不再限制「主地址 + 一个额外地址」，改为自动绑定本机所有可用地址（RFC1918 LAN + Tailscale），并在地址变化时热更新，不重启 Hub。用户明确选择该方案（选项 C）并接受"派生地址尽力而为"的语义变更。
+
+### 22.1 交付内容
+
+| 文件 | 说明 |
+|---|---|
+| `server/internal/netbind/`（新增 208+225 行） | 可注入的地址枚举 + `Classify`（LAN/Tailscale/Virtual/Other/Loopback）+ `Targets`（筛选/排序/去重）+ `Diff` |
+| `server/internal/api/server.go`（+`dynamic_hosts_test.go`） | `SetBoundHosts` + `hostAllowed`，`hostCheck` 与 Origin 校验共用静态+动态集合 |
+| `server/pkg/hub/autobind.go`（新增 421+346 行）+ `hub.go` | 启动时同步绑定、5s 重扫、增量 add/remove、`URLs()` 动态、mDNS 重注册、`Stop` 等重扫退出 |
+| `server/internal/config/config.go` | `auto_bind` + `FLOWDROP_AUTO_BIND`；`hub.Options.AutoBind *bool`（nil=用配置） |
+| `server/cmd/flowdrop/main.go` | `doctor` 只读打印 `auto_bind` / `auto_bind target`；usage 一行 |
+| `desktop/**`（`appsettings`/`hubmgr`/`service.go`/`assets`） | 设置窗口「自动绑定本机所有可用地址」开关 + 实时绑定列表；`ApplyAutoNetwork` |
+| 文档 | `docs/DEPLOY.md` §5.9 + §9 配置行、`README.md`、`docs/ARCHITECTURE.md` §12.4 |
+
+### 22.2 语义（与显式配置的区别，必须保留）
+
+- 自动绑定：派生地址**尽力而为**，单个失败只 warn、5s 后重试，成败通过日志/`URLs()`/桌面列表/`doctor` 可见。
+- 显式 `additional_listen`：仍是**全有或全无**，任一失败回滚并拒绝启动。
+- 主监听端口为 `0` 时禁用自动绑定（临时端口不可复用）；地址消失会中断该地址上的在途请求。
+
+### 22.3 自动测试（本轮实际执行）
+
+| 命令 | 结果 |
+|---|---|
+| `go test ./internal/netbind/...` | 5 个表驱动测试，30 PASS |
+| `go test ./internal/api/...`（含 `-race`） | 通过（含 4 个动态 Host 测试） |
+| `go test ./pkg/hub/...`（含 `-race`） | 9 个新自动绑定测试 + 30 个既有测试全部通过 |
+| `go test ./internal/config/... ./cmd/flowdrop/...` | 39 PASS |
+| `cd desktop && go vet -tags gtk3 ./... && go build -tags gtk3 ./... && go test ./internal/...` | 全部通过，43 PASS |
+| `node --check desktop/assets/app.js` | 通过 |
+
+注意：桌面模块**必须**用 `-tags gtk3`（`scripts/build-desktop.sh` 一直如此）；本机无系统 GTK/WebKit 开发包，使用 `~/.local/share/flowdrop-desktop/sysroot` 前缀。
+
+### 22.4 主 agent 独立真机验证
+
+临时配置（`auto_bind=true`、临时 data_dir、`127.0.0.1:57121`）：
+
+- `doctor` → `auto_bind ok on` + `192.168.31.184:57121` + `100.125.168.63:57121`。
+- `ss -ltnp` 显示同一 PID 的**三个**监听：`127.0.0.1`、`192.168.31.184`、`100.125.168.63`。
+- `/api/v1/health`：三个地址均 **200**。
+- Host 白名单：`Host: 192.168.31.184:57121` → **200**（证明 `SetBoundHosts` 生效）；`Host: 203.0.113.9:57121` → **421**（未放宽）。
+- 全链路：`flowdrop login --hub http://192.168.31.184:57121`（本地生成码）rc=0，`flowdrop send` 走 LAN 地址 rc=0 并输出 sha256。
+- 按 PID 停止（`HUB_STOPPED`），临时目录删除；未使用 `pkill`，未影响用户 `flowdrop-desktop` 实例。
+
+### 22.5 产物
+
+| 产物 | 字节 | SHA-256 |
+|---|---:|---|
+| `dist/flowdrop` | 12370082 | `d1fbb1a07f703be73125880b1f868e77df1dad66de183e74b49d968ba3530e1f` |
+
+`timeout 300 bash scripts/build.sh` rc=0。未安装、未 commit、未 push。
+
+### 22.6 未验证项（单列，不当作通过）
+
+- **地址增删热更新**的真实网卡变化：只有注入 `Scan` 的单测（`127.0.0.2`/`127.0.0.3` 增删），未在真实 Wi-Fi/VPN 切换中验证。
+- 端口 `0` 禁用自动绑定的真实进程行为（仅单测与 doctor 文案）。
+- 派生地址绑定失败的 warn + 重试在真实环境中的表现（单测用 `192.0.2.1`）。
+- 真实 mDNS 重注册（测试中禁用 discovery；每次变化时"关闭并重新注册"仅代码审查）。
+- 桌面设置窗口的开关与实时列表：仅代码审查 + `node --check`，**未启动 GUI 窗口**（宿主桌面保护），未在真机点击验证。
+- Windows/macOS 桌面与 `wg*`/CGNAT 边界组合（`wg0` + `100.64/10` 会被判为 Tailscale）。
+
+### 22.7 用户验收步骤
+
+1. `bash scripts/build.sh`；Hub 重启后 `./dist/flowdrop doctor -config ~/.config/flowdrop/config.json` 应列出 `auto_bind on` 与每个会绑定的地址。
+2. 在配置里加 `"auto_bind": true`（或 `FLOWDROP_AUTO_BIND=true`），重启 Hub；`ss -ltnp | grep flowdrop` 应看到同端口多个地址。
+3. 桌面 App：设置 → 勾选「自动绑定本机所有可用地址」→ 保存，窗口下方应列出真实监听地址；换网络后最多 5 秒列表更新。
+4. 换网络后从手机/另一台机器用新地址访问应直接可用（无需重启 Hub）；若某地址已失效，该地址上的在途请求会中断，重试即可。
+
+### 22.8 追加：容器网桥地址也绑定（NET-07，对齐 LocalSend）
+
+用户要求与 LocalSend 对齐：本机 `docker0`/`br-*` 上的**私有**地址也要绑。改动：
+
+- `netbind.Targets` 现按「私有 IPv4」判定：`KindLAN`、`KindTailscale`、以及 IP 为 RFC1918 的 `KindVirtual`（docker0、br-*、virbr*）都绑；回环、link-local、**公网地址仍不绑**；排序 LAN → Tailscale → Virtual。
+- Hub 记录每个自动绑定地址的 `netbind.Kind`（`autoKinds`），新增纯函数 `filterAdvertised` 把 Virtual 地址从 **mDNS 广播集合**剔除；`URLs()`、HTTP 绑定与 `SetBoundHosts` 仍用完整集合。两个 `startDiscovery` 调用点都传过滤后的集合。
+- 文档同步：`DEPLOY §5.9` 的排除行改写，并新增「绑到 docker0 意味着本机容器可访问 Hub（明文 HTTP）」提示；`ARCHITECTURE §12.4` 补「广播集合 ≠ 绑定集合」。
+
+自动测试：`netbind`（含 172.17.0.1/172.18.0.1 用例）、`pkg/hub`（`filterAdvertised` 表驱动 + 集成）与 `-race` 全部通过。
+
+主 agent 独立真机冒烟（临时配置、空闲端口、`auto_bind=true`）：
+
+- `doctor` 打印 4 个 target：`192.168.31.184`、`100.125.168.63`、`172.17.0.1`、`172.18.0.1`；
+- `ss -ltnp` 显示同 PID 的 **5 个**同端口监听（含 `127.0.0.1`）；
+- 5 个地址 `/api/v1/health` 全部 **200**；
+- mDNS 日志只对回环与 Tailscale 报"不可广播"，容器网桥未参与广播；按 PID 停止，临时目录删除。
+
+产物：`dist/flowdrop` 12,378,274 B（`9da66eaf…94d8`）、`dist/flowdrop-desktop` 17,620,904 B（`5f8ef6f9…c031`）。未安装到 `~/.local/bin`（等用户确认）、未 commit。
+
+未验证项不变（真实网卡增删热更新、真实 mDNS 报文、桌面 GUI 点击），另新增：容器网桥地址上的真实容器访问未验证。
+
+### 22.9 追加：自动绑定改为默认开启 + 安装（用户确认后）
+
+用户要求：`auto_bind` 现在打开，并且**新安装默认打开**。
+
+改动：
+
+- `desktop/internal/appsettings/appsettings.go`：`Default()` 返回 `AutoBind: true`（新装/首次运行即自动绑定；手动选择仍可关闭）。已保存的旧文件没有该字段，读回仍是 `false`，不会被动改用户的既有选择。
+- `desktop/main.go`：`startHub` 补 `AutoBind: st.AutoBind`——此前只有"设置里保存"的路径会传，**首次启动会忽略已保存的开关**（这是 NET-05 范围限制留下的缺口）。
+- `desktop/main.go`：`preferredHubURL` 新增"主监听是回环则直接用回环"的优先级，并新增 `isLoopbackURL`。原因：自动绑定下主监听是 `127.0.0.1`、LAN 只是附加监听，旧逻辑会把窗口开到 LAN 地址；会话 Cookie 按 origin 隔离，机器换网络后窗口 origin 会跟着变。双模式（主监听就是 LAN）行为不变。
+- 用户配置：`~/.config/flowdrop/desktop.json` 加 `"auto_bind": true` 并移除 `additional_bind_addresses`（两者互斥），原文件备份为 `desktop.json.bak-20261010-*`。
+- 已按用户明确要求执行 `scripts/install-desktop.sh`：`~/.local/bin/flowdrop-desktop` = `dist/flowdrop-desktop`，17,620,904 B，SHA-256 `7fa0efe7…d311`（09:21:57）。
+
+验证：
+
+| 命令 | 结果 |
+|---|---|
+| `go test -tags gtk3 ./internal/...` | 全部通过（含 `Default().AutoBind` 断言） |
+| `go test -tags gtk3 .`（桌面根包，含 service/hub 集成测试） | 通过（此前因 `preferredHubURL` 选 LAN 而失败的 `TestServiceApplyModeSwitchesAtRuntime` 现通过） |
+| `go vet -tags gtk3 ./...` | 通过 |
+| 主 agent 真机冒烟（等价于用户保存的配置：主监听 `192.168.31.184` + `auto_bind=true`，临时 data_dir/端口） | 监听恰为 `192.168.31.184`、`100.125.168.63`、`172.17.0.1`、`172.18.0.1` 四个同端口地址，逐一 `/api/v1/health` 均 **200**；按 PID 停止、临时目录删除 |
+
+未验证：桌面窗口内的实际点击与列表渲染（未启动 GUI，宿主桌面保护）、真实 8080 端口上的实例行为（用户自行启动）。
+
+### 22.10 追加：运行状态只显示一个地址（用户反馈后修复）
+
+现象（用户在运行中的窗口里看到）：自动绑定生效、网络绑定列出 4 个地址，但「运行状态 → 可供手机访问的地址」只有 `http://192.168.31.184:8080/`，「实际绑定」也只显示一个。
+
+原因（两处独立的"只报主地址"假设，都写在 `desktop/assets/app.js`）：
+
+- 运行状态读的是 `state.url`（Hub 主监听 URL）单值；
+- 「实际绑定」由**已保存设置**拼出（`bind_address` + `additional_addresses`），自动绑定下 `additional_addresses` 为空 → 永远只有一个。
+
+修复：
+
+- `#hub-url` 单值改为 `#hub-urls` 列表（`renderHubURLs`），按 `state.access_urls` 逐行列出每个监听地址，主地址行加标签，两个以上地址时显示一行说明（手机用 LAN 行、Tailscale 用 100.x 行、容器用 172.x 行）；`复制`/`在浏览器打开` 仍只作用于主地址（`state.url`），粘贴目标是单个 URL。
+- 「实际绑定」改用 `runningListenAddrs(s)`：Hub 运行时取 `state.urls`（真实监听集合，去掉 scheme），未运行时才退回已保存设置。
+- `style.css` 加 `.hub-urls/.hub-url/.hub-url-primary/.hint-inline`。
+
+验证：
+
+| 检查 | 结果 |
+|---|---|
+| `node --check desktop/assets/app.js` | 通过 |
+| 元素 id 交叉检查（app.js 里 57 个 `$("id")` vs index.html 的 id） | 0 缺失 |
+| `go test -tags gtk3 . ./internal/...` | 通过 |
+| 重装 `~/.local/bin/flowdrop-desktop` | SHA-256 `c5872c1f…d582`，二进制内含 `hub-urls` / `runningListenAddrs` |
+
+未验证：窗口内实际渲染（未启动 GUI，宿主桌面保护）——运行中的实例是旧二进制，需用户从托盘退出并重启后观察。

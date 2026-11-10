@@ -28,6 +28,11 @@ type Config struct {
 	// AdditionalBindAddresses are extra concrete local IPv4 addresses bound by
 	// the same Hub on the same port (dual mode stores the Tailscale address).
 	AdditionalBindAddresses []string
+	// AutoBind asks the Hub to bind every eligible local IPv4 (LAN + Tailscale)
+	// on the Port above, rescanning in place. It is always passed explicitly to
+	// the Hub so the config file's auto_bind can never override the user's
+	// choice in the settings window.
+	AutoBind bool
 	// Port is the HTTP port, shared by every bound address.
 	Port int
 }
@@ -120,6 +125,10 @@ func (m *Manager) startLocked(cfg Config) error {
 		// additional_listen from an operator config file is never silently
 		// added to (or inherited by) the desktop Hub.
 		AdditionalListen: cfg.AdditionalListen(),
+		// Always non-nil for the same reason: the desktop's auto-bind switch is
+		// explicit, so an auto_bind left in the Hub config file cannot turn it on
+		// (or off) behind the settings window's back.
+		AutoBind: &cfg.AutoBind,
 		// The desktop window talks plain HTTP to this Hub, so the session
 		// cookie must not carry Secure; the loopback/LAN boundary is what
 		// protects it, exactly as documented for the CLI LAN mode.

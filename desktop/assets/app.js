@@ -23,6 +23,10 @@ let runModeDirty = false;
 // or overwrite the form the user just submitted.
 let switchingMode = false;
 let mode = "single";
+// autoBind mirrors the "bind every local address" checkbox. It is the saved
+// preference, so a 3s refresh only rewrites it while the form is clean (dirty
+// guards it, exactly like the other inputs).
+let autoBind = false;
 let chosenAddress = null;
 let dualLAN = null;
 let dualTS = null;
@@ -113,6 +117,7 @@ function syncControls(s) {
     : (lanList[0] && lanList[0].address) || "";
   dualTS = (s.additional_addresses && s.additional_addresses[0])
     || (tsList[0] && tsList[0].address) || "";
+  autoBind = !!s.auto_bind;
   $("port").value = s.port || 8080;
 }
 
@@ -139,6 +144,35 @@ function renderMode() {
   }
   show($("dual-hint"), hint);
   $("tailscale-hint").hidden = s.has_tailscale || mode === "dual";
+}
+
+// renderAutoBind paints the auto-bind switch: ticked, the manual single/dual
+// choice is hidden and the live listener list (state.urls, one line per real
+// listener) is shown instead; unticked restores the manual UI with its previous
+// selection untouched. The list is repainted on every status refresh even while
+// the form is dirty: it describes the running Hub, so it never rewrites an input
+// the user is editing (the same rule runModeDirty follows for the run mode).
+function renderAutoBind() {
+  const s = state;
+  if (!s) return;
+  $("autoBind").checked = autoBind;
+  $("manual-bind").hidden = autoBind;
+  $("auto-pane").hidden = !autoBind;
+  if (!autoBind) return;
+  const urls = s.urls || [];
+  const list = $("auto-url-list");
+  list.innerHTML = "";
+  for (const url of urls) {
+    const li = document.createElement("li");
+    li.className = "url-item";
+    const code = document.createElement("code");
+    code.textContent = url + "/";
+    li.appendChild(code);
+    list.appendChild(li);
+  }
+  show($("auto-url-empty"), urls.length > 0
+    ? ""
+    : "Hub 未运行：勾选并保存后会列出真实监听的地址。");
 }
 
 // --- run mode (local Hub / remote Hub) ------------------------------------
@@ -176,6 +210,53 @@ function renderRunMode() {
   show($("remote-current"), remote ? "当前：远程 Hub · " + (s.remote_url || "（未填写地址）") : "");
 }
 
+// runningListenAddrs returns the ip:port of every live listener, primary first.
+// The Hub reports them as URLs (state.urls), so the scheme is stripped here.
+function runningListenAddrs(s) {
+  const out = [];
+  for (const raw of s.urls || []) {
+    const addr = raw.replace(/^https?:\/\//, "").replace(/\/$/, "");
+    if (addr) out.push(addr);
+  }
+  if (out.length) return out;
+  if (!s.bind_address) return out;
+  out.push(`${s.bind_address}:${s.port || "?"}`);
+  for (const addr of s.additional_addresses || []) {
+    out.push(`${addr}:${s.port || "?"}`);
+  }
+  return out;
+}
+
+// renderHubURLs lists every address a phone can open, one line each, with the
+// inbox' default (the primary listener) tagged. #copy-url and #open-browser
+// still act on that primary address only, which is why it is first and stays
+// selected when copying falls back to a manual selection.
+function renderHubURLs(s) {
+  const box = $("hub-urls");
+  box.innerHTML = "";
+  const entries = s.running ? s.access_urls || [] : [];
+  if (!entries.length) {
+    const code = document.createElement("code");
+    code.textContent = s.url ? s.url + "/" : "—";
+    box.appendChild(code);
+    $("hub-urls-hint").hidden = true;
+    return;
+  }
+  for (const entry of entries) {
+    const line = document.createElement("div");
+    line.className = "hub-url" + (entry.primary ? " hub-url-primary" : "");
+    const code = document.createElement("code");
+    code.textContent = entry.url + "/";
+    line.appendChild(code);
+    const tag = document.createElement("span");
+    tag.className = "tag";
+    tag.textContent = entry.primary ? "主地址（收件箱默认）" : kindLabel(entry.kind);
+    line.appendChild(tag);
+    box.appendChild(line);
+  }
+  $("hub-urls-hint").hidden = entries.length < 2;
+}
+
 function renderURLs() {
   const s = state;
   const list = $("url-list");
@@ -209,12 +290,11 @@ function render(s) {
   badge.textContent = s.running ? "运行中" : "未运行";
   badge.className = "badge " + (s.running ? "badge-on" : "badge-off");
 
-  $("hub-url").textContent = s.url ? s.url + "/" : "—";
-  const listens = [];
-  if (s.bind_address) listens.push(`${s.bind_address}:${s.port || "?"}`);
-  for (const addr of s.additional_addresses || []) {
-    listens.push(`${addr}:${s.port || "?"}`);
-  }
+  renderHubURLs(s);
+  // "Actually bound" means the live listener set: with auto binding that is
+  // more addresses than the saved primary (+optional extra), so reading it off
+  // the saved settings would under-report what the Hub really serves.
+  const listens = runningListenAddrs(s);
   // Only call it "actual" when the Hub is really running; otherwise the same
   // values are just the saved request shown in the inputs below.
   $("listen").textContent = !s.running
@@ -300,6 +380,7 @@ function render(s) {
   renderMode();
   renderRunMode();
   renderURLs();
+  renderAutoBind();
 }
 
 // --- device pairing --------------------------------------------------------
@@ -564,6 +645,11 @@ $("dual-ts").addEventListener("change", () => {
   dualTS = $("dual-ts").value;
   dirty = true;
 });
+$("autoBind").addEventListener("change", () => {
+  autoBind = $("autoBind").checked;
+  dirty = true;
+  renderAutoBind();
+});
 $("port").addEventListener("input", () => {
   dirty = true;
 });
@@ -581,7 +667,16 @@ $("apply").addEventListener("click", async () => {
   btn.disabled = true;
   btn.textContent = "正在重启 Hub…";
   try {
-    if (mode === "dual") {
+    if (autoBind) {
+      // Auto binding still needs one concrete primary listener: keep the address
+      // the form already holds (the saved one on a fresh window) and let the Hub
+      // add every other eligible local address on the same port.
+      const primary = chosenAddress
+        || (state && state.bind_address)
+        || (state && state.interfaces[0] && state.interfaces[0].address)
+        || "127.0.0.1";
+      callResult = await call("ApplyAutoNetwork", primary, true, port);
+    } else if (mode === "dual") {
       const lan = $("dual-lan").value;
       const ts = $("dual-ts").value;
       if (!lan || !ts) {
@@ -655,7 +750,9 @@ $("open-browser").addEventListener("click", async () => {
 });
 
 $("copy-url").addEventListener("click", async () => {
-  const value = $("hub-url").textContent;
+  // Copy the primary address, never the whole list: the button sits next to a
+  // multi-address block, and a paste target expects one URL.
+  const value = state && state.url ? state.url + "/" : "";
   try {
     await navigator.clipboard.writeText(value);
     $("copy-url").textContent = "已复制";
@@ -664,7 +761,8 @@ $("copy-url").addEventListener("click", async () => {
     // Settings window is a secure context; if the platform still refuses,
     // select the text so the user can copy manually instead of lying.
     const range = document.createRange();
-    range.selectNodeContents($("hub-url"));
+    const primary = document.querySelector("#hub-urls .hub-url-primary") || $("hub-urls");
+    range.selectNodeContents(primary);
     const sel = window.getSelection();
     sel.removeAllRanges();
     sel.addRange(range);

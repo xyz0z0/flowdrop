@@ -129,6 +129,40 @@ func TestServiceApplyNetworkSwitchesAndPersists(t *testing.T) {
 	}
 }
 
+// TestServiceApplyNetworkKeepsDeviceIdentity covers the regression where saving
+// a new bind address rebuilt desktop.json from scratch and wiped the device ID
+// and token the shell had paired with, so the next launch paired again and left
+// a dead device row in the Hub.
+func TestServiceApplyNetworkKeepsDeviceIdentity(t *testing.T) {
+	svc, _, _ := newTestService(t)
+	if err := appsettings.Save(desktop.settingsPath, appsettings.Settings{
+		Mode:               appsettings.ModeLocal,
+		BindAddress:        "127.0.0.1",
+		Port:               freePort(t),
+		DesktopDeviceID:    "dev_local",
+		DesktopDeviceToken: testDeviceToken,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	nextPort := freePort(t)
+	if _, err := svc.ApplyNetwork("127.0.0.1", nextPort); err != nil {
+		t.Fatalf("ApplyNetwork: %v", err)
+	}
+
+	saved, found, err := appsettings.Load(desktop.settingsPath)
+	if err != nil || !found {
+		t.Fatalf("reload saved settings: found=%v err=%v", found, err)
+	}
+	if saved.Port != nextPort {
+		t.Fatalf("saved port = %d, want %d", saved.Port, nextPort)
+	}
+	if saved.DesktopDeviceID != "dev_local" || saved.DesktopDeviceToken != testDeviceToken {
+		t.Fatalf("saved device identity = %q/%q, want the paired one to survive",
+			saved.DesktopDeviceID, saved.DesktopDeviceToken)
+	}
+}
+
 func TestServiceApplyNetworkRejectsWildcardAndUnknownIP(t *testing.T) {
 	svc, m, _ := newTestService(t)
 	before := m.URL()

@@ -82,6 +82,10 @@ type State struct {
 	HasTailscale  bool              `json:"has_tailscale"`
 	TrayAvailable bool              `json:"tray_available"`
 	ProxyWarning  string            `json:"proxy_warning"`
+	// AutoBind is the saved "bind every local address" switch. It is a saved
+	// preference, not a claim about the listeners: the live address set stays
+	// in URLs.
+	AutoBind bool `json:"auto_bind"`
 	// AccessibilityWarning explains that this launch had to disable the
 	// AT-SPI bridge because the session's accessibility bus was broken. It is
 	// empty when accessibility is enabled.
@@ -169,6 +173,12 @@ func (s *SettingsService) GetState() (State, error) {
 		st.Additional = append([]string{}, saved.AdditionalBindAddresses...)
 	}
 	st.DualMode = len(st.Additional) > 0
+	// Auto binding is a saved preference; without a usable file, report what
+	// this process actually runs so the checkbox never silently resets.
+	st.AutoBind = savedOK && saved.AutoBind
+	if !savedOK && !remote && s.manager != nil {
+		st.AutoBind = s.manager.Config().AutoBind
+	}
 	// Only actual bound URLs are shown as usable. Configured addresses that are
 	// not running remain visible as the requested inputs, never as access URLs.
 	if st.Running {
@@ -407,7 +417,7 @@ func (d *desktopState) webviewProxyConfigureError() string {
 // ApplyNetwork keeps the original single-address API working: it binds one
 // concrete IPv4 address/port.
 func (s *SettingsService) ApplyNetwork(bindAddress string, port int) (State, error) {
-	return s.applyNetwork(bindAddress, nil, port)
+	return s.applyNetwork(bindAddress, nil, false, port)
 }
 
 // ApplyNetworkConfig applies the complete listen selection: a primary address
@@ -415,7 +425,7 @@ func (s *SettingsService) ApplyNetwork(bindAddress string, port int) (State, err
 // address next to the LAN primary) on one shared port. The desktop bridge is
 // the only caller; there is no network management endpoint.
 func (s *SettingsService) ApplyNetworkConfig(bindAddress string, additional []string, port int) (State, error) {
-	return s.applyNetwork(bindAddress, additional, port)
+	return s.applyNetwork(bindAddress, additional, false, port)
 }
 
 // ApplyDualNetwork is the settings window's explicit dual-mode entry point:
@@ -426,7 +436,16 @@ func (s *SettingsService) ApplyDualNetwork(lanAddress, tailscaleAddress string, 
 	if tailscaleAddress == "" {
 		return s.mustState(), errors.New("双模式需要选择 Tailscale 地址；如果只想用一个地址，请切换到单地址模式")
 	}
-	return s.applyNetwork(lanAddress, []string{tailscaleAddress}, port)
+	return s.applyNetwork(lanAddress, []string{tailscaleAddress}, false, port)
+}
+
+// ApplyAutoNetwork is the settings window's "bind every local address" entry
+// point: one concrete primary address/port (auto binding shares that port) and
+// the switch that makes the Hub cover every eligible LAN/Tailscale address.
+// autoBind=false is exactly single-address mode, so unticking the checkbox
+// needs no different call.
+func (s *SettingsService) ApplyAutoNetwork(bindAddress string, autoBind bool, port int) (State, error) {
+	return s.applyNetwork(bindAddress, nil, autoBind, port)
 }
 
 // applyNetwork validates, restarts and persists a listen selection. It stops the
@@ -435,7 +454,7 @@ func (s *SettingsService) ApplyDualNetwork(lanAddress, tailscaleAddress string, 
 // database/one data-directory lock; a partially bound set is never reported as
 // success. If the new selection cannot be bound, the previous configuration is
 // started again so the app is not left without a Hub.
-func (s *SettingsService) applyNetwork(bindAddress string, additional []string, port int) (State, error) {
+func (s *SettingsService) applyNetwork(bindAddress string, additional []string, autoBind bool, port int) (State, error) {
 	if s.remoteHubMode() {
 		return s.mustState(), errRemoteMode()
 	}
@@ -443,6 +462,11 @@ func (s *SettingsService) applyNetwork(bindAddress string, additional []string, 
 		return s.mustState(), err
 	}
 	if err := appsettings.ValidatePort(port); err != nil {
+		return s.mustState(), err
+	}
+	// Auto binding covers every eligible address itself, so an explicit extra
+	// address is refused by the same rule the saved file enforces.
+	if err := appsettings.ValidateAutoBindSelection(autoBind, additional); err != nil {
 		return s.mustState(), err
 	}
 	for _, addr := range additional {
@@ -468,6 +492,7 @@ func (s *SettingsService) applyNetwork(bindAddress string, additional []string, 
 		ConfigPath:              desktop.hubConfigPath,
 		BindAddress:             bindAddress,
 		AdditionalBindAddresses: append([]string(nil), additional...),
+		AutoBind:                autoBind,
 		Port:                    port,
 	}
 
@@ -484,14 +509,20 @@ func (s *SettingsService) applyNetwork(bindAddress string, additional []string, 
 		return s.mustState(), errors.New(friendly)
 	}
 
-	saved := appsettings.Settings{
-		// This path only runs while the shell is in local mode (remoteHubMode
-		// above rejects the rest), so the file keeps local mode.
-		Mode:                    appsettings.ModeLocal,
-		BindAddress:             bindAddress,
-		Port:                    port,
-		AdditionalBindAddresses: append([]string(nil), additional...),
+	// Start from the saved file so everything this call does not own survives:
+	// the device identity the shell paired with (dropping it would re-pair on
+	// the next launch and leave a dead device row behind) and any future field.
+	saved, found := loadSavedSettings()
+	if !found {
+		saved = appsettings.Default()
 	}
+	// This path only runs while the shell is in local mode (remoteHubMode above
+	// rejects the rest), so the file keeps local mode.
+	saved.Mode = appsettings.ModeLocal
+	saved.BindAddress = bindAddress
+	saved.Port = port
+	saved.AdditionalBindAddresses = append([]string(nil), additional...)
+	saved.AutoBind = autoBind
 	if err := appsettings.Save(desktop.settingsPath, saved); err != nil {
 		return s.mustState(), fmt.Errorf("Hub 已按新地址启动，但保存桌面设置失败：%w", err)
 	}

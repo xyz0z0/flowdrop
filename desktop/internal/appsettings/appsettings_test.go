@@ -2,6 +2,7 @@ package appsettings
 
 import (
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -16,6 +17,11 @@ func TestDefaultsAreUsable(t *testing.T) {
 	}
 	if got, want := d.Listen(), "127.0.0.1:8080"; got != want {
 		t.Fatalf("Default().Listen() = %q, want %q", got, want)
+	}
+	// Auto binding is the default so a fresh install serves every local address
+	// without the user picking addresses first; turning it off stays possible.
+	if !d.AutoBind {
+		t.Fatal("Default().AutoBind = false, want true")
 	}
 }
 
@@ -466,4 +472,100 @@ func mustJSON(t *testing.T, v any) string {
 		t.Fatalf("json.Marshal(%v): %v", v, err)
 	}
 	return string(b)
+}
+
+// TestAutoBindRoundTrip proves the auto-bind switch is persisted with its JSON
+// name and read back unchanged, and that a fresh default turns it on.
+func TestAutoBindRoundTrip(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "desktop.json")
+	if !Default().AutoBind {
+		t.Fatal("Default().AutoBind = false, want true (auto binding is the default)")
+	}
+	if err := Save(path, Settings{Mode: ModeLocal, BindAddress: "192.168.1.20", Port: 9090, AutoBind: true}); err != nil {
+		t.Fatalf("Save(auto_bind): %v", err)
+	}
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(raw), `"auto_bind": true`) {
+		t.Fatalf("saved file has no auto_bind field: %s", raw)
+	}
+	got, found, err := Load(path)
+	if err != nil || !found {
+		t.Fatalf("Load = found=%v err=%v", found, err)
+	}
+	if !got.AutoBind {
+		t.Fatalf("Load(auto_bind) = %+v, want AutoBind=true", got)
+	}
+
+	// Manual mode stays the default: no field is written and it reads back false.
+	manualPath := filepath.Join(dir, "manual.json")
+	if err := Save(manualPath, Settings{Mode: ModeLocal, BindAddress: "192.168.1.20", Port: 9090}); err != nil {
+		t.Fatalf("Save(manual): %v", err)
+	}
+	manualRaw, err := os.ReadFile(manualPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(manualRaw), "auto_bind") {
+		t.Fatalf("manual settings wrote auto_bind: %s", manualRaw)
+	}
+	manual, found, err := Load(manualPath)
+	if err != nil || !found {
+		t.Fatalf("Load(manual) = found=%v err=%v", found, err)
+	}
+	if manual.AutoBind {
+		t.Fatalf("Load(manual) = %+v, want AutoBind=false", manual)
+	}
+}
+
+// TestValidateAutoBindRules covers the frozen rule: auto binding owns the whole
+// address set, so an explicit extra address is refused, while auto binding with
+// no extra address and every manual combination keep working.
+func TestValidateAutoBindRules(t *testing.T) {
+	cases := []struct {
+		name string
+		s    Settings
+		want string
+	}{
+		{"auto alone", Settings{Mode: ModeLocal, BindAddress: "192.168.1.2", Port: 8080, AutoBind: true}, ""},
+		{"auto with loopback primary", Settings{Mode: ModeLocal, BindAddress: "127.0.0.1", Port: 8080, AutoBind: true}, ""},
+		{"auto with extra", Settings{Mode: ModeLocal, BindAddress: "192.168.1.2", Port: 8080, AutoBind: true, AdditionalBindAddresses: []string{"100.64.0.2"}}, "自动绑定模式下不能再选额外地址"},
+		{"auto with wildcard extra", Settings{Mode: ModeLocal, BindAddress: "192.168.1.2", Port: 8080, AutoBind: true, AdditionalBindAddresses: []string{"0.0.0.0"}}, "自动绑定模式下不能再选额外地址"},
+		{"manual single", Settings{Mode: ModeLocal, BindAddress: "192.168.1.2", Port: 8080}, ""},
+		{"manual dual", Settings{Mode: ModeLocal, BindAddress: "192.168.1.2", Port: 8080, AdditionalBindAddresses: []string{"100.64.0.2"}}, ""},
+		{"auto with bad port", Settings{Mode: ModeLocal, BindAddress: "192.168.1.2", Port: 0, AutoBind: true}, "port"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			err := tc.s.Validate()
+			if tc.want == "" {
+				if err != nil {
+					t.Fatalf("Validate(%+v) = %v, want nil", tc.s, err)
+				}
+				return
+			}
+			if err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("Validate(%+v) = %v, want substring %q", tc.s, err, tc.want)
+			}
+		})
+	}
+
+	// Save refuses the combination too, so a contradictory file is never written.
+	path := filepath.Join(t.TempDir(), "desktop.json")
+	err := Save(path, Settings{Mode: ModeLocal, BindAddress: "192.168.1.2", Port: 8080, AutoBind: true, AdditionalBindAddresses: []string{"100.64.0.2"}})
+	if err == nil || !errors.Is(err, ErrAutoBindWithAdditional) {
+		t.Fatalf("Save(auto + extra) = %v, want ErrAutoBindWithAdditional", err)
+	}
+	if _, statErr := os.Stat(path); !os.IsNotExist(statErr) {
+		t.Fatalf("Save wrote a file for the contradictory selection (err=%v)", statErr)
+	}
+	if err := ValidateAutoBindSelection(true, nil); err != nil {
+		t.Fatalf("ValidateAutoBindSelection(true, nil) = %v", err)
+	}
+	if err := ValidateAutoBindSelection(false, []string{"100.64.0.2"}); err != nil {
+		t.Fatalf("ValidateAutoBindSelection(false, extra) = %v", err)
+	}
 }

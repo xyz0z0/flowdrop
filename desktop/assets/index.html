@@ -99,7 +99,11 @@
       <h2>运行状态</h2>
       <dl class="kv">
         <dt>可供手机访问的地址</dt>
-        <dd><code id="hub-url">—</code>
+        <dd>
+          <div id="hub-urls" class="hub-urls"><code>—</code></div>
+          <p id="hub-urls-hint" class="hint hint-inline" hidden>
+            自动绑定会同时监听多个地址；手机用局域网那一行，装了 Tailscale 的设备用 100.x 那一行，容器用 172.x 那一行。
+          </p>
           <button id="copy-url" class="ghost" type="button">复制</button>
           <button id="open-browser" class="ghost" type="button">在浏览器打开</button>
         </dd>
@@ -147,46 +151,63 @@
         同一个 Hub 会在两个地址的<b>同一端口</b>上提供服务，数据与登录完全共享。
       </p>
 
-      <div class="mode-list" role="radiogroup" aria-label="网络绑定方式">
-        <label class="mode">
-          <input id="mode-single" type="radio" name="bind-mode" value="single" />
-          <span class="mode-body">
-            <span class="mode-title">只使用一个地址</span>
-            <span class="mode-desc">下面任选一个本机地址：内网、Tailscale 或回环。</span>
-          </span>
-        </label>
-        <label id="mode-dual-label" class="mode">
-          <input id="mode-dual" type="radio" name="bind-mode" value="dual" />
-          <span class="mode-body">
-            <span class="mode-title">同时使用内网和 Tailscale</span>
-            <span class="mode-desc">一个内网地址 + 一个 Tailscale 地址，同端口、同一 Hub、同一数据库。</span>
-          </span>
-        </label>
-      </div>
-      <p id="dual-hint" class="hint hint-warn" hidden></p>
+      <label class="check" id="auto-bind-row">
+        <input id="autoBind" type="checkbox" />
+        <span>自动绑定本机所有可用地址（局域网 + Tailscale，端口同上）</span>
+      </label>
 
-      <div id="single-pane">
-        <p class="hint">在这个列表中选择一个要绑定的地址：</p>
-        <div id="iface-list" class="iface-list"></div>
-        <p id="tailscale-hint" class="hint hint-warn" hidden>
-          未检测到 Tailscale 网卡：不能选择双模式，但仍可使用内网单地址模式正常收发。
-          跨网络访问需要你在系统里自行安装并登录 Tailscale；本应用不会要求或自动安装它。
-        </p>
+      <div id="manual-bind">
+        <div class="mode-list" role="radiogroup" aria-label="网络绑定方式">
+          <label class="mode">
+            <input id="mode-single" type="radio" name="bind-mode" value="single" />
+            <span class="mode-body">
+              <span class="mode-title">只使用一个地址</span>
+              <span class="mode-desc">下面任选一个本机地址：内网、Tailscale 或回环。</span>
+            </span>
+          </label>
+          <label id="mode-dual-label" class="mode">
+            <input id="mode-dual" type="radio" name="bind-mode" value="dual" />
+            <span class="mode-body">
+              <span class="mode-title">同时使用内网和 Tailscale</span>
+              <span class="mode-desc">一个内网地址 + 一个 Tailscale 地址，同端口、同一 Hub、同一数据库。</span>
+            </span>
+          </label>
+        </div>
+        <p id="dual-hint" class="hint hint-warn" hidden></p>
+
+        <div id="single-pane">
+          <p class="hint">在这个列表中选择一个要绑定的地址：</p>
+          <div id="iface-list" class="iface-list"></div>
+          <p id="tailscale-hint" class="hint hint-warn" hidden>
+            未检测到 Tailscale 网卡：不能选择双模式，但仍可使用内网单地址模式正常收发。
+            跨网络访问需要你在系统里自行安装并登录 Tailscale；本应用不会要求或自动安装它。
+          </p>
+        </div>
+
+        <div id="dual-pane" hidden>
+          <div class="row">
+            <label for="dual-lan">内网（LAN）地址</label>
+            <select id="dual-lan"></select>
+          </div>
+          <div class="row">
+            <label for="dual-ts">Tailscale 地址</label>
+            <select id="dual-ts"></select>
+          </div>
+          <p class="hint">
+            两处必须是本机当前真实存在的地址，且不能相同。保存后 Hub 会同时绑定这两个 IP 的同一端口；
+            任一地址绑定失败则整体失败并恢复原配置，不会只启动一半。
+          </p>
+        </div>
       </div>
 
-      <div id="dual-pane" hidden>
-        <div class="row">
-          <label for="dual-lan">内网（LAN）地址</label>
-          <select id="dual-lan"></select>
-        </div>
-        <div class="row">
-          <label for="dual-ts">Tailscale 地址</label>
-          <select id="dual-ts"></select>
-        </div>
+      <div id="auto-pane" hidden>
         <p class="hint">
-          两处必须是本机当前真实存在的地址，且不能相同。保存后 Hub 会同时绑定这两个 IP 的同一端口；
-          任一地址绑定失败则整体失败并恢复原配置，不会只启动一半。
+          勾选后不需要再选地址：Hub 会在这个端口上绑定本机当前所有可用的局域网和 Tailscale 地址，
+          网络变化（例如换 Wi-Fi 或连上 Tailscale）后会自动跟上，不用重启。
         </p>
+        <p class="hint">当前实际绑定（每 3 秒刷新，取消勾选不影响已选的单地址/双模式设置）：</p>
+        <ul id="auto-url-list" class="url-list"></ul>
+        <p id="auto-url-empty" class="hint" hidden>Hub 未运行：勾选并保存后会列出真实监听的地址。</p>
       </div>
 
       <div class="row">

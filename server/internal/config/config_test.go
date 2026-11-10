@@ -3,6 +3,7 @@ package config
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -297,5 +298,97 @@ func TestAdditionalListenValidation(t *testing.T) {
 	c.AdditionalListen = []string{"0.0.0.0:8081"}
 	if err := c.Validate(); err == nil {
 		t.Fatal("wildcard additional listen with cookie_secure=false was accepted")
+	}
+}
+
+// withoutAutoBindEnv unset FLOWDROP_AUTO_BIND for one test so file and default
+// assertions cannot be masked by the developer's shell, and restores it after.
+func withoutAutoBindEnv(t *testing.T) {
+	t.Helper()
+	old, had := os.LookupEnv("FLOWDROP_AUTO_BIND")
+	if err := os.Unsetenv("FLOWDROP_AUTO_BIND"); err != nil {
+		t.Fatalf("unset FLOWDROP_AUTO_BIND: %v", err)
+	}
+	t.Cleanup(func() {
+		if had {
+			os.Setenv("FLOWDROP_AUTO_BIND", old)
+		} else {
+			os.Unsetenv("FLOWDROP_AUTO_BIND")
+		}
+	})
+}
+
+// TestAutoBindConfig pins the auto_bind parsing rules: JSON, env, env-over-file
+// precedence, the invalid-value error and the off-by-default regression.
+func TestAutoBindConfig(t *testing.T) {
+	withoutAutoBindEnv(t)
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.json")
+	write := func(body string) {
+		t.Helper()
+		if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	t.Setenv("FLOWDROP_DATA_DIR", dir)
+
+	// JSON true enables it.
+	write(`{"auto_bind":true}`)
+	c, err := Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !c.AutoBind {
+		t.Fatalf("auto_bind=true not honored: %v", c.AutoBind)
+	}
+
+	// A missing field keeps the safe default (off).
+	write(`{}`)
+	c, err = Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.AutoBind {
+		t.Fatal("auto_bind must stay off when the field is absent")
+	}
+
+	// JSON true plus an explicit env opt-out: the env wins, like every other
+	// field, so an operator can disable it without editing the file.
+	t.Setenv("FLOWDROP_AUTO_BIND", "false")
+	c, err = Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.AutoBind {
+		t.Fatal("FLOWDROP_AUTO_BIND=false did not override auto_bind=true")
+	}
+
+	// Env alone enables it, including the file that omits the field.
+	write(`{"listen":"127.0.0.1:8080"}`)
+	t.Setenv("FLOWDROP_AUTO_BIND", "true")
+	c, err = Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !c.AutoBind {
+		t.Fatal("FLOWDROP_AUTO_BIND=true not honored")
+	}
+
+	// An unparsable value is an error that names the variable, not a silent
+	// fallback: a typo must never leave auto binding unexpectedly on.
+	t.Setenv("FLOWDROP_AUTO_BIND", "banana")
+	if _, err := Load(path); err == nil {
+		t.Fatal("FLOWDROP_AUTO_BIND=banana accepted")
+	} else if !strings.Contains(err.Error(), "FLOWDROP_AUTO_BIND") {
+		t.Fatalf("error does not name FLOWDROP_AUTO_BIND: %v", err)
+	}
+}
+
+// TestAutoBindDefaultIsOff is the regression guard for the shipped default: an
+// unconfigured Hub binds only the addresses the operator wrote down.
+func TestAutoBindDefaultIsOff(t *testing.T) {
+	withoutAutoBindEnv(t)
+	if Default().AutoBind {
+		t.Fatal("Default() must not auto bind")
 	}
 }

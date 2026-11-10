@@ -1,6 +1,96 @@
 # Agent 任务记录
 
-## 当前交付：配对与LAN/Tailscale自动连接（2026-11-08）
+## 当前交付：自动绑定与热更新（NET，2026-11-09）
+
+用户要求：不再限制「一个主地址 + 一个额外地址」，改为**自动绑定本机所有可用地址**，并在地址变化时热更新（选项 C，已确认接受其代价）。
+
+**设计冻结（主 agent 决策）**
+
+- 配置面：新增 `auto_bind`（`json:"auto_bind"`，env `FLOWDROP_AUTO_BIND`，默认 false）。开启时除主监听外，自动绑定本机所有符合条件的 IPv4，**端口与主监听相同**。
+- 语义变更（必须写进文档）：显式 `additional_listen` 维持「全有或全无、失败不启动」；自动绑定的派生地址是**尽力而为**——单个地址绑定失败只记 warn 并等下一轮重扫，主监听失败仍然整体启动失败。不再有"多地址半启动"的沉默风险，因为派生地址缺失是可观测的（URLs/日志/桌面列表）。
+- 纳入自动绑定：RFC1918 LAN、Tailscale CGNAT（100.64/10）。排除：loopback（主监听已覆盖）、link-local、公网地址、down 的接口、容器/虚拟网桥（`docker0`、`veth*`、`br-*`、`virbr*`、`lxc*`、`podman*`、`vmnet*`、`vboxnet*`）。主监听端口为 `0` 时禁用自动绑定（端口不可复用），记 warn。
+- 顺序：主监听 → LAN（IP 升序）→ Tailscale（IP 升序）；`Hub.URLs()` 反映当前实际集合。移除地址时关闭对应 listener，其上进行中的请求会被中断（文档说明）。
+- 重扫周期 5s；`hub.Options.AutoBindInterval` 可注入供测试。
+- mDNS：地址集变化时整体 `Close()` 旧 handle 再 `Start()` 重注册（简单可靠，避免增量 unregister 的状态机）。
+- Host 白名单：新增 `api.Server.SetBoundHosts([]string)` 动态替换派生地址的 Host 集合；通配地址仍然不进白名单。
+- 桌面：新增「自动绑定本机所有可用地址」开关；开启时隐藏/禁用原有手动地址选择，改为显示实时绑定列表；关闭时保留现有手动/双模式行为。
+- 不改动：配对语义、鉴权、CSRF、上传/下载、`sendcli` 协议面。
+
+| NET-07 | 已派发（`task_8c693bdee768` / `ctx_168b1444a524`）。用户要求对齐 LocalSend：自动绑定纳入 docker0/`br-*` 等容器网桥上的**私有**地址（公网地址仍排除），但 mDNS 广播必须过滤掉这些地址（手机解析到不可达地址）。范围：`internal/netbind` 的 `Targets`、`pkg/hub/autobind.go` 的 `filterAdvertised` + 两个 `startDiscovery` 调用点、`DEPLOY §5.9`/`ARCHITECTURE §12.4` | 单测：`Targets` 含 172.17.0.1/172.18.0.1 且不含公网；`filterAdvertised` 剔除 Virtual、保留未知地址；真机冒烟：临时 Hub 五地址同端口 `/health` 200 | 20min；不改 discovery/api/config/desktop |
+| 任务 | 目标与允许范围 | 依赖与证据 | 预算/停止条件 |
+|---|---|---|---|
+| NET-01 | 已完成并复核：`server/internal/netbind/{netbind,netbind_test}.go`（208+225 行，5 个表驱动测试 30 PASS；`gofmt`/`vet`/`test` 通过；主 agent 复跑通过）。task `task_ba32f8582281` / `ctx_937494dfabe3`。原范围：新增 `server/internal/netbind/`（实现+测试）：地址枚举（可注入）、`Classify`（按接口名/网段分类 LAN/Tailscale/Virtual/Other/Loopback）、`Targets(addrs, port)`（筛选+排序+去重）、`Diff(old,new)`。只允许新增该目录 | 表驱动单测覆盖 RFC1918/Tailscale/docker 网桥/link-local/公网/down 接口/多网卡排序/Diff 三态；`go test ./internal/netbind/...`、`go vet`、gofmt | 20min；不改 hub/api/config/desktop |
+| NET-03 | 已完成并复核：`server.go` 加 `boundMu`/`boundHosts`/`SetBoundHosts`/`hostAllowed`（`hostCheck` 与 Origin 校验都走它），新增 `dynamic_hosts_test.go`（4 测试，`-race` 通过；主 agent 复跑 `internal/api` 通过）。task `task_1bb2b4489464` / `ctx_2aa299324386`。原范围：`server/internal/api`：新增 `SetBoundHosts([]string)`，`hostCheck` 与 Origin 校验同时使用静态+动态集合（新增测试文件） | 未登记 Host 仍 421；登记后 200；移除后再次 421；`go test ./internal/api/... -count=1` | 20min；不改其他包 |
+| NET-02 | 已完成并复核：`autobind.go`(421)+`autobind_test.go`(346)，`hub.go` +48/-23（`Options.AutoBind/AutoBindInterval/Scan`、`serveListener`、`boundAddrs`、`Stop` 等重扫退出）；9 项测试 + 既有 30 个 hub 测试全过（`-race` 通过）；主 agent 复跑 `pkg/hub` 通过。task `task_970ccedb8d0b` / `ctx_e1991029e2df`。原范围：`server/pkg/hub`：`Options.AutoBind`/`AutoBindInterval`/`Scan` 注入；动态 add/remove listener；URLs 动态；mDNS 重注册；派生地址失败容忍；调用 `api.Server.SetBoundHosts` | 注入 fake scanner 在 127.0.0.1/127.0.0.2 上测增加、移除、失败重试、URLs 顺序；`go test ./pkg/hub/... -count=1` | 20min；依赖 NET-01/NET-03；不改 desktop/web |
+| NET-04 | 已完成并复核：`main.go` 加只读 `reportAutoBind`（off/端口0 WARN/scan 失败/目标地址行）+ usage 一行，`config_test.go` 与新增 `doctor_autobind_test.go`；39 PASS；主 agent 复跑 config/cmd 测试与 vet 通过。task `task_14063b4667a8` / `ctx_a075fce84d7c`。原范围：`server/internal/config` 的 `auto_bind` 解析测试 + `flowdrop doctor` 显示自动绑定目标 + usage 文案；主 agent 已先手加 `config.AutoBind`/env 与 `hub.Options.AutoBind *bool`（nil=用配置）并复跑 config/hub 测试 | config env/json/非法值测试；doctor 实测输出；`go test ./internal/config/... ./cmd/flowdrop/...` | 15min；不改 hub/api/netbind/desktop/docs |
+| NET-05 | 已完成并复核：`appsettings.AutoBind`+互斥校验、`hubmgr.Config.AutoBind` 显式传 `&cfg.AutoBind`、`applyNetwork(..., autoBind, port)` + `ApplyAutoNetwork`（旧三方法签名不变、回滚/保存带 AutoBind）、`assets` 复选框 + 实时列表；`go vet -tags gtk3` / `go build -tags gtk3` / `internal/...` 43 PASS / `node --check` 通过（主 agent 复跑）；UI 仅代码审查未开窗口。task `task_c28df534177a` / `ctx_079f6c5150d8`。原范围：`desktop/`：`hubmgr.Config.AutoBind`、`appsettings.AutoBind`（json `auto_bind`）、设置窗口「自动绑定本机所有可用地址」开关 + 实时绑定列表（来自 Hub URLs）、关闭时保留现有手动/双模式 | hubmgr/appsettings 单测；真实 Hub 在开关打开后 URLs 含 LAN+Tailscale；`go test ./desktop/...` | 20min；不改 server/**、web 的其它页面 |
+| NET-06 | 已完成并复核：`dist/flowdrop` 12370082 B / SHA `d1fbb1a0…530e1f`；worker 六项真机检查通过（doctor 两个 target、ss 三监听同 PID、三地址 health 200、派生 Host 200 而未知名 421、LAN login+send、Tailscale 文本投递），主 agent 独立复跑同一组检查通过；文档 `DEPLOY.md §5.9`+`§9`、`README`、`ARCHITECTURE §12.4`；未实测项（地址增删热更新、端口 0、绑定失败重试、mDNS 重注册、桌面 GUI）已单列于 VERIFICATION §22.6。task `task_935cd656a9b2` / `ctx_c345d4c1f8dd`。原范围：文档 + 构建 + 真实端到端：`docs/DEPLOY.md`（`auto_bind` 语义、失败容忍、热更新、地址消失中断在途请求、端口 0 禁用）、`README.md`、`docs/ARCHITECTURE.md`；`scripts/build.sh` 重建 `dist/flowdrop` 并记录 SHA | 真实机器 `auto_bind=true` 启动，核对实际绑定集合、URLs、Host 白名单（新地址不被 421）；不制造网卡变化；记录未验证项 | 20min；不安装/commit/push |
+
+## 当前交付：自动绑定默认开启与安装（NET-08，2026-11-09）
+
+用户要求「打开，而且设置默认打开」，并明确同意安装。
+
+- `appsettings.Default()` → `AutoBind: true`（新装默认自动绑定；已保存的旧文件仍读回 false，不擅自改用户选择）
+- 修复 NET-05 遗留缺口：`desktop/main.go` 的 `startHub` 之前没传 `AutoBind`，**首次启动会忽略已保存的开关**
+- 修复随之暴露的窗口 origin 选择：`preferredHubURL` 优先回环主监听（自动绑定下 LAN/Tailscale 只是附加监听），新增 `isLoopbackURL`；双模式行为不变
+- 用户配置 `~/.config/flowdrop/desktop.json` 置 `auto_bind: true` 并去掉互斥的 `additional_bind_addresses`（已备份）
+- 已执行 `scripts/install-desktop.sh`：`~/.local/bin/flowdrop-desktop` SHA `7fa0efe7…d311`
+
+验证：`go test -tags gtk3 .` 与 `./internal/...` 全通过；真机冒烟（主监听 LAN + auto_bind）四地址同端口 `/health` 全 200。细节见 VERIFICATION §22.9。
+
+后续（用户反馈）：运行状态只显示一个地址——`app.js` 里 `state.url` 单值与"实际绑定"由已保存设置拼出，自动绑定下都会漏报。改为 `#hub-urls` 列表 + `runningListenAddrs`（运行中取 `state.urls`）。重装 SHA `c5872c1f…d582`。细节见 VERIFICATION §22.10。
+
+## 当前交付：agent 投递 CLI（`flowdrop send`，2026-11-09）
+
+**交付状态（2026-11-09）**：SEND-01/02/03 均已交付并经主 agent 复核；`server/internal/sendcli`（13测试）、`server/cmd/flowdrop`（21测试）、`-race`、`go vet`、`go build ./...` 全通过；主 agent 独立临时 Hub 端到端（login 同机免码 → send --json → Bearer 下载 SHA 一致 → text stdin → link）通过；`dist/flowdrop` 12320930 B SHA `d32cf3bf60e34fa249ef33e11b862ab8803c82a00d805b3b83762c5170e62a82`；文档 `docs/DEPLOY.md §3.1` 与 README 已更新。未安装/commit/push，无剩余运行任务；未验证项与用户验收步骤见 VERIFICATION §21。
+
+**需求（用户确认）**：让本机 agent 直接把文件/文字投递到 FlowDrop。用户已确认：agent 与 Hub 同机、子命令名为 `send`、支持 `--text -` 从 stdin 读文本。
+
+**主 agent 决策（冻结，worker 不得自行更改）**
+
+- 不新增任何 HTTP 端点、不改服务端鉴权/CSRF/配对语义；CLI 完全复用现有 `/api/v1/*`。
+- 客户端凭据走现有 native 配对：`POST /api/v1/auth/pair {code,device_name,native:true}`，无 Origin；一次性拿到 `device_token`。同机默认由 CLI 自己在本地 DB 生成码（复用 `createPairingCode`），可 `--code` 覆盖。
+- 必须用 cookie jar：`GET /api/v1/auth/session`（Bearer）拿 `csrf_token` 并收下 `flowdrop_csrf` cookie；写请求带 `X-FlowDrop-CSRF`。仅发 Bearer 会 403 `csrf_missing`（`server/internal/api/server.go:274`）。
+- 凭据文件：`$FLOWDROP_CLI_CONFIG`，否则 `<UserConfigDir>/flowdrop/cli.json`，0600 原子写；字段 `hub_url/device_token/device_id/device_name/created_at`；不回显令牌。不读取、不复用 `desktop.json` 的令牌（撤销会互相打断）。
+- 不做：自动重试、自动删除、目录递归、watch 守护、logout 子命令、GUI。
+
+**冻结 Go 接口（`server/internal/sendcli`）**
+
+```go
+type Credentials struct { HubURL, DeviceToken, DeviceID, DeviceName string; CreatedAt int64 } // json: hub_url/device_token/device_id/device_name/created_at
+func DefaultCredentialsPath() string
+func LoadCredentials(path string) (Credentials, error) // 文件不存在→ErrNoCredentials
+func SaveCredentials(path string, c Credentials) error // 0600，原子替换
+func Pair(ctx context.Context, hubURL, code, deviceName string) (Credentials, error) // 不落盘
+
+type Item struct { ID, Type, Text string; CreatedAt int64; Blob *Blob } // 按响应 JSON 解码，忽略多余字段
+type Blob struct { OriginalName string; SizeBytes int64; SHA256, ContentType string }
+
+type Error struct { Status int; Code, Message string } // 实现 error
+func (c *Client) Connect(ctx context.Context) error // GET session(Bearer)+jar+csrf+limits；401→ErrUnauthorized
+func (c *Client) MaxUploadBytes() int64
+func (c *Client) SendFile(ctx context.Context, path string) (Item, error)      // 目录/非普通文件报错
+func (c *Client) SendReader(ctx context.Context, name string, size int64, r io.Reader) (Item, error)
+func (c *Client) SendText(ctx context.Context, kind, text string) (Item, error) // kind "text"|"link"
+```
+
+**命令面（`server/cmd/flowdrop`）**
+
+- `flowdrop login [--hub URL] [--code CODE] [--name NAME] [--credentials FILE] [-config FILE]`：默认 hub 取本地 config 第一个 listen（通配地址换成 `127.0.0.1`，`cookie_secure=true` 用 https）；默认码本地 DB 生成；默认设备名 `cli-<hostname>`；成功后打印 hub/设备名/device_id 与「可在设置里撤销」。
+- `flowdrop send [--hub URL] [--json] [--text TEXT|-] [--link URL] [--name NAME] [--credentials FILE] FILE...`：三选一模式（文件 / `--text` / `--link`）；`--text -` 读 stdin（上限 64 KiB，超限本地报错不发）；位置参数 `-` 读 stdin 并以 `--name` 命名（先 spool 到临时文件，用完删除）；逐文件独立结果，目录/超限跳过继续；遇 429 停止并标记剩余 `skipped`；退出码 0 全成功 / 1 有失败 / 2 用法错；`FLOWDROP_HUB`、`FLOWDROP_TOKEN`、`FLOWDROP_CLI_CONFIG` 可覆盖，`--hub` 优先于环境变量。
+- `--json` 输出 stdout NDJSON，每条输入一行：成功 `{"ok":true,"input":...,"item":{...}}`，失败 `{"ok":false,"input":...,"error":{"code":...,"message":...}}`；非 json 模式人读一行一条。
+
+| 任务 | 单一目标/允许写入 | 依赖与验收 | 预算/停止条件 | 状态 |
+|---|---|---|---|---|
+| SEND-01 | 只新增 `server/internal/sendcli/`（实现+测试）：凭据存取、Pair、Connect/csrf、SendFile/SendReader/SendText、错误映射 | 无（接口已冻结）；用 `httptest` + `api.New` 真实 handler（temp DB、`CookieSecure=false`、`MinFreeBytes=0`）覆盖：配对成功/错码、401、上传后 SHA-256 与字节数一致、text/link、服务端超限、凭据 0600 与 ErrNoCredentials；`go test ./internal/sendcli/...`、`go vet`、gofmt | 20min；普通命令 30s，测试 120s；不改 api/config/pairing/hub/cmd/docs | 完成并已复核；13 PASS；主 agent 修正冻结字段错误：服务端 `store.Blob` 序列化为 `blob.name`，已把 `Blob.OriginalName` tag 改为 `name` 并删除多余 UnmarshalJSON，gofmt/vet/test 重跑通过；报告 `/tmp/flowdrop-send01-report.md`；task `task_f156351d4f16` / ctx_099bb41b7489 |
+| SEND-02 | 只改 `server/cmd/flowdrop/main.go`，可新增 `send_cmd.go`/`send_cmd_test.go`：`login`/`send` 接线、参数、输出、退出码、usage | SEND-01 交付后；用 `run()` 直接驱动，测试走 `FLOWDROP_HUB/FLOWDROP_TOKEN/FLOWDROP_CLI_CONFIG` 的 httptest 服务；`go test ./cmd/flowdrop/...`、`go vet`、gofmt；不改 sendcli 实现 | 20min；同 SEND-01 超时；不改 web/desktop/android/docs | 完成并已复核；21 PASS、-race 通过；新增 `send_cmd.go`(555)/`send_cmd_test.go`(776)，main.go +9；主 agent 重跑 gofmt/vet/test/-race 均通过；报告 `/tmp/flowdrop-send02-report.md`；task `task_284caf2da6c1` / ctx_92ba2f8a7381 |
+| SEND-03 | 文档+构建+真实端到端：README「agent 投递」小节、`docs/DEPLOY.md` §3.1 CLI 用法、`dist/flowdrop` 构建与 SHA | SEND-02 后；仅用临时 config/data_dir 与 ephemeral 端口的独立 Hub 进程做一次真实 `login`+`send`+鉴权下载比对 SHA，结束精确停止该进程；不碰用户实例/数据 | 20min；构建 240s，其余 60s；不安装、不 commit/push | 完成并已复核；构建 rc=0、产物 12320930 B；worker 端到端 1–6 + 补充场景全过；主 agent 独立重跑 login/send/下载 SHA/text/link 通过，临时进程已停、临时目录已删；报告 `/tmp/flowdrop-send03-report.md`；task `task_e4fde81e5492` / ctx_73730148f037 |
+
+**流程记录**：2026-11-09 主 agent 误用 `--spec /dev/null` 触发空任务 `task_7eaa83dec8bc` / `ctx_e0eee389e0e3`，已立即 `worker-stop`（terminal 已回收，state=stopped），不作为交付记录。
+
+---
+
+## 历史交付：配对与LAN/Tailscale自动连接（2026-11-08）
 
 **交付状态（2026-11-08 19:06）**：配对与单Hub多地址连接的开发、自动验证和Linux/Android构建完成，所有本轮worker已回报，无剩余运行任务。服务端全包、desktop65、Android带真实Hub集成102 JVM、完整AndroidTest编译、Chromium16项、隔离Wails配对/原生拖拽均通过。真实手机Wi-Fi/Tailscale切换及本轮KDE配对待用户验收；未自动安装/commit/push。三产物与摘要见VERIFICATION §20。以下为分阶段计划与历史派发记录，不将其旧“待前置/运行中”文字当当前状态。
 
@@ -885,6 +975,16 @@ DL-02（桌面端）：
 - `grep`：`admin_users`/`sessions` 只出现在 `db_test.go` 的反向断言；`restart_required`/`RestartRequired`/`TestLegacy`/`login_limit`/`argon2` 在两端代码中已无引用。
 - 文档：`README.md`（升级说明、desktop.json 字段说明、双地址限制）、`docs/ARCHITECTURE.md`（包树、表清单、§4 认证）、`docs/DEPLOY.md`（§3 说明、Tailscale 多监听、§16.6 单地址措辞、配置表键名）、`docs/VERIFICATION.md`（标注历史密码用例已随代码删除）同步；`desktop/assets/index.html` 去掉“单地址是旧方式”的产品文案。
 
-风险记录（本轮未改，单独确认）：`SettingsService.applyNetwork` 保存绑定地址时用新的 `Settings` 字面量覆盖整个文件，会丢掉 `desktop_device_id`/`desktop_device_token`。后果：改一次网络绑定后，下次启动会重新配对，并在设备列表里留下一条旧记录（本机行按名字显示，不影响登录）。这是 DL-01 免码登录引入后与旧保存路径的交互，不是本次清理造成的；修复方式是把新值合并进已加载的 Settings 而不是重建。
+风险记录（已由 DL-03 修复）：`SettingsService.applyNetwork` 保存绑定地址时用新的 `Settings` 字面量覆盖整个文件，会丢掉 `desktop_device_id`/`desktop_device_token`。后果：改一次网络绑定后，下次启动会重新配对，并在设备列表里留下一条旧记录（本机行按名字显示，不影响登录）。这是 DL-01 免码登录引入后与旧保存路径的交互，不是本次清理造成的。
 
 未验证：本轮没有需要目视确认的界面变化（删掉的横幅在 `ApplyMode` 热切换后不可达），因此未做隔离容器 GUI 运行；未重新构建/安装桌面二进制；未 commit。
+
+## DL-03 修复改绑定地址丢设备令牌（2026-11-09，用户选定）
+
+- 目标：`SettingsService.applyNetwork` 不再用新的 `Settings` 字面量覆盖 `desktop.json`，改绑定地址/端口后本机 Hub 的设备身份（`desktop_device_id`/`desktop_device_token`）必须保留。
+- 范围：仅 `desktop/service.go` 的 `applyNetwork` 保存段与 `desktop/service_test.go`。不动 `ApplyMode`/`switchTo*`、不动 Hub 侧、不改 `appsettings` 规则、不动界面。
+- 做法：先 `loadSavedSettings()`（缺失时用 `appsettings.Default()`），只覆盖 `Mode`/`BindAddress`/`Port`/`AdditionalBindAddresses`，其余字段原样带过——与 `ApplyMode` 既有的“读—改—写”一致；`appsettings.Save` 仍负责 `Normalize`/`Validate`/0600 原子写。
+- 验收证据：新增 `TestServiceApplyNetworkKeepsDeviceIdentity`（预置令牌 → `ApplyNetwork` 换端口 → 重新 `Load`，端口更新且 ID/令牌仍在）。
+- 执行方式：主 agent 直接修复（规则明确的最小改动，未派 worker）。实跑（2026-11-09 18:24，sysroot pkg-config）：`gofmt -l .` 空、`go vet -tags gtk3 .` 通过、`go test -tags gtk3 -count=1 ./...` 四个包全 ok。
+- 构建与安装：`scripts/build-desktop.sh` → `dist/flowdrop-desktop`（sha256 `f2bc7ec4…`）；`scripts/install-desktop.sh` 装到 `~/.local/bin/flowdrop-desktop`（哈希一致）。同时用 `scripts/build.sh` 重建 `dist/flowdrop`（Hub CLI，含新前端嵌入）。
+- 未做：没有启动 GUI，因此无截图；未改 `~/.config/flowdrop/desktop.json`（真机文件里令牌仍在，`dev_local` 记录 13 条待清理，属用户数据，未经确认不删）；未 commit。

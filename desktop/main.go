@@ -41,6 +41,7 @@ import (
 	"io/fs"
 	"log"
 	"log/slog"
+	"net"
 	"net/http"
 	"net/url"
 	"os"
@@ -335,6 +336,7 @@ func startHub(manager *hubmgr.Manager, st appsettings.Settings, cfgPath string) 
 		ConfigPath:              cfgPath,
 		BindAddress:             st.BindAddress,
 		AdditionalBindAddresses: append([]string(nil), st.AdditionalBindAddresses...),
+		AutoBind:                st.AutoBind,
 		Port:                    st.Port,
 	})
 	if err != nil {
@@ -467,9 +469,17 @@ func (d *desktopState) wireSettingsDialog() {
 // address when one exists, otherwise the Hub's primary URL. In dual mode the
 // Hub's primary URL is already the LAN listener, so this also covers the case
 // where the interface list changed between start and window creation.
+//
+// A loopback primary always wins: with auto binding the primary is 127.0.0.1
+// while the LAN/Tailscale addresses are additional listeners, and the shell's
+// window must stay on the address that never changes when the machine moves
+// between networks (its session cookie is per-origin).
 func preferredHubURL(m *hubmgr.Manager) string {
 	if m == nil {
 		return ""
+	}
+	if primary := m.URL(); isLoopbackURL(primary) {
+		return primary
 	}
 	urls := m.URLs()
 	if list, err := network.List(); err == nil {
@@ -478,6 +488,20 @@ func preferredHubURL(m *hubmgr.Manager) string {
 		}
 	}
 	return m.URL()
+}
+
+// isLoopbackURL reports whether raw names the local machine address.
+func isLoopbackURL(raw string) bool {
+	u, err := url.Parse(raw)
+	if err != nil {
+		return false
+	}
+	host := u.Hostname()
+	if host == "localhost" {
+		return true
+	}
+	ip := net.ParseIP(host)
+	return ip != nil && ip.IsLoopback()
 }
 
 // openInbox creates the inbox window that loads the Hub's real HTTP origin.

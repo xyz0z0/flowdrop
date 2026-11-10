@@ -30,6 +30,13 @@ type Config struct {
 	// Port 0 asks the OS for a port: every :0 listener gets its own ephemeral
 	// port and hub.URLs() reports the actual ones.
 	AdditionalListen []string `json:"additional_listen"`
+	// AutoBind also binds every eligible local IPv4 (RFC1918 LAN and Tailscale
+	// CGNAT) on the primary listener's port, and keeps that set up to date as
+	// addresses appear and disappear. It is best effort: an address that cannot
+	// be bound is logged and retried on the next rescan instead of failing
+	// startup, while explicit AdditionalListen keeps its all-or-nothing
+	// semantics. Disabled when the primary listener uses port 0.
+	AutoBind bool `json:"auto_bind"`
 	// DataDir holds flowdrop.db, blobs/ and tmp/.
 	DataDir string `json:"data_dir"`
 	// AllowedHosts is an explicit allowlist of Host header hostnames.
@@ -164,6 +171,9 @@ func (c *Config) applyEnv() error {
 
 	setStr("FLOWDROP_LISTEN", &c.Listen)
 	setList("FLOWDROP_ADDITIONAL_LISTEN", &c.AdditionalListen)
+	if err := setBool("FLOWDROP_AUTO_BIND", &c.AutoBind); err != nil {
+		return err
+	}
 	setStr("FLOWDROP_DATA_DIR", &c.DataDir)
 	setList("FLOWDROP_ALLOWED_HOSTS", &c.AllowedHosts)
 	setList("FLOWDROP_TRUSTED_PROXIES", &c.TrustedProxies)

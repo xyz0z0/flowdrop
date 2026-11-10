@@ -113,6 +113,92 @@ flowdrop serve
 curl -s http://127.0.0.1:8080/api/v1/health
 ```
 
+### 3.1 命令行设备（同机 agent / 脚本投递）
+
+Hub 二进制自带两个子命令：`flowdrop login` 把本机登记为一台设备，
+`flowdrop send` 用它投递文件、文字和链接。不需要浏览器、桌面窗口或 Android App，
+适合 agent、cron 与脚本。
+
+**二进制**：`scripts/build.sh` 的产物 `dist/flowdrop`，与 Hub 是**同一个二进制**
+（`dist/flowdrop serve` 起 Hub，`dist/flowdrop login/send` 当客户端）。桌面 App 用户
+不装 CLI 也能用它，只要把配置指向桌面 Hub 的配置：`-config ~/.config/flowdrop/config.json`。
+
+**`flowdrop login`**：
+
+```bash
+flowdrop login -config ~/.config/flowdrop/config.json
+# hub          http://127.0.0.1:8080
+# device       cli-<主机名>
+# device_id    <设备 ID>
+# credentials  ~/.config/flowdrop/cli.json
+```
+
+- hub 地址默认从本地 config 的 `listen` 推导（通配地址 `0.0.0.0`/`::` 与空 host 视为
+  `127.0.0.1`；`cookie_secure=true` 时用 `https://`）。也可 `--hub URL` 或
+  `FLOWDROP_HUB` 指定。
+- **不传 `--code` 时就在本地数据库生成配对码**（`data_dir` 与运行中的 Hub 相同即可），
+  这是同机免 GUI 的路径：码只写进共享数据库，不打印、不过网络。
+- 异机 / 远程配对时用 `--code`：码来自桌面设置窗口「添加设备」，或 Hub 本机
+  `flowdrop pair -config <config>` 的输出。
+- 其他参数：`--name`（设备名，默认 `cli-<主机名>`，上限 64 字节）、
+  `--credentials PATH`（凭据文件）、`-config PATH`（配置文件）。
+- 凭据写入 `~/.config/flowdrop/cli.json`（权限 `0600`，文件里只有 hub URL 与
+  设备令牌），可用 `--credentials` 或 `FLOWDROP_CLI_CONFIG` 改路径。
+  该令牌就是一台已配对设备，**可在桌面设置里撤销**；撤销后 `send` 会报
+  `device token was rejected`，重新 `login` 即可。
+
+**`flowdrop send`**（三种形态互斥，必须恰好一种）：
+
+```bash
+flowdrop send [--hub URL] [--json] FILE...
+flowdrop send [--hub URL] [--json] --text TEXT|-
+flowdrop send [--hub URL] [--json] --link URL
+```
+
+- 文件：可一次给多个，**逐项独立**处理，一项失败不影响其它项（最终退出码为 1）。
+- `--text TEXT` 直接发文字；`--text -` 从 stdin 读文字，**上限 64 KiB**
+  （65536 字节，多一个字节就被拒为 `text_too_large`，不发请求）。
+- `--link URL` 发链接（仅 http/https）。
+- `--name NAME -` 把 stdin 当**文件**上传：内容 spool 到临时文件，用 `NAME` 作为文件名；
+  `-` 与 `--name` 必须成对出现。
+- `--json`：每个输入一行 NDJSON（`{"ok":true,"input":...,"item":{...}}` 或
+  `{"ok":false,"input":...,"error":{"code":...,"message":...}}`）；不带 `--json`
+  时成功打一行 `输入  大小  sha256=...  id=...` 到 stdout，失败打 `输入: code: message` 到 stderr。
+- **退出码**：`0` 全部成功、`1` 至少一项失败或未登录、`2` 用法错误（如没给输入、
+  `--name` 配了真实文件、`--text` 与 `--link` 同时出现）。
+- **不自动重试**（配对码单次有效、上传不幂等）；遇到限流（HTTP 429 / `rate_limited`）
+  会**停止后续输入**并把它们标为 `skipped`（`not sent: rate limited`）。
+- 没登录时报 `未登录，先运行 flowdrop login`；令牌被撤销时报 unauthorized。
+
+**不落盘的临时调用**（agent / CI，不写 `~/.config`）：
+
+```bash
+FLOWDROP_HUB=http://127.0.0.1:8080 FLOWDROP_TOKEN=<设备令牌> \
+  flowdrop send --json ./report.pdf
+```
+
+这两个环境变量同时存在时优先于 `cli.json`，令牌不会写到任何文件
+（`--hub` 仍可覆盖 hub 地址）。
+
+> 明文 HTTP 只用于可信局域网；Hub 若启用了 HTTPS / `cookie_secure=true`，
+> `--hub` 与 `FLOWDROP_HUB` 必须给 `https://` URL，否则握手与 Cookie 都不对。
+
+实测过的完整一轮（临时 data_dir、`127.0.0.1:<端口>`，`cookie_secure=false`）：
+
+```bash
+flowdrop login -config /tmp/e2e/config.json --credentials /tmp/e2e/cli.json
+flowdrop send --json --credentials /tmp/e2e/cli.json /tmp/e2e/payload.txt
+printf 'hello from agent' | flowdrop send --credentials /tmp/e2e/cli.json --text -
+flowdrop send --credentials /tmp/e2e/cli.json --link https://example.com/agent
+flowdrop send --credentials /tmp/e2e/cli.json --name note.bin - < note.bin
+flowdrop send --credentials /tmp/e2e/cli.json /etc/hostname /no/such/file   # rc=1，前者成功
+flowdrop send --credentials /tmp/e2e/missing.json /etc/hostname              # rc=1，提示先 login
+FLOWDROP_HUB=http://127.0.0.1:<端口> FLOWDROP_TOKEN=... flowdrop send --json /etc/hostname
+flowdrop pair -config /tmp/e2e/config.json                                   # 取码给 --code 用
+flowdrop login --hub http://127.0.0.1:<端口> --code <四位码> --name agent-cli \
+  --credentials /tmp/e2e/remote.json
+```
+
 ## 4. 常驻运行（systemd 用户服务）
 
 ```bash
@@ -352,9 +438,81 @@ curl -fsS http://192.168.31.184:8080/api/v1/health
 curl -fsS http://100.125.168.63:8080/api/v1/health
 ```
 
-**明确不做**：自动网络重绑定、自动选路、两个共享数据目录的 Hub、`0.0.0.0` 监听。
-地址失效（如 Tailscale 退出、DHCP 换 IP）时启动会明确失败；修改地址后重启即可。
+**明确不做**：两个共享数据目录的 Hub、`0.0.0.0` 监听、客户端自动选路。
+显式写死的 `additional_listen` 地址失效（如 Tailscale 退出、DHCP 换 IP）时**启动会明确失败**；
+修改地址后重启即可。若希望地址集合跟着网络自己变，用 §5.9 的 `auto_bind`——
+注意它与本节语义不同：派生地址是尽力而为，不再全有或全无。
 桌面版的双模式操作见 §16.6。
+
+### 5.9 自动绑定本机所有可用地址（`auto_bind`）
+
+**适用**：会在不同 Wi-Fi、家里/公司网络、Tailscale 之间移动的 Hub。开启后 Hub 在
+**主监听的同一端口**上，额外绑定本机当前所有符合条件的 IPv4：物理网卡上的 RFC1918
+局域网地址和 Tailscale CGNAT（`100.64/10`）。回环、链路本地、通配 `0.0.0.0`/`::`，
+以及 docker/`br-*`/veth/`wg*`/`tun*` 等容器与虚拟网桥接口上的地址都不会被自动绑定。
+它仍然只是**一个** Hub 进程、一个数据库、一个 handler、一把数据目录锁。
+
+配置（示例，端口与路径按实际替换）：
+
+```bash
+# 示例：不改配置文件，用环境变量临时打开（前台运行，Ctrl+C 停止）
+FLOWDROP_LISTEN=127.0.0.1:8080 \
+FLOWDROP_AUTO_BIND=true \
+FLOWDROP_COOKIE_SECURE=false \
+flowdrop serve
+```
+
+```json
+{
+  "listen": "127.0.0.1:8080",
+  "auto_bind": true,
+  "cookie_secure": false
+}
+```
+
+> 环境变量 `FLOWDROP_AUTO_BIND` 优先于配置文件（`true`/`false` 都生效）；
+> 上面用环境变量短参数写的 `flowdrop serve` 未单独跑过。已验证的是：`flowdrop serve -config <cfg>`
+> 在 `auto_bind=true` 的配置下确实绑到了 LAN 与 Tailscale 地址（见下方 `doctor` / `curl` 检查）。
+
+规则与边界：
+
+| 项 | 行为 |
+|---|---|
+| 绑定什么 | 主监听端口上，本机每张**网卡**的 RFC1918（`10/8`、`172.16/12`、`192.168/16`）与 Tailscale `100.64/10` 具体 IPv4 各加一个监听；**地址本身是 RFC1918 的容器/虚拟网桥地址也会绑定**（docker0、`br-*`、virbr 等，与 LocalSend 一致，便于容器内访问 Hub）；主监听地址本身与 `additional_listen` 里已有的地址不重复绑定 |
+| 不绑什么 | 回环（`127/8`）、链路本地（`169.254/16`）、**公网**地址（不把明文 HTTP 绑到公网口）。容器/虚拟网桥上的**私有地址现在会被绑定**（与 LocalSend 一致），但**不参与 mDNS 广播**；需要时用显式 `additional_listen` |
+| 派生地址是**尽力而为** | 某个派生地址绑不上（端口被别的进程占、地址刚消失、权限不足）只记一条 warn 日志，并在 5 秒后的重扫里重试；**不会**让 Hub 启动失败，也不影响主监听 |
+| 与显式 `additional_listen` 的区别 | 显式 `additional_listen` 仍是**全有或全无**：任一地址绑定失败 → 关闭已绑定监听、释放锁、`serve` 返回错误，不会只启动一半。两者可以同时使用 |
+| 端口 `0` | 主监听写端口 `0`（由内核分配临时端口）时自动绑定被禁用并记 warn：临时端口无法在其它接口上复用 |
+| 网络变化（热更新） | 每 5 秒重扫本机地址：新出现的地址即时绑定，消失的地址关闭对应监听，**该地址上的在途请求会中断**（客户端重试即可）；主监听始终不动，mDNS 随新地址集合重新发布 |
+| Host 白名单 | 每个**实际绑定成功**的地址动态加入 Host 白名单（`api.Server.SetBoundHosts`），所以浏览器直接开 `http://<自动绑定的 IP>:<port>` 不会 421；未绑定的 Host 仍然 421 |
+| 环境变量 | `FLOWDROP_AUTO_BIND=true`（JSON `auto_bind`），默认 `false` |
+| 先看会绑哪些地址 | `flowdrop doctor -config <cfg>` 额外打印一行 `auto_bind` 和每个 `auto_bind target <ip:port>`；doctor 不启动 Hub、不绑定任何端口，只读配置与本机地址 |
+
+```bash
+# 示例：在真正启动前确认会绑哪些地址（不会启动 Hub、不会占端口）
+# 配置里 auto_bind=true 时的实际输出形式如下（本轮已实测；路径换成你自己的配置）
+flowdrop doctor -config ~/.config/flowdrop/config.json
+# auto_bind            ok   on
+# auto_bind target     ok   192.168.31.184:8080
+# auto_bind target     ok   100.125.168.63:8080
+# auto_bind target     ok   172.17.0.1:8080      # docker0（绑但不广播）
+# auto_bind target     ok   172.18.0.1:8080      # br-*（绑但不广播）
+
+# 下面这条在 Hub 跑起来之后执行；对每个绑定的地址都应返回 200（本轮实测）
+curl -fsS -o /dev/null -w '%{http_code}\n' http://192.168.31.184:8080/api/v1/health
+```
+
+> `auto_bind` 只是把主入口复制到本机其它合格地址（同端口），**不是**安全加固：
+> 明文 HTTP 的信任边界没有变化，不想在 LAN 暴露就不要开。
+
+> **容器网桥地址（`docker0`/`br-*`/virbr）**：这些私有地址现在也会被绑定，意味着**同一台机器上的
+> 容器可以访问 Hub**（明文 HTTP，例如 `http://172.17.0.1:<port>`）。它们不会被 mDNS 广播
+> （手机解析到也连不上），所以局域网发现仍只指向真实可达的 LAN / Tailscale 地址。
+> 不需要容器访问时，用 `additional_listen` 精确指定要绑的地址，或关掉 `auto_bind`。
+
+桌面 App 的设置窗口里有「自动绑定本机所有可用地址（局域网 + Tailscale，端口同上）」
+开关，勾选后隐藏手选的单地址/双模式选项，并列出 Hub 当前**真实**绑定的地址（每 3 秒刷新）；
+Hub 未运行时列表为空并提示先保存启动。
 
 ## 6. Android 原生 App
 
@@ -586,6 +744,7 @@ sudo ufw allow 443/tcp
 |---|---|---|---|
 | `listen` | `FLOWDROP_LISTEN` | `127.0.0.1:8080` | 主 HTTP 监听地址。明文 LAN 模式须写具体局域网 IP（`0.0.0.0` 会被拒绝） |
 | `additional_listen` | `FLOWDROP_ADDITIONAL_LISTEN` | 空 | 同一 Hub 额外监听的 `host:port` 数组；只接受具体 IP，用于 LAN + Tailscale 双监听（§5.8） |
+| `auto_bind` | `FLOWDROP_AUTO_BIND` | `false` | 在主监听端口的同一端口上自动绑定本机全部 RFC1918 + Tailscale 地址，每 5 秒热更新；派生绑定失败只 warn，不影响启动（§5.9） |
 | `data_dir` | `FLOWDROP_DATA_DIR` | `~/.local/share/flowdrop` | 数据目录 |
 | `allowed_hosts` | `FLOWDROP_ALLOWED_HOSTS` | 空（回环名 + 具体监听 IP） | 逗号分隔的 Host 白名单；用于 mDNS/主机名/Tailscale 名 |
 | `trusted_proxies` | `FLOWDROP_TRUSTED_PROXIES` | 空 | 采信 `X-Forwarded-*` 的 IP/CIDR |
