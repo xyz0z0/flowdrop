@@ -561,6 +561,14 @@ func (s *SettingsService) mustState() State {
 type PairingCode struct {
 	Code      string `json:"code"`
 	ExpiresAt int64  `json:"expires_at"`
+	// Payload is the frozen flowdrop://pair... string encoded in the QR code. It
+	// carries the same secret as Code and is only ever returned to this window.
+	// It is empty when the Hub has no phone-reachable address, and the empty
+	// field is omitted so the zero value of this DTO keeps its old JSON shape.
+	Payload string `json:"payload,omitempty"`
+	// QRDataURL is a data:image/png;base64 URL for Payload, or empty when no
+	// usable address exists or PNG generation failed (the text code still works).
+	QRDataURL string `json:"qr_data_url,omitempty"`
 }
 
 // PairedDevice is one device paired with this Hub. The raw device token is
@@ -602,7 +610,16 @@ func (s *SettingsService) CreatePairingCode() (PairingCode, error) {
 	if err != nil {
 		return PairingCode{}, pairingError(err)
 	}
-	return PairingCode{Code: code.Code, ExpiresAt: code.ExpiresAt}, nil
+	// The QR shortcut only advertises addresses the phone can actually reach:
+	// the Hub's real listener URLs, never the configured list and never
+	// 127.0.0.1/::1. Without one there is no QR, and the text code is enough.
+	payload, qrDataURL := pairingCodeView(code.Code, s.manager.URLs())
+	return PairingCode{
+		Code:      code.Code,
+		ExpiresAt: code.ExpiresAt,
+		Payload:   payload,
+		QRDataURL: qrDataURL,
+	}, nil
 }
 
 // PairingCodeActive reports whether the running Hub still has an unused,

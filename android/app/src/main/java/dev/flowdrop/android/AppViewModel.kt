@@ -18,6 +18,8 @@ import dev.flowdrop.android.data.HubRouteSelector
 import dev.flowdrop.android.data.Item
 import dev.flowdrop.android.data.RouteCandidate
 import dev.flowdrop.android.data.UploadSource
+import dev.flowdrop.android.data.parsePairingPayload
+import dev.flowdrop.android.data.pairingPrefill
 import dev.flowdrop.android.discovery.DiscoveredHub
 import dev.flowdrop.android.discovery.DiscoveryController
 import dev.flowdrop.android.discovery.DiscoveryState
@@ -212,6 +214,33 @@ class AppViewModel(
     fun updatePairingCode(value: String) {
         val digits = value.filter { it in '0'..'9' }.take(PAIRING_CODE_LENGTH)
         _state.update { it.copy(pairingCode = digits, loginError = null) }
+    }
+
+    /**
+     * Applies a scanned pairing QR payload: it only prefills the form.
+     *
+     * A scanned code never pairs by itself, never replaces an address the user
+     * already typed and is never logged or persisted: the raw payload is parsed
+     * and immediately discarded. An unusable payload leaves the current input
+     * untouched (the code printed on the Hub stays valid).
+     */
+    fun applyScannedPairing(raw: String): Boolean {
+        if (_state.value.phase != Phase.LOGIN) return false
+        val payload = parsePairingPayload(raw)
+        if (payload == null) {
+            toast(app.getString(R.string.pairing_qr_invalid), error = true)
+            return false
+        }
+        val prefill = pairingPrefill(payload, _state.value.hubAddress)
+        _state.update { current ->
+            current.copy(
+                pairingCode = prefill.code,
+                hubAddress = prefill.hubAddress ?: current.hubAddress,
+                loginError = null,
+            )
+        }
+        toast(app.getString(R.string.pairing_qr_filled))
+        return true
     }
 
     /**

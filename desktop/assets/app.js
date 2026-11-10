@@ -404,9 +404,35 @@ function clearPairingCode() {
     expiry.textContent = "";
     expiry.hidden = true;
   }
+  // The QR code is as short-lived as the text code: dropping the src keeps the
+  // (secret) payload out of the DOM once the code is gone.
+  hidePairingQR();
   // The success banner belongs to the displayed code only: generating a new
   // code, a Hub restart or closing the window must not leave it behind.
   show($("pairing-status"), "");
+}
+
+// hidePairingQR clears and hides the QR image; the element is only shown when
+// the Hub returned a PNG data URL for this code.
+function hidePairingQR() {
+  const qr = $("pairing-qr");
+  if (!qr) return;
+  qr.removeAttribute("src");
+  qr.hidden = true;
+}
+
+// showPairingQR accepts only the PNG data URL the bridge produces; anything else
+// (including an empty string when the Hub has no reachable address) hides it.
+function showPairingQR(dataURL) {
+  const qr = $("pairing-qr");
+  if (!qr) return;
+  const src = typeof dataURL === "string" ? dataURL : "";
+  if (!src.startsWith("data:image/png;base64,")) {
+    hidePairingQR();
+    return;
+  }
+  qr.src = src;
+  qr.hidden = false;
 }
 
 function tickPairingCode() {
@@ -420,9 +446,10 @@ function tickPairingCode() {
   show($("pairing-code-expiry"), `剩余 ${remaining} 秒；过期后请重新生成。`);
 }
 
-// showPairingCode renders the code as text (never HTML) with its countdown.
-// The Hub sends the code as a string, so a leading zero is kept.
-function showPairingCode(codeValue, expiresAt) {
+// showPairingCode renders the code as text (never HTML) with its countdown and,
+// when the Hub returned one, the QR shortcut. The Hub sends the code as a
+// string, so a leading zero is kept.
+function showPairingCode(codeValue, expiresAt, qrDataURL) {
   clearPairingCode();
   const text = String(codeValue || "");
   if (!/^[0-9]{4}$/.test(text)) {
@@ -432,6 +459,7 @@ function showPairingCode(codeValue, expiresAt) {
   codeExpiresAt = Number(expiresAt) || 0;
   $("pairing-code-value").textContent = text;
   $("pairing-code").hidden = false;
+  showPairingQR(qrDataURL);
   tickPairingCode();
   pairingTimer = setInterval(tickPairingCode, 500);
 }
@@ -726,7 +754,7 @@ $("pair-add").addEventListener("click", async () => {
   btn.textContent = "正在生成…";
   try {
     const code = await call("CreatePairingCode");
-    showPairingCode(code && code.code, code && code.expires_at);
+    showPairingCode(code && code.code, code && code.expires_at, code && code.qr_data_url);
   } catch (err) {
     show($("pairing-error"), "生成配对码失败：" + String(err));
   } finally {

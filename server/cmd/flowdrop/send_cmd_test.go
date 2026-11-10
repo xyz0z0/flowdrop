@@ -343,9 +343,9 @@ func TestSendFileReportsDigestAndItem(t *testing.T) {
 	}
 }
 
-// getItem fetches an item and its content over independent authenticated
-// requests.
-func (h *cliHarness) getItem(token, id string) (map[string]any, []byte) {
+// getItemMeta fetches one item's metadata over an independent authenticated
+// request. It does not download the blob, so it also works for text items.
+func (h *cliHarness) getItemMeta(token, id string) map[string]any {
 	h.t.Helper()
 	req, err := http.NewRequest(http.MethodGet, h.hubURL+"/api/v1/items/"+id, nil)
 	if err != nil {
@@ -365,6 +365,14 @@ func (h *cliHarness) getItem(token, id string) (map[string]any, []byte) {
 	if err := json.Unmarshal(body, &item); err != nil {
 		h.t.Fatalf("decode item: %v", err)
 	}
+	return item
+}
+
+// getItem fetches an item and its content over independent authenticated
+// requests.
+func (h *cliHarness) getItem(token, id string) (map[string]any, []byte) {
+	h.t.Helper()
+	item := h.getItemMeta(token, id)
 
 	dreq, err := http.NewRequest(http.MethodGet, h.hubURL+"/api/v1/items/"+id+"/download", nil)
 	if err != nil {
@@ -381,6 +389,72 @@ func (h *cliHarness) getItem(token, id string) (map[string]any, []byte) {
 		h.t.Fatalf("download status %d", dresp.StatusCode)
 	}
 	return item, stored
+}
+
+// TestSendCarriesPairedDeviceName covers the display label the Web inbox shows:
+// after `login --name cli-laptop` both a file and a text item carry that name.
+func TestSendCarriesPairedDeviceName(t *testing.T) {
+	h := newCLIHarness(t)
+	rc, stdout, stderr := h.login("--code", h.code(), "--name", "cli-laptop")
+	if rc != 0 {
+		t.Fatalf("login exit code = %d, stdout = %q, stderr = %q", rc, stdout, stderr)
+	}
+	creds, err := sendcli.LoadCredentials(h.credsPath)
+	if err != nil {
+		t.Fatalf("load credentials: %v", err)
+	}
+
+	path := h.writeFile("label.txt", []byte("labelled payload"))
+	rc, stdout, stderr = h.send("--credentials", h.credsPath, path)
+	if rc != 0 {
+		t.Fatalf("file send exit code = %d, stdout = %q, stderr = %q", rc, stdout, stderr)
+	}
+	m := idLine.FindStringSubmatch(stdout)
+	if m == nil {
+		t.Fatalf("file send output has no id: %q", stdout)
+	}
+	fileItem, data := h.getItem(creds.DeviceToken, m[1])
+	if fileItem["sender_device"] != "cli-laptop" {
+		t.Fatalf("file sender_device = %v, want cli-laptop", fileItem["sender_device"])
+	}
+	if string(data) != "labelled payload" {
+		t.Fatalf("stored content = %q", data)
+	}
+
+	rc, stdout, stderr = h.send("--text", "hello label", "--credentials", h.credsPath)
+	if rc != 0 {
+		t.Fatalf("text send exit code = %d, stdout = %q, stderr = %q", rc, stdout, stderr)
+	}
+	m = idLine.FindStringSubmatch(stdout)
+	if m == nil {
+		t.Fatalf("text send output has no id: %q", stdout)
+	}
+	textItem := h.getItemMeta(creds.DeviceToken, m[1])
+	if textItem["sender_device"] != "cli-laptop" {
+		t.Fatalf("text sender_device = %v, want cli-laptop", textItem["sender_device"])
+	}
+	if textItem["text"] != "hello label" {
+		t.Fatalf("stored text = %v", textItem["text"])
+	}
+
+	// --name still only labels stdin files and never becomes the sender.
+	setStdin(t, []byte("piped label"))
+	rc, stdout, stderr = h.send("--name", "piped.txt", "--credentials", h.credsPath, "-")
+	if rc != 0 {
+		t.Fatalf("stdin send exit code = %d, stdout = %q, stderr = %q", rc, stdout, stderr)
+	}
+	m = idLine.FindStringSubmatch(stdout)
+	if m == nil {
+		t.Fatalf("stdin send output has no id: %q", stdout)
+	}
+	stdinItem, _ := h.getItem(creds.DeviceToken, m[1])
+	if stdinItem["sender_device"] != "cli-laptop" {
+		t.Fatalf("stdin sender_device = %v, want cli-laptop (not the --name file name)", stdinItem["sender_device"])
+	}
+	blob := stdinItem["blob"].(map[string]any)
+	if blob["name"] != "piped.txt" {
+		t.Fatalf("stored name = %v, want piped.txt", blob["name"])
+	}
 }
 
 func TestSendJSONIsNDJSONInInputOrder(t *testing.T) {
@@ -660,6 +734,17 @@ func TestSendUsesEnvTokenInsteadOfFile(t *testing.T) {
 	}
 	if _, err := os.Stat(h.credsPath); !os.IsNotExist(err) {
 		t.Fatalf("env-token send wrote a credentials file (err = %v)", err)
+	}
+	// There is no device name on the env path, so the default cli-<hostname>
+	// label is used.
+	m := idLine.FindStringSubmatch(stdout)
+	if m == nil {
+		t.Fatalf("output has no id: %q", stdout)
+	}
+	sender, _ := h.getItem(creds.DeviceToken, m[1])
+	got, _ := sender["sender_device"].(string)
+	if got == "" || !strings.HasPrefix(got, "cli-") {
+		t.Fatalf("env-token sender_device = %q, want a cli- default label", got)
 	}
 }
 

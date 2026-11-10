@@ -305,6 +305,9 @@ type Client struct {
 	connected      bool
 	csrf           string
 	maxUploadBytes int64
+	// senderDevice is the display label sent as sender_device. Empty means
+	// the field is omitted.
+	senderDevice string
 }
 
 // NewClient validates the hub URL and returns a client with a cookie jar. The
@@ -368,6 +371,24 @@ func (c *Client) Connect(ctx context.Context) error {
 	return nil
 }
 
+// SetSenderDevice sets the client-supplied display label sent as
+// sender_device with every item (normally the paired device name). The value is
+// trimmed; an empty string means the field is not sent at all. The Hub still
+// sanitizes and truncates it, so the CLI does not truncate here.
+func (c *Client) SetSenderDevice(name string) {
+	name = strings.TrimSpace(name)
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.senderDevice = name
+}
+
+// senderName returns the current display label, or "" when unset.
+func (c *Client) senderName() string {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.senderDevice
+}
+
 // MaxUploadBytes reports the Hub's per-file limit, or 0 when unknown (before a
 // successful Connect). Callers skip their own pre-check when it is 0.
 func (c *Client) MaxUploadBytes() int64 {
@@ -425,9 +446,15 @@ func (c *Client) SendReader(ctx context.Context, name string, size int64, r io.R
 	// Build the multipart prefix and suffix once, then stream the payload
 	// between them. The exact Content-Length is the sum of all three, so the
 	// Hub never has to accept a chunked body and no file-sized buffer is
-	// allocated.
+	// allocated. The optional sender_device field goes into the prefix, before
+	// the file part, so the file bytes stay streamable.
 	var prefix bytes.Buffer
 	mw := multipart.NewWriter(&prefix)
+	if sender := c.senderName(); sender != "" {
+		if err := mw.WriteField("sender_device", sender); err != nil {
+			return Item{}, fmt.Errorf("flowdrop: build multipart body: %w", err)
+		}
+	}
 	if _, err := mw.CreateFormFile("file", name); err != nil {
 		return Item{}, fmt.Errorf("flowdrop: build multipart body: %w", err)
 	}
@@ -474,9 +501,10 @@ func (c *Client) SendText(ctx context.Context, kind, text string) (Item, error) 
 		return Item{}, err
 	}
 	body, err := json.Marshal(struct {
-		Type string `json:"type"`
-		Text string `json:"text"`
-	}{Type: kind, Text: text})
+		Type         string `json:"type"`
+		Text         string `json:"text"`
+		SenderDevice string `json:"sender_device,omitempty"`
+	}{Type: kind, Text: text, SenderDevice: c.senderName()})
 	if err != nil {
 		return Item{}, fmt.Errorf("flowdrop: encode text item: %w", err)
 	}

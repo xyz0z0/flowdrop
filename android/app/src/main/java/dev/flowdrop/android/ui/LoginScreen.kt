@@ -21,6 +21,7 @@ import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
@@ -59,6 +60,9 @@ internal const val PAIRING_CODE_LENGTH = 4
  * When the app already remembers a paired computer, that computer is offered
  * as a plain reconnect (no code needed) and the code section pairs another
  * one. Submitting never clears the code locally: the ViewModel owns that.
+ *
+ * Scanning a pairing QR code is an entry point only: it prefills the code and,
+ * when the address is still empty, a candidate Hub address. It never submits.
  */
 @Composable
 fun LoginScreen(
@@ -77,6 +81,8 @@ fun LoginScreen(
     onRefreshDiscovery: () -> Unit = {},
     onStopDiscovery: () -> Unit = {},
     onSelectHub: (DiscoveredHub) -> Unit = {},
+    onScanQr: (() -> Unit)? = null,
+    cameraPermissionDenied: Boolean = false,
 ) {
     val focus = LocalFocusManager.current
     Surface(modifier = Modifier.fillMaxSize(), color = MaterialTheme.colorScheme.background) {
@@ -152,6 +158,23 @@ fun LoginScreen(
                 }),
                 modifier = Modifier.fillMaxWidth(),
             )
+
+            if (onScanQr != null) {
+                Spacer(Modifier.height(8.dp))
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    OutlinedButton(onClick = onScanQr, enabled = !loggingIn) {
+                        Text(stringResource(R.string.action_scan_qr))
+                    }
+                    if (cameraPermissionDenied) {
+                        Spacer(Modifier.width(10.dp))
+                        Text(
+                            stringResource(R.string.scan_camera_denied),
+                            style = MaterialTheme.typography.labelMedium,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    }
+                }
+            }
 
             if (error != null) {
                 Spacer(Modifier.height(12.dp))

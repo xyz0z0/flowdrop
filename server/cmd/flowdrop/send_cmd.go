@@ -284,7 +284,7 @@ func runSend(args []string) int {
 		}
 	}
 
-	hubURL, token, err := resolveSendAuth(*hubFlag, *credsFlag)
+	hubURL, token, sender, err := resolveSendAuth(*hubFlag, *credsFlag)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "flowdrop:", err)
 		return 1
@@ -294,6 +294,8 @@ func runSend(args []string) int {
 		fmt.Fprintln(os.Stderr, "flowdrop:", err)
 		return 1
 	}
+	// The display label the Web inbox shows for this item.
+	client.SetSenderDevice(sender)
 	connectCtx, cancelConnect := context.WithTimeout(context.Background(), connectTimeout)
 	err = client.Connect(connectCtx)
 	cancelConnect()
@@ -330,10 +332,13 @@ func runSend(args []string) int {
 	return 0
 }
 
-// resolveSendAuth returns the hub URL and device token. FLOWDROP_TOKEN together
-// with FLOWDROP_HUB wins over the saved credentials and is never written to
-// disk; --hub overrides the hub either way.
-func resolveSendAuth(hubFlag, credsFlag string) (string, string, error) {
+// resolveSendAuth returns the hub URL, device token and the sender label. The
+// label is the paired device name from the credentials file, or
+// defaultDeviceName() when the token comes from FLOWDROP_TOKEN/FLOWDROP_HUB
+// (that path has no device name) or when the saved credentials carry none.
+// FLOWDROP_TOKEN together with FLOWDROP_HUB wins over the saved credentials and
+// is never written to disk; --hub overrides the hub either way.
+func resolveSendAuth(hubFlag, credsFlag string) (string, string, string, error) {
 	envHub := strings.TrimSpace(os.Getenv("FLOWDROP_HUB"))
 	envToken := strings.TrimSpace(os.Getenv("FLOWDROP_TOKEN"))
 	flagHub := strings.TrimSpace(hubFlag)
@@ -342,7 +347,7 @@ func resolveSendAuth(hubFlag, credsFlag string) (string, string, error) {
 		if hub == "" {
 			hub = envHub
 		}
-		return hub, envToken, nil
+		return hub, envToken, defaultDeviceName(), nil
 	}
 
 	path := strings.TrimSpace(credsFlag)
@@ -352,15 +357,19 @@ func resolveSendAuth(hubFlag, credsFlag string) (string, string, error) {
 	creds, err := sendcli.LoadCredentials(path)
 	if err != nil {
 		if errors.Is(err, sendcli.ErrNoCredentials) {
-			return "", "", fmt.Errorf("%w (no credentials at %s)", errNotLoggedIn, path)
+			return "", "", "", fmt.Errorf("%w (no credentials at %s)", errNotLoggedIn, path)
 		}
-		return "", "", err
+		return "", "", "", err
 	}
 	hub := flagHub
 	if hub == "" {
 		hub = creds.HubURL
 	}
-	return hub, creds.DeviceToken, nil
+	sender := strings.TrimSpace(creds.DeviceName)
+	if sender == "" {
+		sender = defaultDeviceName()
+	}
+	return hub, creds.DeviceToken, sender, nil
 }
 
 // runSendJob processes one input. The second result reports a rate limit, which

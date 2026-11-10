@@ -100,6 +100,14 @@ func (h *harness) paired(name string) sendcli.Credentials {
 // connected returns a client that already completed Connect.
 func (h *harness) connected() *sendcli.Client {
 	h.t.Helper()
+	c, _ := h.connectedCreds()
+	return c
+}
+
+// connectedCreds returns a connected client plus the credentials it uses, so a
+// test can also read the stored item independently.
+func (h *harness) connectedCreds() (*sendcli.Client, sendcli.Credentials) {
+	h.t.Helper()
 	creds := h.paired("cli-test")
 	c, err := sendcli.NewClient(creds.HubURL, creds.DeviceToken)
 	if err != nil {
@@ -108,12 +116,13 @@ func (h *harness) connected() *sendcli.Client {
 	if err := c.Connect(context.Background()); err != nil {
 		h.t.Fatalf("connect: %v", err)
 	}
-	return c
+	return c, creds
 }
 
-// getItem fetches an item over an independent authenticated request (Bearer
-// device token, no CSRF needed for reads).
-func (h *harness) getItem(token, id string) (map[string]any, []byte) {
+// getItemMeta fetches one item's metadata over an independent authenticated
+// request (Bearer device token, no CSRF needed for reads). It never downloads
+// the blob, so it also works for text and link items.
+func (h *harness) getItemMeta(token, id string) map[string]any {
 	h.t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
@@ -135,8 +144,18 @@ func (h *harness) getItem(token, id string) (map[string]any, []byte) {
 	if err := json.Unmarshal(body, &item); err != nil {
 		h.t.Fatalf("decode item: %v", err)
 	}
+	return item
+}
 
-	req, err = http.NewRequestWithContext(ctx, http.MethodGet, h.hubURL+"/api/v1/items/"+id+"/download", nil)
+// getItem fetches an item and its stored bytes over independent authenticated
+// requests.
+func (h *harness) getItem(token, id string) (map[string]any, []byte) {
+	h.t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	item := h.getItemMeta(token, id)
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, h.hubURL+"/api/v1/items/"+id+"/download", nil)
 	if err != nil {
 		h.t.Fatalf("build download: %v", err)
 	}
@@ -401,6 +420,144 @@ func TestSendFileUploadsRealBytes(t *testing.T) {
 	if !bytes.Equal(body, data) {
 		t.Fatalf("downloaded %d bytes, want the %d uploaded bytes", len(body), len(data))
 	}
+	// Without SetSenderDevice no sender label is sent.
+	if got, ok := stored["sender_device"]; ok && got != "" {
+		t.Fatalf("stored sender_device = %v, want empty without SetSenderDevice", got)
+	}
+}
+
+// TestSetSenderDeviceIsSentWithItems covers the display label the Web inbox
+// shows: both uploads and text items carry the paired device name.
+func TestSetSenderDeviceIsSentWithItems(t *testing.T) {
+	h := newHarness(t)
+	creds := h.paired("cli-test")
+	c, err := sendcli.NewClient(creds.HubURL, creds.DeviceToken)
+	if err != nil {
+		t.Fatalf("new client: %v", err)
+	}
+	if err := c.Connect(context.Background()); err != nil {
+		t.Fatalf("connect: %v", err)
+	}
+	// The value is trimmed before it is sent.
+	c.SetSenderDevice("  cli-agent  ")
+
+	path, data := writeTemp(t, "sender.txt", 512)
+	fileItem, err := c.SendFile(context.Background(), path)
+	if err != nil {
+		t.Fatalf("send file: %v", err)
+	}
+	storedFile, downloaded := h.getItem(creds.DeviceToken, fileItem.ID)
+	if storedFile["sender_device"] != "cli-agent" {
+		t.Fatalf("file sender_device = %v, want cli-agent", storedFile["sender_device"])
+	}
+	// The field rides in the multipart prefix: the exact-size streamed body
+	// must still arrive intact.
+	if !bytes.Equal(downloaded, data) {
+		t.Fatalf("downloaded %d bytes, want the %d uploaded bytes", len(downloaded), len(data))
+	}
+
+	textItem, err := c.SendText(context.Background(), "text", "hello from the cli")
+	if err != nil {
+		t.Fatalf("send text: %v", err)
+	}
+	storedText := h.getItemMeta(creds.DeviceToken, textItem.ID)
+	if storedText["sender_device"] != "cli-agent" {
+		t.Fatalf("text sender_device = %v, want cli-agent", storedText["sender_device"])
+	}
+	if storedText["text"] != "hello from the cli" {
+		t.Fatalf("stored text = %v", storedText["text"])
+	}
+
+	// An empty (or whitespace-only) label drops the field again.
+	c.SetSenderDevice("   ")
+	unsetItem, err := c.SendText(context.Background(), "text", "no label")
+	if err != nil {
+		t.Fatalf("send text without sender: %v", err)
+	}
+	storedUnset := h.getItemMeta(creds.DeviceToken, unsetItem.ID)
+	if got, ok := storedUnset["sender_device"]; ok && got != "" {
+		t.Fatalf("sender_device = %v after clearing it, want empty", got)
+	}
+}
+
+// recordingHub is a minimal fake Hub used to inspect the raw request the client
+// sends: it answers the session handshake and records the upload body.
+type recordingHub struct {
+	srv       *httptest.Server
+	body      []byte
+	contentLn int64
+	uploadErr string
+}
+
+func newRecordingHub(t *testing.T) *recordingHub {
+	t.Helper()
+	rh := &recordingHub{}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/v1/auth/session":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = io.WriteString(w, `{"authenticated":true,"csrf_token":"csrf-test"}`)
+		case "/api/v1/items/upload":
+			rh.contentLn = r.ContentLength
+			b, err := io.ReadAll(r.Body)
+			if err != nil {
+				rh.uploadErr = err.Error()
+			}
+			rh.body = b
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusCreated)
+			_, _ = io.WriteString(w, `{"id":"it_1","type":"file","created_at":1}`)
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	t.Cleanup(srv.Close)
+	rh.srv = srv
+	return rh
+}
+
+// TestSendReaderKeepsExactLengthWithSender pins the frozen multipart shape: the
+// sender_device field comes before the file part and ContentLength stays
+// exactly head+size+tail.
+func TestSendReaderKeepsExactLengthWithSender(t *testing.T) {
+	rh := newRecordingHub(t)
+	c, err := sendcli.NewClient(rh.srv.URL, "token")
+	if err != nil {
+		t.Fatalf("new client: %v", err)
+	}
+	if err := c.Connect(context.Background()); err != nil {
+		t.Fatalf("connect: %v", err)
+	}
+	c.SetSenderDevice("cli-agent")
+
+	payload := []byte("0123456789abcdef")
+	item, err := c.SendReader(context.Background(), "note.bin", int64(len(payload)), bytes.NewReader(payload))
+	if err != nil {
+		t.Fatalf("send reader: %v", err)
+	}
+	if item.ID != "it_1" {
+		t.Fatalf("item = %+v", item)
+	}
+	if rh.uploadErr != "" {
+		t.Fatalf("fake hub failed to read the body: %s", rh.uploadErr)
+	}
+	if rh.contentLn != int64(len(rh.body)) {
+		t.Fatalf("declared ContentLength = %d, body had %d bytes", rh.contentLn, len(rh.body))
+	}
+	senderAt := bytes.Index(rh.body, []byte(`name="sender_device"`))
+	fileAt := bytes.Index(rh.body, []byte(`name="file"`))
+	if senderAt < 0 || fileAt < 0 {
+		t.Fatalf("multipart body is missing parts: %s", rh.body)
+	}
+	if senderAt > fileAt {
+		t.Fatalf("sender_device part comes after the file part")
+	}
+	if !bytes.Contains(rh.body, []byte("cli-agent")) {
+		t.Fatalf("multipart body does not carry the sender label: %s", rh.body)
+	}
+	if !bytes.HasSuffix(rh.body, []byte(payload)) && !bytes.Contains(rh.body, payload) {
+		t.Fatalf("multipart body does not contain the file payload")
+	}
 }
 
 func TestSendFileRejectsNonRegularFile(t *testing.T) {
@@ -411,7 +568,8 @@ func TestSendFileRejectsNonRegularFile(t *testing.T) {
 }
 
 func TestSendTextAndLink(t *testing.T) {
-	c := newHarness(t).connected()
+	h := newHarness(t)
+	c, creds := h.connectedCreds()
 	ctx := context.Background()
 
 	item, err := c.SendText(ctx, "text", "hello from the cli\n\n")
@@ -428,6 +586,12 @@ func TestSendTextAndLink(t *testing.T) {
 	}
 	if link.Type != "link" || link.Text != "https://example.com" {
 		t.Fatalf("link item = %+v", link)
+	}
+
+	// Without SetSenderDevice the JSON omits sender_device entirely.
+	stored := h.getItemMeta(creds.DeviceToken, item.ID)
+	if got, ok := stored["sender_device"]; ok && got != "" {
+		t.Fatalf("stored sender_device = %v, want empty without SetSenderDevice", got)
 	}
 
 	_, err = c.SendText(ctx, "link", "ftp://x")

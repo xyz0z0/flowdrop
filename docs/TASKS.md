@@ -40,6 +40,8 @@
 
 后续（用户反馈）：运行状态只显示一个地址——`app.js` 里 `state.url` 单值与"实际绑定"由已保存设置拼出，自动绑定下都会漏报。改为 `#hub-urls` 列表 + `runningListenAddrs`（运行中取 `state.urls`）。重装 SHA `c5872c1f…d582`。细节见 VERIFICATION §22.10。
 
+**用户验收（2026-11-10 19:23）**：通过。用户用 `dist/flowdrop-desktop` 重启（PID 1768910，实际监听四个同端口地址），窗口内确认运行状态 4 行、「实际绑定」4 个、复制/打开只作用于主地址。同日清理了 09:22 的验证残留临时 Hub（PID 1246048）与 `/tmp/fd-def-ve4NQ0`。
+
 ## 当前交付：agent 投递 CLI（`flowdrop send`，2026-11-09）
 
 **交付状态（2026-11-09）**：SEND-01/02/03 均已交付并经主 agent 复核；`server/internal/sendcli`（13测试）、`server/cmd/flowdrop`（21测试）、`-race`、`go vet`、`go build ./...` 全通过；主 agent 独立临时 Hub 端到端（login 同机免码 → send --json → Bearer 下载 SHA 一致 → text stdin → link）通过；`dist/flowdrop` 12320930 B SHA `d32cf3bf60e34fa249ef33e11b862ab8803c82a00d805b3b83762c5170e62a82`；文档 `docs/DEPLOY.md §3.1` 与 README 已更新。未安装/commit/push，无剩余运行任务；未验证项与用户验收步骤见 VERIFICATION §21。
@@ -87,6 +89,56 @@ func (c *Client) SendText(ctx context.Context, kind, text string) (Item, error) 
 | SEND-03 | 文档+构建+真实端到端：README「agent 投递」小节、`docs/DEPLOY.md` §3.1 CLI 用法、`dist/flowdrop` 构建与 SHA | SEND-02 后；仅用临时 config/data_dir 与 ephemeral 端口的独立 Hub 进程做一次真实 `login`+`send`+鉴权下载比对 SHA，结束精确停止该进程；不碰用户实例/数据 | 20min；构建 240s，其余 60s；不安装、不 commit/push | 完成并已复核；构建 rc=0、产物 12320930 B；worker 端到端 1–6 + 补充场景全过；主 agent 独立重跑 login/send/下载 SHA/text/link 通过，临时进程已停、临时目录已删；报告 `/tmp/flowdrop-send03-report.md`；task `task_e4fde81e5492` / ctx_73730148f037 |
 
 **流程记录**：2026-11-09 主 agent 误用 `--spec /dev/null` 触发空任务 `task_7eaa83dec8bc` / `ctx_e0eee389e0e3`，已立即 `worker-stop`（terminal 已回收，state=stopped），不作为交付记录。
+
+## 当前交付：SEND 真实场景验收（SEND-04～07，2026-11-10）
+
+用户选定继续补 SEND 的未验证项（VERIFICATION §21.6）。**本轮只验收，不改产品代码**；发现真实缺陷即停止并回报，另开修复任务。
+
+统一约束（每个任务都适用）：
+
+- 只用临时 config / 临时 `data_dir` / 空闲端口，跑独立的 `dist/flowdrop`（12,378,274 B，SHA-256 `9da66eaf68bd2c7016bb…94d8`）；不启动 GUI，不碰用户实例（`dist/flowdrop-desktop` 当前 PID 1768910）与 `~/.config/flowdrop`。
+- 只写 `/tmp/flowdrop-sendXX-report.md` 与自己的 `/tmp/flowdrop-sendXX/` 临时目录；不改仓库文件、不构建、不安装、不 commit/push。
+- 按 PID 精确停止自己启动的进程（禁止 `pkill` 按名称）；结束时删除临时目录；普通命令 30s，整体 20min。
+- 报告须含：每条命令/退出码、关键 stdout/stderr、服务端日志行、实际端口/PID、PASS/FAIL、未验证项。
+
+| 任务 | 单一目标与允许范围 | 验收证据 | 预算/停止条件 |
+|---|---|---|---|
+| SEND-04 | 真实 Hub 上触发 429：`api_limit_per_minute: 2`，`login` 后一次 `send --json` 投递 3 个小文件。只做验证 | NDJSON 前序成功、触发 `rate_limited`/429 后剩余项为 `skipped`、退出码 1；Hub 日志确认 429 后再无该次 `send` 的上传请求；不得把 skipped 当作已发送 | 20min；`dist/flowdrop` 与临时目录。**完成并复核**：PASS。临时 Hub `127.0.0.1:44791`（PID 1785225）`api_limit_per_minute=2`：`login` rc=0；首次 `send a b c` → a/b 201、c `rate_limited`、rc=1；紧接着第二次 `send` → a 立即 `rate_limited`，b/c `skipped`（`not sent: rate limited`）；Hub 日志确认两次 429 后均无上传请求，DB 只有 a.txt/b.txt，skipped 确未发送。要点：`GET /api/v1/auth/session` 不计入每设备限流，故单次 3 文件在 limit=2 时只会让最后一个命中 429，skipped 由补充的第二次 send 验证。Hub 按 PID 停止、端口释放、临时目录已删；报告 `/tmp/flowdrop-send04-report.md`；task `task_5b17269d7083` / ctx_3b81a0c7d8c8 |
+| SEND-05 | 撤销设备后的行为：临时 Hub 上 `login` 保存凭据 → 停 Hub → 用 `python3 -c "import sqlite3..."` 执行与 `pairing.Store.RevokeDevice` 同一条 SQL（`UPDATE paired_devices SET revoked_at=? WHERE id=?`）→ 用原配置重启 Hub → 再 `send` | `send` 退出码 1、stderr 含「device token was rejected (revoked in settings?); run `flowdrop login` again」；Hub 侧无新 item 写入；重新 `login` 后能发送 | 20min；不改代码，不经过桌面 GUI。**完成并复核**：PASS。Hub `127.0.0.1:51127`（PID 1784874/1785246）；`login` rc=0 → 按 PID 停 Hub → sqlite `UPDATE ... revoked_at`（changes=1）→ 重启 → `send` rc=1，stderr 原文 `flowdrop: device token was rejected (revoked in settings?); run \`flowdrop login\` again`；Hub 仅一次 `GET /api/v1/auth/session` 返回 200 + `authenticated:false`（**不是 HTTP 401**，CLI 在 `sendcli.Connect` 映射为 `ErrUnauthorized`，属预期设计）；`inbox_items` 仍为 0；重新 `login`（新 device_id）后 `send` rc=0、上传 201、`inbox_items=1`。观察（超出范围、未判定缺陷）：成功上传的 item `sender_device` 为空字符串。Hub 已 SIGTERM 优雅停止（`hub stopped`）、端口释放、临时目录已删；报告 `/tmp/flowdrop-send05-report.md`；task `task_91735699da12` / ctx_fef784e386d4 |
+| SEND-06 | HTTPS + `cookie_secure: true`：临时 Hub 明文监听 `127.0.0.1:PORT`，用 `socat OPENSSL-LISTEN:PROXY,fork,cert=...,key=...,verify=0 TCP:127.0.0.1:PORT` 做 TLS 终止；`openssl req -x509` 生成 SAN `IP:127.0.0.1` 自签证书；CLI 以 `SSL_CERT_FILE` + `--hub https://127.0.0.1:PROXY` 完成 `login` 与 `send` | `login`/`send` 均 rc=0；经代理的 `GET /api/v1/auth/session` 响应含 `Set-Cookie: flowdrop_csrf=…; Secure`；证明请求确实走了 TLS 代理（代理/PID 日志或 `ss`）；全程只用临时目录 | 20min；socat 不可用则记录阻塞，不用宿主系统代理/端口 443。**完成并复核**：PASS；`login`/`send` rc=0 且服务端 sha256 与本地一致；两个 cookie 均 `Secure+SameSite=Strict`（session 另有 HttpOnly），`--cacert`/`SSL_CERT_FILE` 真实校验、未跳过；socat 1785259 与 Hub 1785186 按 PID 先代理后 Hub 停止，端口释放，临时目录已删；用户实例未受影响。观察（未修复、非阻塞）：`/api/v1/auth/session` 的 `hub.endpoints` 返回 Hub 自身明文地址而非外部 HTTPS 代理地址（Hub 不知道前置代理，客户端不应把它当外部 URL）。报告 `/tmp/flowdrop-send06-report.md`；task `task_afe2b8eb1352` / ctx_3ec3c5a1e1c4 |
+| SEND-07 | 上传上限两条路径：① `max_upload_bytes: 1024`，2 KiB 文件 → CLI 本地拒绝且不发上传；② 同一 Hub 用 `curl`/`python3` 直接发 2 KiB multipart（先拿 CSRF）→ 服务端 413；③ 另起 `min_free_bytes: 1152921504606846976` 的 Hub，小文件上传 → 507 | 三组状态码/错误码与消息、CLI 退出码 1；Hub 日志确认 ① 未进入 upload handler；记录实际错误码（`too_large`/`disk_full` 以实测为准） | 20min；只读产品代码以构造请求，不改代码。**完成并复核**：PASS。Hub A `127.0.0.1:42337`（PID 1785415，`max_upload_bytes=1024`）：2048 B 文件被 CLI 本地拒绝 rc=1、`too_large`、`file exceeds the hub upload limit of 1 KiB`，hub.log 该次仅 `GET /auth/session`、blobs 为空；curl 直传 → HTTP 413 `{code:too_large}`。Hub B `127.0.0.1:53485`（PID 1786225，`min_free_bytes=2^60`）：40 B 文件 CLI rc=1 `disk_full`；curl 直传 → HTTP 507 `{code:disk_full}`，hub.log `POST /items/upload status=507`。两个 Hub 按 PID SIGTERM 退出、端口释放、临时目录已删；报告 `/tmp/flowdrop-send07-report.md`；task `task_4fba341a817e` / ctx_ab9991885385 |
+
+## 当前交付：CLI sender 标签（SEND-08，2026-11-10）
+
+用户选定「CLI 补 sender 标签」：SEND-05 观察到 CLI 投递的 item `sender_device` 为空，而该字段是客户端提供的展示标签（Web 端 `ItemCard` 已渲染，无服务端派生逻辑）。本轮让 CLI 带上已配对设备名，使 Web 收件箱能看出 item 来自 agent/CLI 投递。**接口决策已冻结，worker 不得自行改协议**：
+
+- `sendcli.Client` 新增 `SetSenderDevice(name string)`；`SendReader` 在该值非空时于 multipart `file` 之前写 `sender_device` 字段（精确 `ContentLength` 必须仍成立）；`SendText` 在 JSON 中加 `sender_device`（`omitempty`）。
+- `resolveSendAuth` 增加返回发送者名：凭据路径用 `creds.DeviceName`；`FLOWDROP_TOKEN` 环境变量路径无设备名，用现有 `defaultDeviceName()`。`--name` 仍是 stdin 文件名，不作 sender。
+- 服务端 `sanitizeSender`（64 rune 截断/去控制字符）保持不变；CLI 不重复截断。Web/Android/desktop 不改。
+
+| 任务 | 单一目标与允许范围 | 验收证据 | 预算/停止条件 |
+|---|---|---|---|
+| SEND-08 | 只改 `server/internal/sendcli/sendcli.go`、`server/internal/sendcli/sendcli_test.go`、`server/cmd/flowdrop/send_cmd.go`、`server/cmd/flowdrop/send_cmd_test.go`：按上述冻结方案实现 sender 标签并补测试 | ① sendcli 新测试：`SetSenderDevice("cli-agent")` 后 `SendFile` 与 `SendText`，独立读取存储 item 的 `sender_device == "cli-agent"`；未设置时仍为空；multipart 仍能通过现有大小/字节数校验。② send_cmd 集成测试（现有 `cliHarness` 真实 handler）：`login --name cli-laptop` 后 `send` 文件与 text，存储 item 的 `sender_device == "cli-laptop"`；`FLOWDROP_TOKEN`/`FLOWDROP_HUB` 路径发送后 `sender_device` 非空且以 `cli-` 开头。③ `go test ./internal/sendcli/... ./cmd/flowdrop/...`、同一路径 `-race`、`go vet ./...`、`gofmt -l` 无输出 | 20min；普通命令 30s，测试 180s。不得改 `internal/api`、`internal/store`、web/desktop/android，不构建 dist、不安装、不 commit/push、不启 GUI、不碰用户实例（PID 1768910）与 `~/.config/flowdrop`；若实现需要允许范围外文件，停下回报。**完成并复核**：PASS。按冻结接口实现：`SetSenderDevice`（trim，空值不发）、multipart 在 `file` 前写 `sender_device` 且保持精确 `ContentLength`、text/link JSON `omitempty`；`resolveSendAuth` 返回设备名（凭据 `DeviceName`，空则 `defaultDeviceName()`；env-token 路径同）。主 agent 独立重跑 `go test -count=1` 与 `-race`（sendcli/cmd 两包）全 PASS、`gofmt -l` 无输出、`go vet ./...` rc=0；改动仅 4 个允许文件（+308/−22），`docs/TASKS.md`/`docs/VERIFICATION.md` 为主 agent 维护。未构建 dist（现有 `dist/flowdrop` 不含此改动，需用时 `bash scripts/build.sh`）、未安装、未 commit/push；报告 `/tmp/flowdrop-send08-report.md`；task `task_5da96e417f71` / ctx_50d490957494 |
+
+---
+
+## 待排期：二维码配对（QR-01～04，2026-11-10）
+
+用户要求把手机扫码配对接入排期。现状：桌面本机「添加设备」生成 4 位码（120s、单次、`CreatePairingCode` 走进程内 Hub），Android 通过 mDNS 发现或手动地址 + 输入配对码。二维码只作为**输入快捷方式**，不改变服务端配对协议。
+
+**接口决策（QR-01 冻结，worker 不得自行更改）**：
+
+- 载荷：`flowdrop://pair?v=1&code=DDDD[&url=...]`；`url` 可重复，只允许 http/https，按 URI 百分号编码；桌面优先携带一个非回环地址（LAN → Tailscale → 其它私有地址），没有可用地址时不带 `url`，Android 回退到现有发现/手动地址。
+- 只在桌面**本地模式**显示 QR；远程模式、Hub 未运行、码过期/已使用时隐藏。过期时间沿用现有 120s。
+- Android 扫码只预填配对码与候选地址，仍由用户确认后走现有 `POST /api/v1/auth/pair`；权限仅 CAMERA，拒绝授权后保留手动输入。
+- 不新增服务端端点、不持久化二维码、不把 device token 或长期凭据放进二维码。QR 内容与屏幕上的码等效，属于短期敏感信息，不写日志。
+
+| 任务 | 单一目标与允许范围 | 依赖与验收证据 | 预算/停止条件 |
+|---|---|---|---|
+| QR-01 | 主 agent 直接完成：`docs/PAIRING.md` 新增 QR 载荷/地址选择/权限/错误回退契约；`docs/PRD.md` 新增 §21 追加，覆盖 §16.4/§18.2 的二维码排除项（按 PRD「不改写历史决策」规则，不直接改旧节）；`docs/TASKS.md` 同步。不写产品代码 | 无；文档与现有 4 位码 TTL/单次使用/限流一致，Android 解析规则无歧义。**完成**：`docs/PAIRING.md` 已冻结 `flowdrop://pair?v=1&code=DDDD[&url=...]`、桌面只显示非回环地址、Android 仅预填需用户确认、CAMERA 权限回退、日志/持久化限制；`docs/PRD.md` 已加 §21 | 20min；不改代码、不派发 |
+| QR-02 | Desktop 生成并展示 QR：`desktop/service.go`、可新增 `desktop/pairing_qr.go` 与测试、`desktop/go.mod/go.sum`（QR 编码依赖）、`desktop/assets/index.html`、`app.js`、`style.css`。`CreatePairingCode` 返回载荷与 PNG data URL；地址取 `manager.URLs()` 的第一个非回环项；码过期/重新生成/Hub 停止/窗口关闭时一起隐藏 | QR-01。`go test -tags gtk3 ./...`、`go vet -tags gtk3 ./...`、`node --check desktop/assets/app.js`；单测覆盖载荷编码、非回环地址选择、无地址时省略 `url`、PNG 签名与码失效后清空；不启动 GUI | 40min；依赖拉取失败即停并回报；不改 web/android。**已派发**：`ctx_afe01f4265eb` / `task_76e4e78af832`（run_08547a39c126，pi，2026-11-10）。**完成**：新增 `desktop/pairing_qr.go`（`buildPairingPayload` / `pickPairingURL` / `qrPNGDataURL`，`skip2/go-qrcode` 256px Medium）、`pairing_qr_test.go`；`PairingCode` 增 `payload`/`qr_data_url`（omitempty），`CreatePairingCode` 取 `manager.URLs()` 按 LAN→100.64/10→其它选一个非回环地址；前端 `<img id="pairing-qr">` 挂入 `showPairingCode`/`clearPairingCode` 全部清理路径。主 agent 独立复跑：`gofmt -l .` 无输出、`go vet -tags gtk3 ./...`、`go test -tags gtk3 -count=1 ./...` 四包 PASS（需用户本地 GTK sysroot 的 `PKG_CONFIG_PATH`，宿主未装 dev 包）、`node --check` PASS。未验证：窗口内实际渲染 |
+| QR-03 | Android 扫码：`android/app/build.gradle.kts`、`AndroidManifest.xml`、新增扫码 UI/解析器、`AppViewModel.kt`、`MainActivity.kt`、`LoginScreen.kt` 及相关测试。CameraX + zxing-core（不依赖 Play Services）；CAMERA 运行时权限；解析载荷后预填码与候选地址，手动流程保留 | QR-01；与 QR-02 可并行（不同模块，不得互改文件）。`./gradlew :app:testDebugUnitTest :app:assembleDebug`；单测覆盖合法/非法载荷、重复 `url`、非 http(s)、缺 code；预填逻辑用 ViewModel/解析器单测验证；Compose UI 测试与真机扫码需模拟器/手机，单列为未验证 | 90min；Gradle 依赖不可下载即停；不改 desktop/server。**已派发**：`ctx_feb3721581d4` / `task_70151b4f056e`（run_08547a39c126，pi，2026-11-10）。**完成**：新增 `data/PairingPayload.kt` + 18 例解析测试、`ui/QrCodeDecoder.kt` + 5 例测试、`ui/QrScannerScreen.kt`；`AppViewModel.applyScannedPairing` 只预填（不覆盖已填地址、不自动配对）；CAMERA 运行时权限 + 拒绝提示；CameraX 1.3.4 + zxing-core 3.5.3，无 GMS。主 agent 独立复跑 `./gradlew :app:testDebugUnitTest --rerun-tasks`：146 tests / 0 failures；`assembleDebug` 产出 APK。未验证：真机相机/权限弹窗、模拟器无相机 |
+| QR-04 | 构建与端到端：`scripts/build.sh`、Android APK；用临时 Hub 生成码，若 `zbarimg`/`zxing` 可用则对生成的 PNG 做真实解码并比对载荷；用户用手机扫描完成一次真实配对 | QR-02、QR-03。解码结果与桌面显示的 code/url 一致；用户手机配对成功、列表出现设备；仅临时目录/端口，按 PID 停止 | 20min + 用户操作；不启宿主 GUI、不安装到用户目录、不 commit/push。**自动化部分完成（2026-11-10）**：`scripts/build.sh` 与 `scripts/build-desktop.sh` 均 exit 0；用一次性测试导出应用实际生成的 PNG，以 zxing-core 3.5.3 真实解码，结果与 `flowdrop://pair?v=1&code=0421&url=http%3A%2F%2F192.168.31.184%3A8080` 完全一致（临时测试已删除）；APK 已产出。**剩余**：用户在手机上扫描桌面屏幕的二维码完成一次真实配对，确认设备出现在列表 |
 
 ---
 

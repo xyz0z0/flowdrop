@@ -545,6 +545,22 @@ input[type="radio"]:focus-visible {
 
 .pairing-code .hint { margin-top: 0; }
 
+/* The QR code is only shown while a code is live. A white plate keeps it
+   scannable in the dark theme, and the size is capped so the card does not
+   jump around between addresses that carry a URL and those that do not. */
+.pairing-qr {
+  display: block;
+  width: 180px;
+  height: 180px;
+  margin: 0 auto 8px;
+  padding: 6px;
+  background: #fff;
+  border-radius: 8px;
+  image-rendering: pixelated;
+}
+
+.pairing-qr[hidden] { display: none; }
+
 .device-list {
   list-style: none;
   margin: 12px 0 0;

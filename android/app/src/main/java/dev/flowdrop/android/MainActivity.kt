@@ -1,23 +1,32 @@
 package dev.flowdrop.android
 
+import android.Manifest
 import android.content.Intent
+import android.content.pm.PackageManager
 import android.net.Uri
 import android.os.Bundle
 import androidx.activity.ComponentActivity
+import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.activity.viewModels
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.saveable.rememberSaveable
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.platform.LocalContext
+import androidx.core.content.ContextCompat
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.lifecycleScope
 import androidx.lifecycle.repeatOnLifecycle
 import dev.flowdrop.android.ui.FlowDropTheme
 import dev.flowdrop.android.ui.InboxScreen
 import dev.flowdrop.android.ui.LoginScreen
+import dev.flowdrop.android.ui.QrScannerScreen
 import dev.flowdrop.android.ui.ToastHost
 import kotlinx.coroutines.launch
 
@@ -149,6 +158,27 @@ private fun FlowDropRoot(viewModel: AppViewModel) {
     val composerText by viewModel.composerInput.collectAsState()
     val context = LocalContext.current
 
+    // Pairing-QR scanner: opened from the login form, dismissed on its own or
+    // when the phase changes. The CAMERA permission is requested only when the
+    // user taps the scan entry; a refusal shows one hint and leaves the manual
+    // address + code form fully usable.
+    var scannerOpen by rememberSaveable { mutableStateOf(false) }
+    var cameraPermissionDenied by rememberSaveable { mutableStateOf(false) }
+    val cameraPermissionLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.RequestPermission(),
+    ) { granted ->
+        if (granted) {
+            cameraPermissionDenied = false
+            scannerOpen = true
+        } else {
+            cameraPermissionDenied = true
+        }
+    }
+
+    LaunchedEffect(state.phase) {
+        if (state.phase != Phase.LOGIN) scannerOpen = false
+    }
+
     // Startup/exit of the login screen is the only place discovery runs.
     LaunchedEffect(state.phase) {
         when (state.phase) {
@@ -180,6 +210,19 @@ private fun FlowDropRoot(viewModel: AppViewModel) {
                     onRefreshDiscovery = viewModel::refreshNearbyHubs,
                     onStopDiscovery = viewModel::stopHubDiscovery,
                     onSelectHub = viewModel::selectDiscoveredHub,
+                    onScanQr = {
+                        val granted = ContextCompat.checkSelfPermission(
+                            context,
+                            Manifest.permission.CAMERA,
+                        ) == PackageManager.PERMISSION_GRANTED
+                        if (granted) {
+                            cameraPermissionDenied = false
+                            scannerOpen = true
+                        } else {
+                            cameraPermissionLauncher.launch(Manifest.permission.CAMERA)
+                        }
+                    },
+                    cameraPermissionDenied = cameraPermissionDenied,
                 )
                 Phase.INBOX -> InboxScreen(
                     state = state,
@@ -200,6 +243,17 @@ private fun FlowDropRoot(viewModel: AppViewModel) {
                     onDeviceNameChange = viewModel::updateDeviceName,
                     onLogout = viewModel::logout,
                     onNotify = { message, error -> viewModel.toast(message, error) },
+                )
+            }
+            if (state.phase == Phase.LOGIN && scannerOpen) {
+                QrScannerScreen(
+                    onDecoded = { raw ->
+                        // The scanner hands over the raw text once; it is parsed
+                        // and dropped here, never logged or stored.
+                        scannerOpen = false
+                        viewModel.applyScannedPairing(raw)
+                    },
+                    onCancel = { scannerOpen = false },
                 )
             }
             ToastHost(

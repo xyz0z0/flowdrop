@@ -1930,12 +1930,14 @@ APK由`timeout 240s ./gradlew --offline :app:assembleDebug`成功构建（4s）�
 
 ### 21.6 未验证项（单列，不当作通过）
 
-- 真实 HTTP 429 限流下的 `skipped` 分支（只有单元测试路径，未在真实 Hub 上打满限流）。
-- 设置里撤销 CLI 设备后 `send` 的提示（代码与单测覆盖，未在真实桌面实例上撤销验证）。
-- HTTPS / `cookie_secure=true` 的 Hub（本次只测明文回环）。
+**2026-11-10 补验（SEND-04～07）**：429 → `skipped`、撤销设备后的提示、HTTPS/`cookie_secure=true`、超限与 413/507 四项已用真实临时 Hub 验证通过，见 §21.8。以下仍为未验证项：
+
 - 指向桌面 App 真实配置与 data_dir 的 `login`（本次只用临时配置）。
-- 超过 `max_upload_bytes` 的大文件与服务端 413/507 真实响应。
 - Windows/macOS 上的 CLI 路径与 hostname 行为。
+- 413 的 `MaxBytesReader` 超大体分支、507 的阈值边界与恢复行为（§21.8 只验证了确定触发路径）。
+- 真实桌面 GUI「撤销设备」按钮路径（SEND-05 用与 `Store.RevokeDevice` 相同的 SQL 撤销）。
+- 公共 CA 证书、浏览器/WebView 的 Secure cookie 实际写入、TLS 代理下的 WebSocket（SEND-06 未覆盖）。
+- CLI 上传条目的 `sender_device` 为空字符串（SEND-05 顺带观察，未判定是否为缺陷；未验证 Web 端显示影响）。
 
 ### 21.7 用户验收步骤
 
@@ -1943,6 +1945,85 @@ APK由`timeout 240s ./gradlew --offline :app:assembleDebug`成功构建（4s）�
 2. 同机用它登录：`dist/flowdrop login -config ~/.config/flowdrop/config.json`。
 3. 投递：`dist/flowdrop send --json <文件>`，或 `printf 'x' | dist/flowdrop send --text -`。
 4. 需要撤销时在桌面设置里删除 `cli-<主机名>` 设备，再重新 `login`。
+
+### 21.8 真实场景补验（SEND-04～07，2026-11-10）
+
+四个独立 pi worker 并行、只验证不改代码；统一使用现成 `dist/flowdrop`（12,378,274 B，SHA-256 `9da66eaf…94d8`）、临时 config/data_dir/空闲端口；未启动 GUI、未触碰用户实例（PID 1768910）与 `~/.config/flowdrop`；进程均按确切 PID 停止，临时目录已删除。
+
+| 场景 | 实测 | 结果 |
+|---|---|---|
+| 429 限流 → skipped（SEND-04） | Hub `127.0.0.1:44791`，`api_limit_per_minute=2`：`send a b c` → a/b 201、c `rate_limited`、rc=1；紧接第二次 `send` → a `rate_limited`、b/c `skipped`（`not sent: rate limited`）。Hub 日志确认 429 后无上传，DB 只有 a.txt/b.txt | PASS |
+| 撤销设备（SEND-05） | 用与 `Store.RevokeDevice` 同一条 SQL 置 `revoked_at`（changes=1）后重启 Hub：`send` rc=1，stderr 原文 `flowdrop: device token was rejected (revoked in settings?); run \`flowdrop login\` again`；`GET /auth/session` 返回 200 + `authenticated:false`（CLI 映射 `ErrUnauthorized`，不是 HTTP 401）；`inbox_items=0`；重新 `login` 后上传 201、`inbox_items=1` | PASS |
+| HTTPS + Secure cookie（SEND-06） | Hub `127.0.0.1:57863`（`cookie_secure=true`）+ socat TLS 终止 `33245`（自签证书 SAN=IP:127.0.0.1）：`login`/`send` rc=0，服务端 sha256 与本地一致；`flowdrop_session`/`flowdrop_csrf` 均 `Secure+SameSite=Strict`（session 另 HttpOnly）；`SSL_CERT_FILE`/`--cacert` 真实校验，未跳过 | PASS |
+| 上传上限（SEND-07） | Hub A `max_upload_bytes=1024`：2 KiB 文件 CLI 本地拒绝 rc=1 `too_large`，hub.log 无 POST；curl 直传 413 `too_large`。Hub B `min_free_bytes=2^60`：小文件 CLI rc=1 `disk_full`；curl 直传 507 `disk_full` | PASS |
+
+观察（未修复、非阻塞）：
+
+- `GET /api/v1/auth/session` 不计入每设备 API 限流（SEND-04）：单次多文件发送时 429 只落在使预算耗尽的那一项，后续输入才标 `skipped`。
+- `/api/v1/auth/session` 的 `hub.endpoints` 返回 Hub 自身明文地址而非外部 HTTPS 代理地址（SEND-06）；Hub 不知道前置 TLS 终止，客户端/文档不应把该值当外部 URL。
+- CLI 上传的 item `sender_device` 为空字符串（SEND-05）；已在 SEND-08 补齐为客户端设备标签，见 §21.9。
+
+未验证（单列）：413 的 `MaxBytesReader` 超大体分支、507 阈值边界与恢复、公共 CA 证书、浏览器/WebView Secure cookie 写入、TLS 代理下 WebSocket、真实桌面 GUI 撤销按钮、Windows/macOS CLI。
+
+### 21.9 CLI sender 标签（SEND-08，2026-11-10）
+
+SEND-05 观察到 CLI 投递的 `sender_device` 为空。该字段是客户端提供的展示标签（服务端只做 `sanitizeSender` 清洗/64 rune 截断，不按设备派生），Web 端 `ItemCard` 已会渲染；因此本轮只改 CLI 发送侧，不改服务端协议与 Web。
+
+实现（仅 4 个文件，+308/−22）：
+
+- `sendcli.Client` 新增 `SetSenderDevice(name)`（trim；空值表示不发该字段）。
+- `SendReader`：sender 非空时在 multipart `file` 之前写 `sender_device`；字段进入 prefix，文件体仍流式，`ContentLength` 保持 head+size+tail。
+- `SendText`：JSON 增加 `sender_device,omitempty`。
+- `send_cmd.go`：`resolveSendAuth` 返回 sender——凭据路径用 `creds.DeviceName`（空则 `defaultDeviceName()`），`FLOWDROP_TOKEN`/`FLOWDROP_HUB` 路径用 `defaultDeviceName()`（`cli-<hostname>`）；`--name` 仍只作 stdin 文件名。
+
+自动测试（主 agent 独立执行，非缓存）：
+
+| 命令 | 结果 |
+|---|---|
+| `go test -count=1 ./internal/sendcli/... ./cmd/flowdrop/...` | PASS（0.049s / 0.076s） |
+| `go test -count=1 -race ./internal/sendcli/... ./cmd/flowdrop/...` | PASS（1.360s / 1.633s） |
+| `gofmt -l internal/sendcli cmd/flowdrop` | 无输出 |
+| `go vet ./...` | rc=0 |
+
+覆盖点：设置后文件/文本 item 的 `sender_device` 等于标签；未设置时仍为空；multipart 的 part 顺序与精确长度；`login --name cli-laptop` 后文件/文本/stdin 文件均携带 `cli-laptop` 且 `--name` 不变成 sender；env-token 路径 sender 以 `cli-` 开头。
+
+未验证（单列）：真实浏览器收件箱渲染（本轮无 Web 改动，验证停在 item JSON/存储层）；真实 Hub 上的 CLI 投递（仅 httptest 真实 handler）。`dist/flowdrop` 未重建，现有产物不含本改动；`bash scripts/build.sh` 后生效。
+
+### 21.10 二维码配对（QR-02/03/04，2026-11-10）
+
+契约见 `docs/PAIRING.md`「2026-11-10 补充」与 `docs/PRD.md` §21：二维码只是手机输入 4 位码的快捷方式，不改 `POST /api/v1/auth/pair`，不携带 device token。
+
+实现：
+
+- Desktop（QR-02）：`desktop/pairing_qr.go` 生成 `flowdrop://pair?v=1&code=DDDD[&url=...]` 与 `data:image/png;base64`（`skip2/go-qrcode`，256px Medium）；`CreatePairingCode` 从 `manager.URLs()` 按 LAN → 100.64/10 → 其它选一个非回环地址，无可用地址或 PNG 失败时 QR 为空、文字码照常；`index.html`/`app.js`/`style.css` 在四位码旁展示，复用过期/使用/重生成/Hub 停止/切换地址的清理路径。
+- Android（QR-03）：`data/PairingPayload.kt` 纯 JVM 解析器；`ui/QrScannerScreen.kt` CameraX 1.3.4 + zxing-core 3.5.3，CAMERA 运行时权限，拒绝后保留手动输入；`AppViewModel.applyScannedPairing` 只预填码与首个候选地址（地址已填则保留），从不自动配对；不依赖 Play Services。
+
+主 agent 独立验证（非缓存）：
+
+| 检查 | 结果 |
+|---|---|
+| `cd desktop && gofmt -l .` | 无输出 |
+| `cd desktop && go vet -tags gtk3 ./...` | PASS（需用户本地 GTK sysroot 的 `PKG_CONFIG_PATH`/`CGO_*`；宿主未装 dev 包，直接跑会 build failed） |
+| `cd desktop && go test -tags gtk3 -count=1 ./...` | 四包 PASS（desktop 0.694s，appsettings/hubmgr/network 同轮通过） |
+| `node --check desktop/assets/app.js` | PASS |
+| `cd android && ./gradlew :app:testDebugUnitTest --rerun-tasks` | BUILD SUCCESSFUL，24 tasks executed，146 tests / 0 failures / 0 errors（含既有 1 skip） |
+| `scripts/build.sh 0.1.0` + `scripts/build-desktop.sh` | 均 exit 0；`dist/flowdrop` 12.4MB，`dist/flowdrop-desktop` 17.7MB（release，gtk3 production） |
+| `./gradlew :app:assembleDebug` | `android/app/build/outputs/apk/debug/app-debug.apk`，14,256,487 bytes；合并清单含 CAMERA，`uses-feature required=false` |
+
+真实解码（QR-04 自动化部分）：用一次性测试调用 `pairingCodeView("0421", [loopback, 100.125.168.63, 192.168.31.184])` 导出应用实际生成的 PNG（临时测试文件已删除），再用 zxing-core/javase 3.5.3 解码，结果与期望载荷逐字符一致：
+
+```
+flowdrop://pair?v=1&code=0421&url=http%3A%2F%2F192.168.31.184%3A8080
+```
+
+地址选择正确跳过了 `127.0.0.1` 与 Tailscale 地址，优先 LAN；前导 0 保留。
+
+未验证（单列，不当作通过）：
+
+- 桌面窗口内二维码实际渲染（遵守宿主桌面保护，未启动 GUI）；
+- Android 真机相机解码、系统权限弹窗、暗光/反光等真实扫码条件（模拟器无相机）；
+- 用户手机扫描桌面屏幕完成一次真实配对（QR-04 剩余项，需用户操作）；
+- 安装版 `~/.local/bin/flowdrop-desktop` 未更新；本轮只产出 `dist/`，未 commit/push。
 
 ## 22. 自动绑定与热更新（`auto_bind`，2026-11-09，本轮）
 
@@ -2083,3 +2164,7 @@ APK由`timeout 240s ./gradlew --offline :app:assembleDebug`成功构建（4s）�
 | 重装 `~/.local/bin/flowdrop-desktop` | SHA-256 `c5872c1f…d582`，二进制内含 `hub-urls` / `runningListenAddrs` |
 
 未验证：窗口内实际渲染（未启动 GUI，宿主桌面保护）——运行中的实例是旧二进制，需用户从托盘退出并重启后观察。
+
+**用户验收（2026-11-10 19:23，通过）**：用户用 `dist/flowdrop-desktop`（PID 1768910，SHA `c5872c1f…d582`，与安装版一致）重启；核对该实例的实际监听为 `192.168.31.184:8080`、`100.125.168.63:8080`、`172.17.0.1:8080`、`172.18.0.1:8080` 四个同端口地址。用户在窗口内确认：运行状态列出全部 4 个地址、「实际绑定」也是 4 个、复制/在浏览器打开只作用于主地址。此前「只显示一个地址」的反馈已闭环。
+
+同日清理验证残留：09:22 启动的临时 Hub（PID 1246048，`/tmp/fd-def-ve4NQ0`，端口 34969）于 19:27:11 自行优雅退出（日志 `mDNS discovery withdrawn` + `hub stopped`），端口已释放，临时目录已删除；用户正式实例未受影响。
