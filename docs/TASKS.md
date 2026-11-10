@@ -1040,3 +1040,21 @@ DL-02（桌面端）：
 - 执行方式：主 agent 直接修复（规则明确的最小改动，未派 worker）。实跑（2026-11-09 18:24，sysroot pkg-config）：`gofmt -l .` 空、`go vet -tags gtk3 .` 通过、`go test -tags gtk3 -count=1 ./...` 四个包全 ok。
 - 构建与安装：`scripts/build-desktop.sh` → `dist/flowdrop-desktop`（sha256 `f2bc7ec4…`）；`scripts/install-desktop.sh` 装到 `~/.local/bin/flowdrop-desktop`（哈希一致）。同时用 `scripts/build.sh` 重建 `dist/flowdrop`（Hub CLI，含新前端嵌入）。
 - 未做：没有启动 GUI，因此无截图；未改 `~/.config/flowdrop/desktop.json`（真机文件里令牌仍在，`dev_local` 记录 13 条待清理，属用户数据，未经确认不删）；未 commit。
+
+---
+
+## 待排期：远程 Hub 连接体验（UX-01～03，2026-11-10）
+
+用户环境实测（2026-11-10，Windows `HappyDay` 10.0.26300 + Linux `bob-hpelitedesktop880g6`）：
+
+- Windows：WLAN `192.168.31.215`、Tailscale `100.86.13.51`；Linux：LAN `192.168.31.184`、Tailscale `100.125.168.63`。两端 LAN 都落在 `192.168.31.0/24`，但属于**不同物理网络**（网段相撞）。
+- Windows 上 `curl http://192.168.31.184:8080` → `000`（不可达）；`curl http://100.125.168.63:8080` → `200`。用户改用 tailnet 地址后远程模式连接成功。
+- 现有代码三处默认偏向 LAN 地址：`desktop/main.go:477 preferredHubURL()`（复制的地址）、`desktop/pairing_qr.go:75 pickPairingURL()`（二维码 `url=`）、`desktop/assets/index.html:72`（远程地址 placeholder 恰为 `http://192.168.31.184:8080`）。
+- `server/internal/discovery` 只发布 RFC1918 LAN 监听，包注释明确不广播 Tailscale/CGNAT，因此 mDNS 发现天然覆盖不到 tailnet。
+- Windows 桌面端配置当前为 `mode=local`（自己起 Hub 于 `192.168.31.215:8080`），"连不上"由"未切远程模式"与"LAN 地址不可达"两点叠加造成。
+
+| 任务 | 单一目标与允许范围 | 依赖与验收证据 | 预算/停止条件 |
+|---|---|---|---|
+| UX-01 | 远程模式保存前做可达性探测并给出针对性提醒：探测 `<remote>/`（2s 超时、探测函数可注入），失败时不切换、不保存，错误文案说明「对端若在 Tailscale 请填 100.64/10 地址；两端同为 192.168.x 网段时 LAN 地址会不可达」；探测成功但本机存在与目标同网段的 IPv4 时照常保存，并在 `remote-status-card` 显示疑似网段冲突的 warning。允许改 `desktop/service.go`、新增 `desktop/remote_probe.go`（+测试）、`desktop/assets/{index.html,app.js,style.css}`。禁止改 `appsettings` 校验规则、`desktop/main.go`、`server/`、`web/`、`android/`。 | 无前置。`go test ./...` 覆盖可达、不可达、超时、同网段 warning；`gofmt -l` 无输出、`go vet ./...`、`node --check desktop/assets/app.js`；不启动 GUI。 | 25min。需要改 `main.go`/`appsettings` 或超出允许文件即停并回报。 |
+| UX-02 | 桌面端「连接远程 Hub」增加「发现的 Hub」列表：mDNS 浏览 `_flowdrop._tcp.local.`，按 Android `DiscoveryProtocol` 同样规则（`v=1`、`scheme=http`、`path=/`、仅 RFC1918 IPv4、实例前缀 `FlowDrop-`）解析与去重；点击填入 `http://<ip>:<port>`；空列表文案说明「仅同一局域网可见，Tailscale 地址需手动填写」。允许改 `desktop/`（新增 `desktop/internal/lanbrowse/`、`desktop/service.go`、`desktop/assets/*`、`desktop/go.mod|go.sum`）。禁止改 `server/`、`web/`、`android/`。 | 依赖 UX-01 落地（两者都改 `desktop/service.go`，串行，不得并行）。单测覆盖解析/过滤/去重；`go test ./...`、`go vet ./...`、`node --check`。真实发现需同 LAN 第二台机器，单列为未验证。 | 40min。依赖不可下载即停并回报。 |
+| UX-03 | （后续可选）Tailscale peer 候选：读取 `tailscale status --json`（CLI 缺失或失败时静默降级），对 `100.64/10` peer 探测 `/`，作为独立分组并入 UX-02 的候选列表。允许范围同 UX-02。 | 依赖 UX-02 的候选列表 UI 与 UX-01 的探测函数。验收：mock 的 `tailscale status` JSON + `httptest`。 | 30min。仅在 UX-01/02 交付并复核后排期。 |

@@ -2168,3 +2168,24 @@ flowdrop://pair?v=1&code=0421&url=http%3A%2F%2F192.168.31.184%3A8080
 **用户验收（2026-11-10 19:23，通过）**：用户用 `dist/flowdrop-desktop`（PID 1768910，SHA `c5872c1f…d582`，与安装版一致）重启；核对该实例的实际监听为 `192.168.31.184:8080`、`100.125.168.63:8080`、`172.17.0.1:8080`、`172.18.0.1:8080` 四个同端口地址。用户在窗口内确认：运行状态列出全部 4 个地址、「实际绑定」也是 4 个、复制/在浏览器打开只作用于主地址。此前「只显示一个地址」的反馈已闭环。
 
 同日清理验证残留：09:22 启动的临时 Hub（PID 1246048，`/tmp/fd-def-ve4NQ0`，端口 34969）于 19:27:11 自行优雅退出（日志 `mDNS discovery withdrawn` + `hub stopped`），端口已释放，临时目录已删除；用户正式实例未受影响。
+
+## 23. Windows 客户端远程连接 Hub 失败：两端 LAN 网段相撞（2026-11-10，诊断）
+
+现象：用户从 Windows 上的 FlowDrop 桌面端连接 Linux 上的 Hub 失败；同一 Windows 用浏览器访问该 Hub 却能完成配对。
+
+环境与实测（Windows `HappyDay`，经 Orca 配对通道在其 cmd.exe 内执行）：
+
+| 检查 | 结果 |
+|---|---|
+| `ipconfig` | WLAN `192.168.31.215`、Tailscale `100.86.13.51` |
+| Linux Hub 监听（`ss -ltn`，PID 1768910） | `192.168.31.184:8080`、`100.125.168.63:8080`、`172.17.0.1:8080`、`172.18.0.1:8080` |
+| `curl http://192.168.31.184:8080/` | `000`（不可达） |
+| `curl http://100.125.168.63:8080/` | `200` |
+| `type %APPDATA%\flowdrop\desktop.json` | `mode=local`、`bind_address=192.168.31.215`、`port=8080`、`auto_bind=true`（Windows 端自己起 Hub，未处于远程模式） |
+| `tasklist` | `flowdrop-desktop.exe` PID 25492 正在运行 |
+
+结论：两端 LAN **都是 `192.168.31.0/24`** 但属于不同物理网络，Windows 把 `192.168.31.184` 当成本地网段直连，报文不出网关，故 LAN 地址必然不可达；tailnet 地址正常。加上 Windows 桌面端当时仍是 `local` 模式，因此表现为"连不上 Linux 的 Hub"。用户把远程地址改为 `http://100.125.168.63:8080` 后连接成功。
+
+代码侧诱因（未修改）：`preferredHubURL()`、`pickPairingURL()` 与 `desktop/assets/index.html:72` 的示例地址都优先/示范 LAN 地址，冲突场景下给出不可达地址。已登记为 `TASKS.md` UX-01（可达性提醒）与 UX-02/03（桌面端发现 Hub、Tailscale peer 候选）。
+
+未验证：未区分 `192.168.31.184` 的不可达是网段相撞还是 Linux 侧防火墙所致；tailnet 路径已可用，未继续排查。未改动用户 Windows 端配置与运行中进程。
