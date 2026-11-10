@@ -82,6 +82,12 @@ type State struct {
 	HasTailscale  bool              `json:"has_tailscale"`
 	TrayAvailable bool              `json:"tray_available"`
 	ProxyWarning  string            `json:"proxy_warning"`
+	// RemoteWarning is a pure hint for the settings window: it is only set in
+	// remote mode, and only when the saved remote address sits in the same IPv4
+	// /24 as one of this machine's addresses (two different physical networks
+	// that both use 192.168.x.x look exactly like this). It never affects saving
+	// or the running mode.
+	RemoteWarning string `json:"remote_warning"`
 	// AutoBind is the saved "bind every local address" switch. It is a saved
 	// preference, not a claim about the listeners: the live address set stays
 	// in URLs.
@@ -163,6 +169,9 @@ func (s *SettingsService) GetState() (State, error) {
 		st.URL = ""
 		st.URLs = nil
 		st.AccessURLs = nil
+		// Checked against the already fetched interface list; non-remote mode
+		// leaves this empty.
+		st.RemoteWarning = remoteSubnetConflict(st.RemoteURL, list)
 	}
 	// When the Hub failed to start (or does not exist in remote mode) there is
 	// no running config; show what the user asked for so the failing or hidden
@@ -281,6 +290,17 @@ func (s *SettingsService) ApplyMode(mode, remoteURL string) (State, error) {
 	// rules, the bridge never keeps a copy of them.
 	if err := next.Validate(); err != nil {
 		return s.mustState(), err
+	}
+	// Saving a remote Hub address requires that address to answer: otherwise the
+	// window only shows an empty inbox and the user cannot tell "wrong address"
+	// from "no Hub there". local -> remote, remote -> remote and a repeated save
+	// of the same remote address all go through this one check. It runs under the
+	// mode switch lock (at most remoteProbeTimeout), which keeps the order of the
+	// lock and the probe fixed.
+	if next.IsRemote() {
+		if err := probeRemoteHub(context.Background(), next.RemoteURL); err != nil {
+			return s.mustState(), errors.New(remoteProbeFailureMessage(next.RemoteURL, err))
+		}
 	}
 
 	// Idempotent: this process already runs exactly this mode and address, so

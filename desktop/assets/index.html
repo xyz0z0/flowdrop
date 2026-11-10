@@ -73,6 +73,7 @@
         </div>
         <p class="hint">
           填局域网或 Tailscale 地址，不含路径；配对在收件箱页里输入该 Hub 生成的 4 位码。
+          对端在 Tailscale 上时请填它的 100.x 地址；两台机器都用 192.168.x.x 但不在同一局域网时，LAN 地址不可达。
         </p>
       </div>
       <div class="row">
@@ -85,6 +86,7 @@
     <section id="remote-status-card" class="card" hidden>
       <h2>远程 Hub</h2>
       <p id="remote-current" class="remote-current">—</p>
+      <p id="remote-warning" class="banner banner-warn" hidden></p>
       <div class="row">
         <button id="remote-open-inbox" class="primary" type="button">打开收件箱</button>
         <button id="remote-open-browser" class="ghost" type="button">在浏览器中打开</button>

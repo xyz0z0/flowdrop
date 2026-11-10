@@ -208,6 +208,9 @@ function renderRunMode() {
   $("pairing-card").hidden = remote;
   $("remote-status-card").hidden = !remote;
   show($("remote-current"), remote ? "当前：远程 Hub · " + (s.remote_url || "（未填写地址）") : "");
+  // A suspected same-subnet collision is only meaningful in remote mode; the
+  // string is a pure hint from the backend and never blocks anything.
+  show($("remote-warning"), remote ? s.remote_warning || "" : "");
 }
 
 // runningListenAddrs returns the ip:port of every live listener, primary first.

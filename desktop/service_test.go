@@ -383,6 +383,9 @@ func freePortOnAddress(t *testing.T, host string) int {
 // needed and the response describes the new mode right away.
 func TestServiceApplyModeSwitchesAtRuntime(t *testing.T) {
 	svc, m, _ := newTestService(t)
+	// The remote address below does not exist on this machine: the probe must be
+	// stubbed so the test never dials the real network.
+	stubRemoteProbe(t, nil)
 	localURL := m.URL()
 	savedPath := os.Getenv("FLOWDROP_DESKTOP_CONFIG")
 
@@ -495,6 +498,7 @@ func TestServiceApplyModeSwitchesAtRuntime(t *testing.T) {
 // validation and leaves both the file and the running mode untouched.
 func TestServiceApplyModeRejectsInvalidInput(t *testing.T) {
 	svc, m, _ := newTestService(t)
+	stubRemoteProbe(t, nil)
 	remoteURL := "http://192.168.31.184:8080"
 	if _, err := svc.ApplyMode(appsettings.ModeRemote, remoteURL); err != nil {
 		t.Fatalf("ApplyMode(remote): %v", err)
@@ -529,6 +533,7 @@ func TestServiceApplyModeRejectsInvalidInput(t *testing.T) {
 // instead of persisting a half-applied state.
 func TestServiceApplyModeRemoteToLocalStartFailure(t *testing.T) {
 	svc, m, _ := newTestService(t)
+	stubRemoteProbe(t, nil)
 	remoteURL := "http://192.168.31.184:8080"
 	if _, err := svc.ApplyMode(appsettings.ModeRemote, remoteURL); err != nil {
 		t.Fatalf("ApplyMode(remote): %v", err)
@@ -582,6 +587,7 @@ func TestServiceApplyModeRemoteToLocalStartFailure(t *testing.T) {
 // Run with -race this pins the locking of desktop.remoteURL.
 func TestServiceApplyModeIsRaceFreeWithConcurrentStateReads(t *testing.T) {
 	svc, m, _ := newTestService(t)
+	stubRemoteProbe(t, nil)
 	remoteURL := "http://192.168.31.184:8080"
 
 	stop := make(chan struct{})
@@ -623,6 +629,7 @@ func TestServiceApplyModeIsRaceFreeWithConcurrentStateReads(t *testing.T) {
 // rebind: the remote Hub owns all of that.
 func TestServiceRemoteModeGuardsLocalHub(t *testing.T) {
 	svc, _, _ := newTestService(t)
+	stubRemoteProbe(t, nil)
 
 	st, err := svc.ApplyMode(appsettings.ModeRemote, "http://192.168.31.184:8080")
 	if err != nil {
@@ -677,6 +684,7 @@ func TestServiceRemoteModeGuardsLocalHub(t *testing.T) {
 // running Hub.
 func TestServiceRemoteShellGetState(t *testing.T) {
 	svc, _, _ := newTestService(t)
+	stubRemoteProbe(t, nil)
 	remoteURL := "http://192.168.31.184:8080"
 	// This is what the hot switch leaves behind in remote mode: no local Hub and
 	// the runtime remote URL set.

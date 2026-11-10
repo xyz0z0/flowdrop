@@ -1058,3 +1058,20 @@ DL-02（桌面端）：
 | UX-01 | 远程模式保存前做可达性探测并给出针对性提醒：探测 `<remote>/`（2s 超时、探测函数可注入），失败时不切换、不保存，错误文案说明「对端若在 Tailscale 请填 100.64/10 地址；两端同为 192.168.x 网段时 LAN 地址会不可达」；探测成功但本机存在与目标同网段的 IPv4 时照常保存，并在 `remote-status-card` 显示疑似网段冲突的 warning。允许改 `desktop/service.go`、新增 `desktop/remote_probe.go`（+测试）、`desktop/assets/{index.html,app.js,style.css}`。禁止改 `appsettings` 校验规则、`desktop/main.go`、`server/`、`web/`、`android/`。 | 无前置。`go test ./...` 覆盖可达、不可达、超时、同网段 warning；`gofmt -l` 无输出、`go vet ./...`、`node --check desktop/assets/app.js`；不启动 GUI。 | 25min。需要改 `main.go`/`appsettings` 或超出允许文件即停并回报。 |
 | UX-02 | 桌面端「连接远程 Hub」增加「发现的 Hub」列表：mDNS 浏览 `_flowdrop._tcp.local.`，按 Android `DiscoveryProtocol` 同样规则（`v=1`、`scheme=http`、`path=/`、仅 RFC1918 IPv4、实例前缀 `FlowDrop-`）解析与去重；点击填入 `http://<ip>:<port>`；空列表文案说明「仅同一局域网可见，Tailscale 地址需手动填写」。允许改 `desktop/`（新增 `desktop/internal/lanbrowse/`、`desktop/service.go`、`desktop/assets/*`、`desktop/go.mod|go.sum`）。禁止改 `server/`、`web/`、`android/`。 | 依赖 UX-01 落地（两者都改 `desktop/service.go`，串行，不得并行）。单测覆盖解析/过滤/去重；`go test ./...`、`go vet ./...`、`node --check`。真实发现需同 LAN 第二台机器，单列为未验证。 | 40min。依赖不可下载即停并回报。 |
 | UX-03 | （后续可选）Tailscale peer 候选：读取 `tailscale status --json`（CLI 缺失或失败时静默降级），对 `100.64/10` peer 探测 `/`，作为独立分组并入 UX-02 的候选列表。允许范围同 UX-02。 | 依赖 UX-02 的候选列表 UI 与 UX-01 的探测函数。验收：mock 的 `tailscale status` JSON + `httptest`。 | 30min。仅在 UX-01/02 交付并复核后排期。 |
+
+UX-01 已派发（2026-11-10）：Run `run_339dbd9fc214`，Task `task_2f31e3734391`，Dispatch `ctx_b3c438d53a4c`（`--agent pi`，worktree `current` = 本 worktree `ux-01-remote-probe` / 分支 `xyz0z0/ux-01-remote-probe`）。规格文件 `/c/tmp/flowdrop-ux01-spec.md`（已随派发注入）。
+
+派发前主 agent 只读核对的关键事实（供复核用）：`ApplyMode` 在 `desktop/service.go`（`next.Validate()` 之后才切换/保存），`State` 由 `GetState` 组织并在远程模式清空 URLs，前端在 `desktop/assets/app.js` 的 `renderRunMode()` 渲染 `#remote-status-card`。本机（Windows，go1.27.3）`go test -tags purego . ./internal/...` 的既有失败基线已写进 spec，要求 worker 不得修也不得新增失败；GTK/gtk3 构建与真实窗口本机不可验证，需单列未验证。
+
+UX-01 完成并由主 agent 复核（2026-11-10，worker 17min，dispatch `ctx_b3c438d53a4c` / `task_2f31e3734391`，报告 `/c/tmp/flowdrop-ux01-report.md`）：
+
+- 新增 `desktop/remote_probe.go`：`remoteProbeTimeout = 2s` 是唯一 deadline（`http.Client{Timeout}`，ctx 只用于取消）；`var probeRemoteHub = defaultProbeRemoteHub` 为注入点；探测 `GET <remote>/`（TrimRight 后补一个 `/`），2xx/3xx 可达、4xx/5xx 带状态码报错、body `io.Copy(io.Discard)` 后 `Close`；`remoteProbeFailureMessage` 分类超时（「2 秒内没有响应」）/`*net.OpError`（无法建立连接）/其它，并给出 100.64/10 与同网段指引和「运行模式与保存的配置没有改变」；`remoteSubnetConflict` 只在目标为 RFC1918 且本机（跳过 loopback/link-local）有同 /24 时返回「疑似同网段冲突…x.y.z.0/24」，100.64/10、主机名、IPv6、公网地址一律不提示，多个本机地址只报调用方顺序第一个。
+- `desktop/service.go`：`State.RemoteWarning`（`remote_warning`）；`ApplyMode` 在 `next.Validate()` 之后、幂等分支与保存/切换之前探测（local→remote、remote→remote、幂等重复保存同一条规则），失败直接返回错误，不改运行模式也不写文件；锁的位置与顺序未变。`GetState` 远程分支用已取得的 `list` 计算 warning，非远程一律为空（清 URLs 时没有连带清掉 warning）。
+- 前端：`#remote-status-card` 加 `#remote-warning`（`banner banner-warn`，hidden），`renderRunMode()` 用既有 `show()` 按 `state.remote_warning` 显隐（非远程清空）；远程 pane 的 hint 补一句 Tailscale / 同网段指引，placeholder 未改。`style.css` 未改（`.banner-warn` 已存在）。
+- 测试：新增 `desktop/remote_probe_test.go` 8 项（可达含 `GET /` 与尾斜杠、不可达、超时 2.00s、503、`remoteSubnetConflict` 六种情形、服务层失败不落盘不切换、服务层成功落盘去尾斜杠、`GetState` warning 与切回本地清空）；给 `desktop/service_test.go` 6 个既有远程模式测试只补 `stubRemoteProbe(t, nil)`，断言与语义未改。
+
+主 agent 复核与仅有一处改动：`gofmt -l .` 空、`go vet -tags purego .`、`node --check assets/app.js` 通过；定向 8 项新增测试全 PASS（超时用例 2.00s）；全量 `go test -tags purego . ./internal/...` 的失败集合与基线逐项一致、无新增失败（唯一相关 FAIL 为基线既有 `TestServiceApplyModeRemoteToLocalStartFailure`：Windows 端口占用错误文案不同）。复核发现 `TestServiceApplyModeRemoteProbeSuccess` 原本 stub 掉探测又起了一个永远不会被访问的 `httptest`（其 `/` 断言是死代码），改为**保留真实探测**打到 `httptest` 服务并断言命中次数——这样 `ApplyMode → probeRemoteHub → <remote>/` 的接线是端到端验证的；改后该测试仍 PASS。
+
+未验证（单列）：`-tags gtk3` 的 GTK 编译与测试、真实 Wails/WebKitGTK 窗口内「远程 Hub 卡片」warning 观感、真实跨网环境（Windows → Linux 192.168.31.x 不可达 / Tailscale 可达）端到端；本机无 GTK 与宿主机 GUI 实验禁令，本轮不做。
+
+未做：未重建 `dist/` 产物、未安装（构建交付另安排）；未 commit/push。UX-02 现在可以排期（依赖已落地，仍须与 UX-01 串行写 `desktop/service.go`）。
