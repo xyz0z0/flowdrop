@@ -600,6 +600,59 @@ $("remote-url").addEventListener("input", () => {
   runModeDirty = true;
 });
 
+// Discovery fills the address box; it never saves the mode by itself. The
+// backend only returns addresses that answered, so every row is worth trying,
+// but it is still just an address hint: pairing happens in the inbox.
+const sourceLabelFor = (source) => (source === "tailscale" ? "Tailscale" : "局域网");
+
+function renderDiscovered(list) {
+  const box = $("discovered-hubs");
+  box.innerHTML = "";
+  const entries = list || [];
+  for (const entry of entries) {
+    const row = document.createElement("div");
+    row.className = "url-item";
+    const code = document.createElement("code");
+    code.textContent = entry.url;
+    row.appendChild(code);
+    const tag = document.createElement("span");
+    tag.className = "tag";
+    tag.textContent = sourceLabelFor(entry.source) + (entry.label ? " · " + entry.label : "");
+    row.appendChild(tag);
+    const use = document.createElement("button");
+    use.className = "ghost";
+    use.type = "button";
+    use.textContent = "填入";
+    use.addEventListener("click", () => {
+      $("remote-url").value = entry.url;
+      runModeDirty = true;
+      show($("run-mode-error"), "");
+      show($("run-mode-ok"), "已填入 " + entry.url + "，点「保存」后生效。");
+    });
+    row.appendChild(use);
+    box.appendChild(row);
+  }
+  box.hidden = entries.length === 0;
+  $("discover-empty").hidden = entries.length !== 0;
+}
+
+$("discover-hubs").addEventListener("click", async () => {
+  const btn = $("discover-hubs");
+  show($("discover-error"), "");
+  btn.disabled = true;
+  btn.textContent = "扫描中…";
+  try {
+    const list = await call("DiscoverHubs");
+    renderDiscovered(list);
+  } catch (err) {
+    renderDiscovered([]);
+    show($("discover-error"), String(err));
+  } finally {
+    btn.disabled = false;
+    btn.textContent = "扫描";
+  }
+});
+
 // Saving the mode calls ApplyMode(mode, url). The backend validates the address
 // and switches the running process immediately (stops/starts the Hub, reloads
 // the inbox window), so the response already describes the new mode. A readable

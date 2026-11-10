@@ -2189,3 +2189,19 @@ flowdrop://pair?v=1&code=0421&url=http%3A%2F%2F192.168.31.184%3A8080
 代码侧诱因（未修改）：`preferredHubURL()`、`pickPairingURL()` 与 `desktop/assets/index.html:72` 的示例地址都优先/示范 LAN 地址，冲突场景下给出不可达地址。已登记为 `TASKS.md` UX-01（可达性提醒）与 UX-02/03（桌面端发现 Hub、Tailscale peer 候选）。
 
 未验证：未区分 `192.168.31.184` 的不可达是网段相撞还是 Linux 侧防火墙所致；tailnet 路径已可用，未继续排查。未改动用户 Windows 端配置与运行中进程。
+
+## 24. 桌面端 Hub 发现（mDNS + Tailscale peer，2026-11-10）
+
+实现见 `TASKS.md` UX-02/UX-03。本轮在本机（Linux，`192.168.31.184` / `100.125.168.63`）实跑，未启动 GUI：
+
+| 检查 | 命令/方式 | 结果 |
+|---|---|---|
+| 局域网 mDNS 浏览 | 临时测试调用 `lanbrowse.Browse(ctx, 4s)` | 发现 `http://192.168.31.184:8080（FlowDrop-bob-hpelitedesk880g6-2）`，1 条 |
+| Tailscale peer 解析 | 临时测试调用 `tailnet.Peers` | CLI 可用；`tailscale status --json` 的 10 个 peer 中带 `100.64/10` 地址的被解析（含当时在线的 `HappyDay`/`100.86.13.51`），无 CGNAT 地址的 peer 被丢弃，地址去重 |
+| 端到端 `DiscoverHubs` | 临时测试调用 `SettingsService.DiscoverHubs` | 8.01s 内返回 1 条 LAN 候选；对端 peer 因未运行 Hub 全部探测失败并被丢弃（符合"宁可少列，不列不可达地址"的约定） |
+| 单元测试 | `go test -tags gtk3 -count=1 ./...` | `desktop` 及 5 个 internal 包全 ok（新增 lanbrowse 7 项、tailnet 6 项、服务层 9 项） |
+| 静态检查 | `gofmt -l`、`go vet -tags gtk3 ./...`、`node --check desktop/assets/app.js` | 全部通过 |
+
+未验证：真实 Wails 窗口内「扫描」按钮与候选列表的观感与交互；mDNS 在多网卡/跨网环境下的实际覆盖面（mDNS 是链路本地协议，跨网必然看不到）；Windows 端的同一功能（执行主机下线）。
+
+结论要点：局域网发现只能覆盖同网段，用户当前"两台机器各自 192.168.31.x 但不在同一局域网"的场景由 tailnet 候选覆盖；候选只是地址提示，仍需 Hub 自身配对流程。

@@ -1082,3 +1082,11 @@ UX-01 交付（主 agent，2026-11-10）：
 - 构建：`scripts/build-desktop-windows.sh` → `dist/flowdrop-desktop.exe` 18,553,344 B，sha256 `b5ed863e40af4fee19e5218c4641013ee39c610894dde83e88f4fc5916ae495c`；经 tailnet 临时 HTTP 送到 Windows `D:\vibe-space\flowdrop\dist\flowdrop-desktop-new.exe`，`certutil` 哈希一致。
 - 未验证：真实窗口内的 warning 观感与"填 LAN 地址 → 报错不保存 / 填 tailnet 地址 → 保存并显示冲突提示"的真实跨网端到端；替换运行中实例需用户手动退出旧进程（PID 25492）后改名换入。
 - Windows 侧 worktree `ux-01-remote-probe` 已 `worktree rm --force` 回收。
+
+UX-02 + UX-03 交付（主 agent，2026-11-10；Windows 执行主机下线，本轮全部在 Linux 完成，未再派 worker）：
+
+- UX-02（局域网发现）：新增 `desktop/internal/lanbrowse`（mDNS 浏览 `_flowdrop._tcp.local.`，`Parse` 规则与 Android `DiscoveryProtocol` 一致：服务类型/`FlowDrop-` 实例前缀/`v=1`+`scheme=http`+`path=/`/仅 RFC1918 IPv4/端口范围，TXT 缺失按旧发布端容忍；只采纳 `AddrIPv4` 显式地址，忽略主机名）。`desktop/discover_service.go` 新增 `SettingsService.DiscoverHubs`：mDNS 结果 + tailnet 候选合并去重，逐个用 `probeRemoteHub`（UX-01 的 2s 探测）验证，未响应的丢弃，LAN 分组在前。
+- UX-03（tailnet 候选）：新增 `desktop/internal/tailnet`（`tailscale status --json` → `Peer{Name,IP,Online,OS}`，仅保留 `100.64/10`，按名字排序；CLI 缺失返回 `errNoCommand` 且视为"不可用"而非错误）。探测端口取「当前配置端口 + 8080」，并发上限 6，整体 8s 上限。前端在「连接远程 Hub」里加「扫描」按钮与「发现的 Hub」列表，点击「填入」只改输入框并要求用户再点保存，从不自动切换到远程模式。
+- 真实证据（本机实跑，2026-11-10 23:15）：临时测试跑 `lanbrowse.Browse` 4s → 发现 `http://192.168.31.184:8080（FlowDrop-bob-hpelitedesk880g6-2）`；`tailnet.Peers` → 解析出 10 个 peer 中的 CGNAT 项（含 `HappyDay`/`100.86.13.51`，当时在线）；`SettingsService.DiscoverHubs` 端到端 → 返回 1 个 LAN 候选、tailnet 候选因对端未运行 Hub 全部被探测淘汰。三个临时测试文件跑完即删。
+- 检查：`gofmt -l` 无输出；`go vet -tags gtk3 ./...` 通过；`go test -tags gtk3 -count=1 ./...` 六个包全 ok（新增 lanbrowse 7 项、tailnet 6 项、服务层 9 项）；`node --check desktop/assets/app.js` 通过；`go mod tidy` 把 `grandcat/zeroconf` 提为 desktop 的直接依赖。
+- 未验证：真实窗口内「扫描」按钮与列表观感、mDNS 在跨网/多网卡环境的实际覆盖面、Windows 侧同一功能（执行主机下线，未能跑）。

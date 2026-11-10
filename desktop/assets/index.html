@@ -75,6 +75,16 @@
           填局域网或 Tailscale 地址，不含路径；配对在收件箱页里输入该 Hub 生成的 4 位码。
           对端在 Tailscale 上时请填它的 100.x 地址；两台机器都用 192.168.x.x 但不在同一局域网时，LAN 地址不可达。
         </p>
+        <div class="row">
+          <label for="discover-hubs">发现的 Hub</label>
+          <button id="discover-hubs" class="ghost" type="button">扫描</button>
+        </div>
+        <div id="discovered-hubs" class="hub-urls" hidden></div>
+        <p id="discover-empty" class="hint hint-inline" hidden>
+          没有发现可用的 Hub。局域网发现（mDNS）只能看到同一局域网内的 Hub；
+          Tailscale 地址靠本机的 tailscale 命令探测，需要已安装并登录。两者都看不到时请手动填写地址。
+        </p>
+        <p id="discover-error" class="banner banner-error" hidden></p>
       </div>
       <div class="row">
         <button id="run-mode-save" class="primary" type="button">保存</button>

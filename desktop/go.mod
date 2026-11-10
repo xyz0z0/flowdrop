@@ -6,6 +6,7 @@ require (
 	flowdrop v0.0.0
 	github.com/coder/websocket v1.8.15
 	github.com/godbus/dbus/v5 v5.2.2
+	github.com/grandcat/zeroconf v1.0.0
 	github.com/skip2/go-qrcode v0.0.0-20200617195104-da1b6568686e
 	github.com/wailsapp/wails/v3 v3.1.0
 )
@@ -16,7 +17,6 @@ require (
 	github.com/ebitengine/purego v0.11.1 // indirect
 	github.com/go-ole/go-ole v1.3.0 // indirect
 	github.com/google/uuid v1.6.0 // indirect
-	github.com/grandcat/zeroconf v1.0.0 // indirect
 	github.com/mattn/go-isatty v0.0.20 // indirect
 	github.com/miekg/dns v1.1.27 // indirect
 	github.com/ncruces/go-strftime v1.0.0 // indirect
