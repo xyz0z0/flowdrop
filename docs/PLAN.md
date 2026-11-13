@@ -136,3 +136,23 @@ P1/P2（自动过期、设备管理等）不实现。
 ## M9 设备配对与多地址自动连接（2026-11-08）
 
 用户确认范围见PRD §20与[PAIRING.md](PAIRING.md)，每项派发与证据见[TASKS.md](TASKS.md)。源码接入、旧公开密码入口退役、服务端/桌面/Android单测与编译已完成；Linux两产物构建、Chromium16项E2E及隔离Wails配对/拖拽通过。Android网络层对真实Hub双回环地址验证与APK构建已完成，全量102 JVM通过；真实手机Wi-Fi/Tailscale和本轮KDE配对待用户验收。此阶段覆盖前文M1/M4/M6的密码登录与不自动选路结论，不删除历史验收证据。最新证据与限制见VERIFICATION §20。
+
+## 当前计划校准（2026-11-13）
+
+本节以 [TASKS.md](TASKS.md) 最新记录与 [VERIFICATION.md](VERIFICATION.md) 为准，只做
+校准，不改写前文历史阶段结论与证据。
+
+- **HTTP 主路径不变**：仍为家庭可信 LAN 明文 HTTP（M4）+ 用户现有 Tailscale 跨网。
+  HTTPS/WSS 仅登记待办 **HTTPS-01**（用户 2026-11-13 明确暂不启用，低优先级待排期，
+  无实施授权）；届时在 Tailscale Serve 或自有域名+DNS-01 之间先选部署方式，不默认
+  手工本地 CA；若用本地 CA 需补 Android 应用侧信任配置（当前仅系统 CA）。
+- **推荐下一步（未获新授权，除已登记的待用户真机验收外均不得据此实施）**：
+  1. 真实 Android 手机验收：新版 APK + 带 category 协议的新 Hub，覆盖分类切换/分类
+     内分页/实时同步、文本上传与分享新增归入当前分类，以及 Wi-Fi HTTP 与移动网络
+     Tailscale 地址切换（待用户设备条件）。
+  2. 真实桌面分类使用反馈：TYPE 仅有独立 React renderer 证据，真实 WebView/视觉与
+     窗口端到端未验证（待用户使用或隔离 GUI 环境）。
+  3. 从既有未完成计划中择一（需用户决定）：M5/PAIRING 已登记的 Android 真机 mDNS
+     发现与配对（可与第 1 项同窗验收），或 PLAN 中标为「macOS 未做」的 macOS 桌面端。
+- 不在本节凭空新增产品功能，也不把已完成的历史项（如 QR 配对、桌面双监听 M7）重新
+  记为待开发。

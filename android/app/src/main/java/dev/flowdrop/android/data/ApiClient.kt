@@ -219,9 +219,19 @@ class ApiClient(
 
     // ---------- items ----------
 
-    suspend fun list(cursor: String? = null, limit: Int = PAGE_SIZE): Page {
+    /**
+     * One page of the inbox. [category] is always sent, including the default
+     * `all`: the Hub filters before paging, so an older item of the selected
+     * category is reachable without loading every page in between.
+     */
+    suspend fun list(
+        cursor: String? = null,
+        limit: Int = PAGE_SIZE,
+        category: String = ItemCategory.ALL,
+    ): Page {
         val query = buildMap {
             put("limit", limit.toString())
+            put("category", category)
             if (!cursor.isNullOrEmpty()) put("cursor", cursor)
         }
         return requestJson(Request.Builder().url(endpoint.url("/api/v1/items", query)))

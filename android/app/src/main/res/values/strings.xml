@@ -55,6 +55,20 @@
     <string name="device_name_label">本机名称</string>
 
     <string name="empty_inbox">收件箱是空的</string>
+    <string name="empty_category">该分类暂无内容</string>
+    <string name="empty_category_hint">收件箱里还没有「%1$s」类型的条目。</string>
+    <string name="category_show_all">查看全部</string>
+    <string name="category_sent_elsewhere">已发送，但不在当前分类「%1$s」下</string>
+
+    <string name="category_all">全部</string>
+    <string name="category_text">文字</string>
+    <string name="category_link">链接</string>
+    <string name="category_image">图片</string>
+    <string name="category_video">视频</string>
+    <string name="category_audio">音频</string>
+    <string name="category_document">文档</string>
+    <string name="category_archive">压缩包</string>
+    <string name="category_other">其他</string>
     <string name="loading">正在加载…</string>
     <string name="conn_open">实时同步中</string>
     <string name="conn_connecting">连接中…</string>

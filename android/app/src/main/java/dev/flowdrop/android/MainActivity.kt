@@ -243,6 +243,7 @@ private fun FlowDropRoot(viewModel: AppViewModel) {
                     onDeviceNameChange = viewModel::updateDeviceName,
                     onLogout = viewModel::logout,
                     onNotify = { message, error -> viewModel.toast(message, error) },
+                    onCategoryChange = viewModel::selectCategory,
                 )
             }
             if (state.phase == Phase.LOGIN && scannerOpen) {

@@ -2205,3 +2205,26 @@ flowdrop://pair?v=1&code=0421&url=http%3A%2F%2F192.168.31.184%3A8080
 未验证：真实 Wails 窗口内「扫描」按钮与候选列表的观感与交互；mDNS 在多网卡/跨网环境下的实际覆盖面（mDNS 是链路本地协议，跨网必然看不到）；Windows 端的同一功能（执行主机下线）。
 
 结论要点：局域网发现只能覆盖同网段，用户当前"两台机器各自 192.168.31.x 但不在同一局域网"的场景由 tailnet 候选覆盖；候选只是地址提示，仍需 Hub 自身配对流程。
+
+
+## 桌面收件箱分类标签（TYPE，2026-11-12）
+
+- 实现：全部/文字/链接/图片/视频/音频/文档/压缩包/其他；服务端统一派生category，按分类后分页，不漏掉首屏30条之外的内容；Web切换重置分页并防旧请求污染。
+- 自动测试：前端TypeScript通过；服务端Go全13包与vet通过；独立真实React renderer（非浏览器/WebView）144断言通过，覆盖切换乱序响应、分类分页、实时新增、空态及删除回滚。报告 `/tmp/flowdrop-type03-report.md`，脚本 `/tmp/flowdrop-type03-lab/run-all.sh`。
+- 实际网络：新dist/flowdrop临时独立Hub分类查询与静态资源200/非法分类400通过，临时进程准确停止、端口释放和数据凭据清理。报告 `/tmp/flowdrop-type04-report.md`。
+- 构建：Hub 12,394,658 B（SHA256 9986f88c5ee7fa3adc6ebf016e1cd86d73763d06cf859a3af5e84d2b11516a85）；Linux桌面17,797,704 B（SHA256 7c2eb7a327c01daa823fc765bf6192083fbef0b6abeeaa4bf06aa15c725b525c），同批嵌入新Web资源。
+- 未验证：真实桌面/WebView渲染、视觉及窗口端到端，无独立GUI环境；未安装/重启用户应用。
+- 宿主影响记录：worker误执行桌面--version，因不支持参数进入单实例启动检查，既有实例锁拦下后退出，可能把已有收件箱置前；未创建新窗口或Hub，报告既有AT-SPI进程未变，未启动临时总线/portal。不能把此操作当作GUI验收通过。
+
+
+## Android 收件箱分类标签（MTYPE，2026-11-13）
+
+- 功能：全部/文字/链接/图片/视频/音频/文档/压缩包/其他9个横滑FilterChip；服务端category为权威，分类后分页；切换清分页、防旧请求回写；实时/本机文本上传分享新增按当前分类入列，分类空态可返回全部。
+- 自动测试：JVM152项（151通过、1跳过，0失败/错误）；ApiClient分类参数/必需category解析/词表匹配单测通过。Compose设备测试新增5项，仅编译通过未执行。相关报告 `/tmp/flowdrop-mtype02-report.md`。
+- 独立复核发现并修正后台EventStream事件与主线程快切的代际计数/pendingCreates竞争：MTYPE-03真实OkHttp回调线程探针证实后台交付，产品后果为源码推断；MTYPE-02C把onEvent整体交给viewModelScope Main处理，主agent结构性复核通过，compileDebugKotlin通过，未宣称运行时竞态复现通过。报告 `/tmp/flowdrop-mtype03-report.md`、`/tmp/flowdrop-mtype02c-report.md`。
+- 构建：assembleDebug成功；`dist/flowdrop-android-debug.apk`，14,256,487 B，SHA256 `cb01e6b3d7ae051e8e90631dc81678364ea372f85912d8f6adca0240fdd2d06e`；apksigner和zipalign通过。包名dev.flowdrop.android，0.1.0(1)，minSDK26/target35。报告 `/tmp/flowdrop-mtype04-report.md`。
+- 未验证：真机/模拟器交互观感、Compose设备用例运行、本轮Android真实Hub端到端、ViewModel竞态运行时复现；未安装到手机。要求新版支持category的Hub，旧Hub兼容不在本轮范围。
+
+### 2026-11-13 LOCAL-02 本机更新
+
+用户授权后已部署并重启最新版桌面/内置Hub。运行PID3870803的exe哈希与dist桌面交付一致（7c2eb7a3…525c），8080监听恢复；实际HTTP根页/直接引用JS及CSS均200，新JS含9类标签，资源与本轮嵌入一致。旧部署备份保留；正式总线/portal/AT-SPI PID未变。仅部署和进程/静态资源验证，未GUI/凭据API/手机验证。证据 `/tmp/flowdrop-local02-report.md`；任务task_be4c8757e836/ctx_cf034d4d95f3。

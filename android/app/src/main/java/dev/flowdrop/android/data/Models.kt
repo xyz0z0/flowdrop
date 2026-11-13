@@ -18,6 +18,11 @@ data class Blob(
 data class Item(
     val id: String,
     val type: String,
+    /**
+     * Server-assigned file category (`text|link|image|video|audio|document|archive|other`).
+     * Required and never derived on the client: the Hub is the single source.
+     */
+    val category: String,
     val text: String? = null,
     @SerialName("sender_device") val senderDevice: String = "",
     @SerialName("created_at") val createdAt: Long = 0,
@@ -26,6 +31,28 @@ data class Item(
     val isImage: Boolean get() = type == "image" && blob != null
     val isLink: Boolean get() = type == "link"
     val isApk: Boolean get() = blob != null && blob.name.endsWith(".apk", ignoreCase = true)
+}
+
+/**
+ * Filter values of `GET /api/v1/items?category=`. [ALL] means "no filter"; every
+ * other value is decided by the Hub, so the client never classifies an item.
+ */
+object ItemCategory {
+    const val ALL = "all"
+    const val TEXT = "text"
+    const val LINK = "link"
+    const val IMAGE = "image"
+    const val VIDEO = "video"
+    const val AUDIO = "audio"
+    const val DOCUMENT = "document"
+    const val ARCHIVE = "archive"
+    const val OTHER = "other"
+
+    /** Chip order, identical to the web client. */
+    val filters: List<String> = listOf(ALL, TEXT, LINK, IMAGE, VIDEO, AUDIO, DOCUMENT, ARCHIVE, OTHER)
+
+    /** An item is visible when no filter is active or when the Hub said it matches. */
+    fun matches(item: Item, filter: String): Boolean = filter == ALL || item.category == filter
 }
 
 @Serializable

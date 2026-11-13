@@ -4,6 +4,7 @@ import android.net.Uri
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
@@ -14,10 +15,12 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
 import androidx.compose.material3.Button
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.FilterChip
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
@@ -41,6 +44,7 @@ import dev.flowdrop.android.R
 import dev.flowdrop.android.UiState
 import dev.flowdrop.android.data.ConnState
 import dev.flowdrop.android.data.Item
+import dev.flowdrop.android.data.ItemCategory
 
 /**
  * Inbox screen: connection status, device nickname, composer, item list with
@@ -70,6 +74,7 @@ fun InboxScreen(
     onDeviceNameChange: (String) -> Unit,
     onLogout: () -> Unit,
     onNotify: (String, Boolean) -> Unit,
+    onCategoryChange: (String) -> Unit = {},
 ) {
     var editingDevice by remember { mutableStateOf(false) }
 
@@ -134,10 +139,15 @@ fun InboxScreen(
                 }
             }
 
+            CategoryFilters(
+                selected = state.category,
+                onSelect = onCategoryChange,
+            )
+
             LazyColumn(
                 modifier = Modifier.weight(1f).fillMaxWidth(),
                 verticalArrangement = Arrangement.spacedBy(8.dp),
-                contentPadding = androidx.compose.foundation.layout.PaddingValues(
+                contentPadding = PaddingValues(
                     start = 12.dp,
                     end = 12.dp,
                     top = 4.dp,
@@ -176,20 +186,36 @@ fun InboxScreen(
 
                 if (!state.loading && state.items.isEmpty()) {
                     item(key = "empty") {
+                        val filtered = state.category != ItemCategory.ALL
                         Column(
                             modifier = Modifier.fillMaxWidth().padding(32.dp),
                             horizontalAlignment = Alignment.CenterHorizontally,
                         ) {
                             Text(
-                                stringResource(R.string.empty_inbox),
+                                stringResource(
+                                    if (filtered) R.string.empty_category else R.string.empty_inbox,
+                                ),
                                 style = MaterialTheme.typography.titleMedium,
                             )
                             Spacer(Modifier.height(6.dp))
                             Text(
-                                stringResource(R.string.composer_empty_hint),
+                                if (filtered) {
+                                    stringResource(
+                                        R.string.empty_category_hint,
+                                        stringResource(categoryLabelRes(state.category)),
+                                    )
+                                } else {
+                                    stringResource(R.string.composer_empty_hint)
+                                },
                                 style = MaterialTheme.typography.bodyMedium,
                                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                             )
+                            if (filtered) {
+                                Spacer(Modifier.height(8.dp))
+                                TextButton(onClick = { onCategoryChange(ItemCategory.ALL) }) {
+                                    Text(stringResource(R.string.category_show_all))
+                                }
+                            }
                         }
                     }
                 }
@@ -229,6 +255,37 @@ fun InboxScreen(
             }
         }
     }
+}
+
+@Composable
+private fun CategoryFilters(selected: String, onSelect: (String) -> Unit) {
+    Surface(color = MaterialTheme.colorScheme.surface) {
+        LazyRow(
+            modifier = Modifier.fillMaxWidth().padding(horizontal = 8.dp, vertical = 4.dp),
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+            contentPadding = PaddingValues(horizontal = 4.dp),
+        ) {
+            items(items = ItemCategory.filters, key = { it }) { category ->
+                FilterChip(
+                    selected = category == selected,
+                    onClick = { onSelect(category) },
+                    label = { Text(stringResource(categoryLabelRes(category))) },
+                )
+            }
+        }
+    }
+}
+
+private fun categoryLabelRes(category: String): Int = when (category) {
+    ItemCategory.TEXT -> R.string.category_text
+    ItemCategory.LINK -> R.string.category_link
+    ItemCategory.IMAGE -> R.string.category_image
+    ItemCategory.VIDEO -> R.string.category_video
+    ItemCategory.AUDIO -> R.string.category_audio
+    ItemCategory.DOCUMENT -> R.string.category_document
+    ItemCategory.ARCHIVE -> R.string.category_archive
+    ItemCategory.OTHER -> R.string.category_other
+    else -> R.string.category_all
 }
 
 @Composable

@@ -1,5 +1,23 @@
 export type ItemType = 'text' | 'link' | 'image' | 'file';
 
+/**
+ * Content category decided by the Hub (single source of truth: original type
+ * first, then the file's extension, then its MIME type). The Web client never
+ * re-derives it from names or extensions.
+ */
+export type ItemCategory =
+  | 'text'
+  | 'link'
+  | 'image'
+  | 'video'
+  | 'audio'
+  | 'document'
+  | 'archive'
+  | 'other';
+
+/** Category filter sent to the list endpoint; `all` means no filtering. */
+export type CategoryFilter = 'all' | ItemCategory;
+
 export interface Blob {
   id: string;
   name: string;
@@ -12,6 +30,7 @@ export interface Blob {
 export interface Item {
   id: string;
   type: ItemType;
+  category: ItemCategory;
   text?: string;
   sender_device: string;
   created_at: number;
@@ -133,8 +152,12 @@ export const api = {
     setCsrfToken('');
   },
 
-  list: (cursor?: string, limit = 30): Promise<Page> => {
-    const q = new URLSearchParams({ limit: String(limit) });
+  /**
+   * One page of the inbox, optionally restricted to a single category. The Hub
+   * filters before paginating, so older items of a category are reachable.
+   */
+  list: (cursor?: string, limit = 30, category: CategoryFilter = 'all'): Promise<Page> => {
+    const q = new URLSearchParams({ limit: String(limit), category });
     if (cursor) q.set('cursor', cursor);
     return request<Page>(`/api/v1/items?${q.toString()}`);
   },

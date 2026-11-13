@@ -1090,3 +1090,176 @@ UX-02 + UX-03 交付（主 agent，2026-11-10；Windows 执行主机下线，本
 - 真实证据（本机实跑，2026-11-10 23:15）：临时测试跑 `lanbrowse.Browse` 4s → 发现 `http://192.168.31.184:8080（FlowDrop-bob-hpelitedesk880g6-2）`；`tailnet.Peers` → 解析出 10 个 peer 中的 CGNAT 项（含 `HappyDay`/`100.86.13.51`，当时在线）；`SettingsService.DiscoverHubs` 端到端 → 返回 1 个 LAN 候选、tailnet 候选因对端未运行 Hub 全部被探测淘汰。三个临时测试文件跑完即删。
 - 检查：`gofmt -l` 无输出；`go vet -tags gtk3 ./...` 通过；`go test -tags gtk3 -count=1 ./...` 六个包全 ok（新增 lanbrowse 7 项、tailnet 6 项、服务层 9 项）；`node --check desktop/assets/app.js` 通过；`go mod tidy` 把 `grandcat/zeroconf` 提为 desktop 的直接依赖。
 - 未验证：真实窗口内「扫描」按钮与列表观感、mDNS 在跨网/多网卡环境的实际覆盖面、Windows 侧同一功能（执行主机下线，未能跑）。
+
+## 当前交付：桌面收件箱文件分类标签（TYPE，2026-11-12）
+
+用户要求：桌面增加文件类型分类标签，快速定位查找。主 agent 初步方案：全部、图片、视频、音频、文档、压缩包、其他；需检查文本/链接条目现状后冻结分类。保留现有搜索并与分类组合。
+
+| 任务 | 目标与允许范围 | 依赖/验收证据 | 预计时长/停止条件 | 状态 |
+|---|---|---|---|---|
+| TYPE-01 | 只读定位桌面收件箱实际前端、现有搜索/过滤、item 元数据及构建入口。入口：`desktop/main.go`、`desktop/assets/app.js`、`README.md`，仅沿直接引用读取。只写 `/tmp/flowdrop-type01-report.md` | 给出最小实现文件清单、分类依据、分页/搜索影响、可用验证和构建命令。不修改产品文件 | 5min，普通命令30s；缺路径或需扩大检索即回报；禁止宿主 GUI / 临时 D-Bus / portal / 无障碍服务 | 已完成，报告 `/tmp/flowdrop-type01-report.md`；收件箱为 web React，原无搜索；只过滤已加载30条会漏掉较早文件 |
+| TYPE-02 | 最小实现分类标签（待 TYPE-01 后冻结具体文件） | TYPE-01；分类与现有搜索组合，不改后端协议 | 15min；超范围停报 | 待前序 |
+| TYPE-03 | 独立定向验证 | TYPE-02；覆盖分类、搜索组合、空结果与切换 | 10min；GUI 无独立隔离环境则单列跳过 | 待前序 |
+| TYPE-04 | 构建交付 | TYPE-03；产物与摘要；不安装、不 commit/push | 10min；构建超时显式设置 | 待前序 |
+
+### TYPE 实现冻结（2026-11-12）
+
+- 分类：`all/text/link/image/video/audio/document/archive/other`，标签全部/文字/链接/图片/视频/音频/文档/压缩包/其他。当前没有关键字搜索，本轮不新增搜索框。
+- 必要服务端扩展：`GET /api/v1/items?category=...`（缺省/all 全部，非法值400），分类后再分页，能找到旧于第一页的文件。Item 响应新增 `category` 字段（text/link/image/video/audio/document/archive/other），列表/单条/创建上传响应一致。没有数据库迁移，不改变原 type、鉴权、预览、下载。
+- 分类单一来源在服务端：text/link 原类型优先；image 原类型优先；file 按已知扩展名优先、MIME兜底。apk/jar/iso/exe 等安装/镜像文件归 other（覆盖zip MIME）；docx等文档即使ZIP MIME仍归document；未知且octet-stream归other。
+- 扩展名至少包含：image jpg/jpeg/png/gif/webp/bmp/tif/tiff/heic/heif/avif/svg；video mp4/m4v/mov/mkv/webm/avi/flv/wmv/ts/m2ts/3gp/mpg/mpeg；audio mp3/m4a/aac/flac/wav/ogg/opus/wma/amr/ape/aiff；document pdf/doc/docx/xls/xlsx/ppt/pptx/txt/md/csv/rtf/odt/ods/odp/epub；archive zip/rar/7z/tar/gz/tgz/bz2/xz/zst。MIME 前缀image/video/audio/text及常用文档/压缩包类型兜底，忽略大小写和参数。
+
+| 任务 | 目标/写入范围 | 依赖与验收 | 预算/停止条件 | 状态 |
+|---|---|---|---|---|
+| TYPE-02A | 服务端分类、category查询与精确分页；仅 `server/internal/store/`、`server/internal/api/items.go` 及相关新增测试 | TYPE-01；测试混合数据超过30条、同时间戳、每类、大小写、MIME冲突、非法参数、旧接口默认行为 | 15min，测试120s；无DB迁移、无其他业务改动、不构建安装 | 已完成 `task_e82416977ac2` / `ctx_fc2443b916cc`；统一category、流式精确分页；Go13包/vet通过；报告 `/tmp/flowdrop-type02a-report.md` |
+| TYPE-02B | Web分类标签与category参数；仅 `web/src/App.tsx`、`web/src/api.ts`、`web/src/styles.css` | TYPE-01及冻结接口；切换重置分页、防旧请求污染、实时新增按item.category匹配、分类空态、aria-pressed | 15min，检查120s；无新依赖、不构建最终二进制、禁止宿主GUI | 已完成 `task_75f1852a5caa` / `ctx_67c434874250`；9标签、分页参数、实时分类匹配与请求代际保护；tsc通过；报告 `/tmp/flowdrop-type02b-report.md`；待联调验证 |
+
+TYPE-02 原单项由 TYPE-02A/B 替代；TYPE-03在两者完成后独立验收；TYPE-04构建桌面和Hub，均不安装。
+
+### TYPE-03 独立验收任务（2026-11-12）
+
+允许读取 TYPE-01/02 报告及其直接引用源码；不改产品文件。关键复核：分类协议两端一致、列表/更多/快速切换/实时新增/创建/删除回滚的交互与异步请求竞态。自动化优先在 Node 中用真正 React renderer 验证 App（临时依赖仅 /tmp，与项目 React 18.3.1 一致；不加项目依赖），无需桌面、浏览器、D-Bus。报告 `/tmp/flowdrop-type03-report.md`，保留临时复现实验脚本路径。已有 Go/vet/tsc 通过，不重复整套检查。若 renderer 不可用或测试出现产品缺陷，回报证据，不自行修改代码。15min预算，命令30s、测试120s；无隔离环境跳过真实 WebView/GUI。完成后由新任务构建，不安装/commit/push。
+
+TYPE-03 已派发：`task_bb398eec0836` / `ctx_d087e6c54461`（新 pi，会话默认配置）。
+
+TYPE-03 已完成：`task_bb398eec0836` / `ctx_d087e6c54461`，报告 `/tmp/flowdrop-type03-report.md`。真实 React renderer（非浏览器、非WebView）144 条断言全通过；定向 Go Category/ListItems 测试通过；两端词表及60项扩展名匹配。实验脚本 `/tmp/flowdrop-type03-lab/run-all.sh`。跳过：真实浏览器/WebView视觉、实际WS网络时序、Playwright端到端（无独立GUI隔离环境）。无产品缺陷。旧Hub不作为兼容目标，TYPE-04同批构建Hub和桌面嵌入资源。
+
+### TYPE-04 构建交付冻结
+
+目标：从当前源码产出 `dist/flowdrop` 与 `dist/flowdrop-desktop`（Linux），嵌入同一分类Web资源；记录产物字节数与SHA256。入口 `scripts/build.sh`、`scripts/build-desktop.sh`（可沿其引用读取），不新增系统依赖/不自动provision sysroot，已有sysroot可使用。允许写生成的 `server/internal/webui/dist/`、`dist/`、`/tmp/flowdrop-type04*`，产品源码不得改。构建命令timeout300s，普通命令30s。可做一次临时数据目录/临时凭据/空闲回环端口的独立Hub API冒烟（分类查询返回正确、静态JS含9标签），不得启动桌面GUI或触碰用户实例/配置/数据。只按准确PID停止自己启动的临时Hub并核对退出、清理。10min预算；缺依赖、构建失败或代码缺陷立即回报，不安装/commit/push。
+
+TYPE-04 已派发：`task_4c7162d64cd9` / `ctx_a5601008becd`（新 pi）。
+
+### TYPE 最终交付（2026-11-12）
+
+TYPE-04 已完成：`task_4c7162d64cd9` / `ctx_a5601008becd`，报告 `/tmp/flowdrop-type04-report.md`。两构建脚本退出0，同批嵌入新前端资源。
+
+- `dist/flowdrop`：12,394,658 B，SHA256 `9986f88c5ee7fa3adc6ebf016e1cd86d73763d06cf859a3af5e84d2b11516a85`。
+- `dist/flowdrop-desktop`：17,797,704 B，SHA256 `7c2eb7a327c01daa823fc765bf6192083fbef0b6abeeaa4bf06aa15c725b525c`。
+- 实际网络：独立临时Hub上逐类查询、非法值400、单条category字段、根页面与JS/CSS资源哈希均通过；临时Hub按准确PID停止，端口释放，数据/凭据清理。主agent核对产物尺寸、嵌入/网络报告、`git diff --check`通过；未重复已通过的测试。
+- 未验证：真实WebView/桌面窗口观感、实际窗口端到端；没有隔离GUI环境。
+- 纠正worker报告中的「未启动桌面」措辞：worker为取版本误运行 `dist/flowdrop-desktop --version`（不支持该参数，进入正常启动路径），已有实例锁拦下后退出，未建新窗口/Hub；可能唤醒用户已有收件箱置前。worker报告AT-SPI已有PID/启动时间未变，无新增服务，未继续GUI验证。此动作不属于授权验收步骤，后续禁止借版本查询运行桌面程序。
+- 另记范围外风险：CLI send在首个位置参数后停止解析flag，worker临时网络冒烟曾误上传临时凭据文件；该文件仅含临时Hub令牌，临时数据已删除，未涉及用户凭据；未擅自修改CLI。
+- 未安装、未替换用户运行实例、未commit/push。用户已有README与docs/CLI_AGENT.md保持原样。TYPE系列实现、独立自动化验收、构建交付完成，真实窗口验收待用户使用新产物确认。
+
+## 当前交付：Android 手机端分类标签（MTYPE，2026-11-13）
+
+用户要求：手机客户端也加上桌面同样的分类功能。沿用本轮已实现服务端 `GET /api/v1/items?category=...` 与每个Item的 `category` 字段；同样9类 all/text/link/image/video/audio/document/archive/other，不添加旧Hub兼容分支、不修改后端分类。
+
+| 任务 | 目标/允许范围 | 依赖与验收 | 预算/停止条件 | 状态 |
+|---|---|---|---|---|
+| MTYPE-01 | 只读定位Android收件箱、数据模型/HTTP/repository/ViewModel、资源字符串、测试构建入口。入口 `android/app/src/main/java/dev/flowdrop/android/ui/InboxScreen.kt`、`android/app/src/main/java/dev/flowdrop/android/ui/ItemCard.kt`、`README.md`，仅沿已知文件直接引用读取；只写 `/tmp/flowdrop-mtype01-report.md` | 给出最小实现文件、状态/分页/实时更新风险、现有测试与APK构建命令；不改代码、不跑整套构建/GUI | 5min，命令30s；缺失路径或需扩检立即报告 | 待派发 |
+| MTYPE-02 | 最小实现Android9分类标签、请求category与状态隔离（待01冻结文件） | MTYPE-01；服务端分类覆盖所有条目、切换和分页正确、实时新增不混类 | 15min；超范围停报；不安装/commit/push | 待前序 |
+| MTYPE-03 | 独立定向验证（文件待02冻结） | MTYPE-02；自动测试/静态竞态复核；模拟器真机如未具备隔离条件单列跳过 | 10min；不重复已通过检查 | 待前序 |
+| MTYPE-04 | Android APK构建交付 | MTYPE-03；APK路径/字节数/SHA256；不安装到手机或用户目录 | 10min，构建显式timeout；不启动宿主GUI/模拟器、临时D-Bus/portal/无障碍服务 | 待前序 |
+
+MTYPE-01 已派发：`task_5db871fe6089` / `ctx_1d827549855e`（新pi，默认模型/推理配置）。
+
+### MTYPE-01 完成 / MTYPE-02 实现冻结（2026-11-13）
+
+MTYPE-01：`task_5db871fe6089` / `ctx_1d827549855e` 已完成，报告 `/tmp/flowdrop-mtype01-report.md`。Android为Compose独立UI，ApiClient目前list仅cursor/limit；必须同步模型、网络、ViewModel、InboxScreen/MainActivity接线和strings。现有loading早退、旧loadMore、所有本地插入/删除回滚需要按分类和请求代际隔离。
+
+主agent决定：9个LazyRow/FilterChip，与桌面顺序相同；进程内UiState保存选择，进程重启回all，不加持久化；不改ItemCard角标。不为旧Hub/缺category JSON加默认空串兼容：Item.category为必需字段，现有相关测试构造和mock JSON同步更新；编译报出的直接调用点可最小补category（不得全仓库搜索）。不更改后端/协议分类规则。
+
+MTYPE-02允许写：`android/app/src/main/java/dev/flowdrop/android/data/{Models.kt,ApiClient.kt}`、`android/app/src/main/java/dev/flowdrop/android/{AppViewModel.kt,MainActivity.kt}`、`android/app/src/main/java/dev/flowdrop/android/ui/InboxScreen.kt`、`android/app/src/main/res/values/strings.xml`；相关 `ApiClientContractTest.kt`、`InboxScreenTest.kt`、新增定向分类测试（仅必要fixture调用点可按编译错误定点补齐）。协议category字段为服务端权威，client不得推导。必须覆盖快切/分页/重连/实时fetch/文本上传和分享插入/删除失败回滚，列表旧请求不能污染当前分类；切换时loading不得吞新请求。预算15min，命令30s、Gradle240s；先定向测试和编译，不assemble最终APK、不启动模拟器/GUI、不安装、不commit/push。报告 `/tmp/flowdrop-mtype02-report.md`；超范围或20min未完成先回报。
+
+MTYPE-02 已派发：`task_9a2258fb7c7b` / `ctx_e7fd845ba7a0`（新pi）。
+
+MTYPE-02 完成：`task_9a2258fb7c7b` / `ctx_e7fd845ba7a0`，报告 `/tmp/flowdrop-mtype02-report.md`。9分类+网络+VM+Compose，152项JVM 0失败/0错误/1跳过；主源码/单测/设备测试编译通过；未assemble/设备运行。主agent发现需独立定向复核：EventStream.Listener.onOpen/onMessage在OkHttp后台线程直接调onEvent，而AppViewModel.startEventStream onEvent直接resync，新增requestSeq为普通Int且resync同步段在launch之前，与主线程selectCategory可能竞争；原loading早退已被移除。MTYPE-03先确认此风险，不将静态检查当作运行时通过。
+
+MTYPE-03：独立验证，仅写 `/tmp/flowdrop-mtype03*`（必要临时定向测试可放已知测试目录后立即移除，不修改产品）。读MTYPE报告和已知源码/测试直接引用，不全仓库检索。复核后台事件/主线程分类切换的令牌一致性、pendingCreates事件是否遗漏、分页/新增/回滚；已有测试不整套重跑，补真正证据缺口。15min预算，命令30s/Gradle240s。缺陷报告最小事件序列/文件行和修复建议，不自行修改；需修复由新任务安排。真实设备/模拟器/GUI本轮不启动，不安装。报告 `/tmp/flowdrop-mtype03-report.md`。
+
+MTYPE-03 已派发：`task_e6df81235d9f` / `ctx_f246c4040a01`。
+
+MTYPE-03 验证未通过：`task_e6df81235d9f` / `ctx_f246c4040a01`，报告 `/tmp/flowdrop-mtype03-report.md`。协议/UI接线/单线程令牌逻辑通过；真实EventStream+ApiClient探针确认onEvent在OkHttp线程交付。两处缺陷：resync同步段普通Int代际与主线程快切发生竞态；snapshotting检查后pending.add与主线程drain/clear发生竞态，可漏实时新条目。后果为源码推断，后台交付前提已运行实证。不把failed任务标完成。
+
+### MTYPE-02C 最小修正（2026-11-13）
+
+仅允许修改 `android/app/src/main/java/dev/flowdrop/android/AppViewModel.kt` 的startEventStream/onEvent：把事件when处理整体放入viewModelScope.launch，保证resync同步段/onItemCreated/pending删除和UI分类切换同Main串行；不改EventStream、业务协议、其他回调或逻辑。必要说明注释说明OkHttp回调线程来源。允许写 `/tmp/flowdrop-mtype02c-report.md`。验收最小diff、compileDebugKotlin通过（timeout240s），无需重跑152项未受影响测试。预计3min；若需超范围停报。不启动GUI/模拟器、不安装不commit/push。修正后主agent定向复核线程串行约束，再进入MTYPE-04。
+
+MTYPE-02C 已派发：`task_7153152c4b3e` / `ctx_96dc02d1cba7`（新pi）。
+
+MTYPE-02C 完成：`task_7153152c4b3e` / `ctx_96dc02d1cba7`，报告 `/tmp/flowdrop-mtype02c-report.md`，compileDebugKotlin通过。主agent针对性复核AppViewModel.kt:717整个onEvent当中的when已放入viewModelScope.launch；onUnauthorized既有实现也已launch回Main，requestReselect同样launch，消除已确认的两处跨线程窗口。结构性约束复核通过，未宣称设备运行时竞态用例通过。MTYPE-03原failed记录保留，以本条修复验收补齐；设备Compose用例仍只编译未执行。
+
+### MTYPE-04 APK构建交付（2026-11-13）
+
+允许读 `android/app/build.gradle.kts`、`android/gradlew`、`android/local.properties`及其直接引用；允许写Android生成构建输出、`dist/flowdrop-android-debug.apk`（从app-debug.apk复制）、`/tmp/flowdrop-mtype04*`。运行 `timeout 300 ./gradlew --offline :app:assembleDebug`，不重复整套单测，不connectedAndroidTest、不启动模拟器/手机/GUI。核对APK包名/版本/minSDK及签名验证（用已知SDK build-tools的工具，不运行应用），报告两个产物bytes/SHA256并相互一致。只构建debug，无发布签名操作/无版本号修改，不安装、不commit/push；不改产品源码、文档、其他dist产物。预计5min，命令30s/构建300s，失败或依赖缺失停报。报告 `/tmp/flowdrop-mtype04-report.md`，明确手机端必须连接本轮已支持category协议的新版Hub。
+
+MTYPE-04 已派发：`task_bdae694b432c` / `ctx_7a5a3b599270`（新pi）。
+
+
+### MTYPE 最终交付（2026-11-13）
+
+MTYPE-04完成：`task_bdae694b432c` / `ctx_7a5a3b599270`，报告 `/tmp/flowdrop-mtype04-report.md`。Android分类实现、已识别线程竞争最小修正、自动测试/编译和APK构建交付完成。
+
+- APK：`dist/flowdrop-android-debug.apk`（同 `android/app/build/outputs/apk/debug/app-debug.apk`），14,256,487 B，SHA256 `cb01e6b3d7ae051e8e90631dc81678364ea372f85912d8f6adca0240fdd2d06e`。
+- 构建：`timeout 300 ./gradlew --offline :app:assembleDebug`通过；package `dev.flowdrop.android`、versionName 0.1.0/versionCode 1、minSDK26/targetSDK35，Android Debug签名校验通过，zipalign通过。
+- 自动测试：152项JVM测试中151通过、1条件跳过，0失败/错误；Compose设备测试含新增5分类用例编译通过，未执行；主源码在MTYPE-02C修正后重新编译通过。主agent复核修正事件Main线程串行与其他入口约束，最终diff --check、APK字节数/哈希通过。
+- 未验证：真实手机/模拟器交互与视觉、设备Compose运行、Android客户端本轮真实Hub网络端到端、ViewModel竞态的运行时复现；不得把编译/静态约束当作设备通过。MTYPE-03失败历史和修正记录均保留。
+- 需配套本轮带category字段/查询的新Hub；之前生成的dist/flowdrop和dist/flowdrop-desktop已具备，手机端无旧Hub兼容分支。
+- 未安装/操作手机、未启动模拟器/宿主GUI/临时D-Bus/portal、未commit/push；用户已有修改保留。无遗留worker任务或构建阻塞。
+
+## LOCAL-01 本机运行版本只读核查（2026-11-13）
+
+用户询问本机是否运行最新版本。目标：核对当前本机FlowDrop桌面/Hub进程实际可执行文件与本轮dist交付哈希，区分磁盘新产物与正在运行版本。允许只读进程元数据、由进程确定的可执行路径、本轮 `dist/flowdrop`、`dist/flowdrop-desktop`；必要时沿已知 `desktop/main.go`、`README.md` 的直接引用确认启动关系。只写 `/tmp/flowdrop-local01-report.md`。不全仓库/父目录/全盘探索；不输出令牌或其他凭据；不启动任何应用/GUI/总线/portal，不重启、安装、替换、杀进程，不操作手机、不改产品文件。验收：PID、开始时间、exe路径、运行中exe哈希与dist匹配结果；不能确认项如实说明。预计3min，命令30s；证据足够立即回报，阻塞不扩范围。新pi会话受监督派发，回报由主agent交付。
+
+LOCAL-01 已派发：`task_6270f57a58bd` / `ctx_fdea5da88277`（新pi，只读核查，等待自动回报）。
+
+LOCAL-01 已完成：`task_6270f57a58bd` / `ctx_fdea5da88277`，报告 `/tmp/flowdrop-local01-report.md`。本机运行PID3727279，exe `/home/bob/.local/bin/flowdrop-desktop`，运行inode SHA256 `c5872c1f079fe963a7c4539a3b16dfd042f28a2c24f8143e9e9e6ba02d1fd582`；与本轮dist桌面产物 `7c2eb7a327c01daa823fc765bf6192083fbef0b6abeeaa4bf06aa15c725b525c` 不同，部署副本亦旧。该进程监听8080、运行本地内嵌Hub，Hub亦未更新。仅以哈希确认未运行本轮交付，不用dirty构建的commit数推断完整源码差异。未安装/替换/重启、未启动GUI；手机安装状态未查。
+
+## LOCAL-02 本机更新部署（2026-11-13）
+
+用户已授权“更新下”：用已构建dist/flowdrop-desktop原位更新~/.local/bin/flowdrop-desktop，并沿正式启动方式重启桌面/内置Hub。依赖LOCAL-01已完成及新版哈希7c2eb7a3…525c。新pi部署任务，允许备份/原子替换此文件及精确应用优雅重启；不改配置/数据/源码/其他应用，不操作手机。必须先确认可靠重启方式；不得创建临时D-Bus/portal/无障碍服务或进行宿主GUI实验。验收运行中exe哈希、部署hash、Hub端口/静态分类资源；正式启动不等于GUI验收。只写/tmp/flowdrop-local02-report.md及此部署文件/备份/staging。预算5min，普通命令30s/HTTP10s；停止异常或启动失败先报告，不SIGKILL/批量kill/循环重试；必要的明确失败恢复可回滚备份。完整自包含任务见/tmp/flowdrop-local02-spec.md。待派发。
+
+LOCAL-02 已派发：`task_be4c8757e836` / `ctx_cf034d4d95f3`（新pi，部署/重启，等待自动回报）。
+
+LOCAL-02 已完成：`task_be4c8757e836` / `ctx_cf034d4d95f3`，报告 `/tmp/flowdrop-local02-report.md`。备份 `/home/bob/.local/bin/flowdrop-desktop.bak-local02-20261113T112337`，原子部署并优雅停止旧瞬态单元；复用正式systemd用户管理器/app.slice/原argv和cwd启动为瞬态 `flowdrop-desktop.service`（原KDE随机单元名未沿用）。新PID3870803，运行inode与部署SHA256均为 `7c2eb7a327c01daa823fc765bf6192083fbef0b6abeeaa4bf06aa15c725b525c`。Hub五处8080恢复监听，根页/JS/CSS均200，资源名称及9分类标签符合新构建；正式总线/portal/AT-SPI进程未变。未GUI交互、未凭据API回归、未操作手机；未改配置/数据/源码/桌面启动入口。
+
+## CLOSE-01 本轮提交与后续计划（2026-11-13）
+
+用户授权：HTTPS暂不启用，记待办；提交当前新修改；查看下一步计划。新pi负责限定文档整理和提交前核查，主agent最终提交。允许写docs/TASKS.md、docs/PLAN.md及/tmp/flowdrop-close01-report.md；入口上述文档、docs/VERIFICATION.md、README.md、docs/CLI_AGENT.md及git状态直接列出的本轮源码，不探索全仓库。验收：HTTPS低优先级待办、基于最新状态的最多3项下一步计划、diff空白/范围核查；保留前序全部证据，不重复已通过测试、不改产品/运行实例/安装手机。预算5min，命令30s，明显缺陷或超范围停报；worker不提交，主agent在结果确认后提交分类功能与CLI说明（分开保存），不push。
+
+CLOSE-01 已派发：`task_95440ca2f766` / `ctx_5f2563ebfb6c`（新pi，文档和提交前核查，主agent待结果后commit）。
+
+CLOSE-01 完成：文档记录 HTTPS-01 待办、按最新状态校准下一步计划，并完成提交前核查（`git diff --check` 干净、变更范围无生成二进制/凭据、category 定向测试存在、未验证项未被夸大）。worker 未 add/commit/push、未改产品代码；提交由主 agent 执行。报告 `/tmp/flowdrop-close01-report.md`。
+
+## HTTPS-01 待办：启用 HTTPS/WSS（暂不启用，低优先级待排期）
+
+用户 2026-11-13 明确：**当前暂不加 HTTPS**，仅登记待办，未授权实施。现状保留
+**家庭可信 LAN 明文 HTTP 主路径**（M4 结论：`FLOWDROP_COOKIE_SECURE=false` + 具体
+LAN IPv4 监听；跨网用用户现有 Tailscale，见 PRD §16、DEPLOY §5–§8），本轮不改协议、
+配置默认值、认证端点或证书逻辑。
+
+- 优先级：低，待排期；未获实施授权，任何实施前先由用户确认。
+- 候选部署方式（实施时二选一，需用户先定）：
+  1. Tailscale Serve（tailnet 内终止 TLS，无需自建 CA，设备已装 Tailscale 时最省事）；
+  2. 自有域名 + DNS-01 签发的公开证书（生命周期与续期走 ACME）。
+  **不采用**默认手工本地 CA / 浏览器手工信任作为默认路径。
+- 若最终仍选本地 CA：Android 客户端当前仅信任系统 CA 库，需要应用侧信任配置
+  （network security config 或等价方案）才能连通，属实施范围内需评估项，不是现成能力。
+- 必需验收（缺一不算通过）：可信证书的 HTTPS 页面与 WSS 实时同步；上传/下载在
+  HTTPS 下正常（含 `Content-Disposition`）；浏览器剪贴板 API 在安全上下文中的复制；
+  多地址/发现(配对)在 HTTPS 下的地址发现与配对；证书续期后无需手工干预即恢复可用。
+- 范围：不触碰系统配置、系统服务、系统 CA 库、宿主网络设置。
+
+## 下一步计划校准（2026-11-13，以本节与上文最新记录为准）
+
+已授权并已完成的部分（本轮交付）：桌面 + 服务端 9 分类（all/text/link/image/video/
+audio/document/archive/other，分类后精确分页）、Android 同分类与 `onEvent` 回 Main
+的最小修正、Go 13 包/vet/tsc、React renderer 144 断言、Android 152 项 JVM 测试
+（151 通过 / 1 跳过），设备 Compose 只编译未运行，APK 已构建未安装，本机桌面已由
+LOCAL-02 更新到 `7c2eb7a3…525c`。以下为**推荐计划**，除第 1 项已有“待用户真机验收”
+登记外均未获新授权，不得据此启动实施。
+
+1. **真实 Android 手机验收（最高优先，需用户设备，待条件）**：用本轮 APK 连新版
+   （带 category 协议）Hub，验收 9 分类切换、分类内分页与实时同步（含文本上传/分享
+   新增落在当前分类），以及 Wi-Fi 明文 HTTP 与移动网络 Tailscale 的地址切换。
+   当前无授权安装 APK、无真机/隔离模拟器条件，只能登记为待条件项。
+2. **真实桌面分类使用反馈（次优先，需用户日常使用或隔离 GUI 环境，待条件）**：
+   TYPE 记录中真实桌面/WebView 渲染与视觉未验证（仅独立 React renderer 144 断言）。
+   由用户实际使用新桌面产物给出分类切换/分页/实时新增的反馈，不启动宿主 GUI 临时
+   会话、不新增自动化尝试。
+3. **从既有未完成计划中选一项（需用户选择，未授权）**：可选 M5/PAIRING 已登记但未
+   完成的「Android 真机局域网自动发现与配对」（可与第 1 项同一次手机验收窗口完成，
+   mDNS 为链路本地协议，模拟器无法代表真实 LAN），或 PLAN 中明确「macOS 未做」的
+   macOS 桌面端。两者都不新增产品功能，选哪项、是否排期由用户决定。

@@ -16,6 +16,7 @@ import dev.flowdrop.android.data.HubEndpoint
 import dev.flowdrop.android.data.HubProbe
 import dev.flowdrop.android.data.HubRouteSelector
 import dev.flowdrop.android.data.Item
+import dev.flowdrop.android.data.ItemCategory
 import dev.flowdrop.android.data.RouteCandidate
 import dev.flowdrop.android.data.UploadSource
 import dev.flowdrop.android.data.parsePairingPayload
@@ -82,6 +83,11 @@ data class UiState(
     val deviceName: String = "Android",
     val items: List<Item> = emptyList(),
     val nextCursor: String = "",
+    /**
+     * Visible file-type filter; the Hub decides what each value contains. Kept
+     * in memory only: a new process starts on [ItemCategory.ALL] again.
+     */
+    val category: String = ItemCategory.ALL,
     val loading: Boolean = false,
     val loadingMore: Boolean = false,
     val error: String? = null,
@@ -139,6 +145,17 @@ class AppViewModel(
 
     private var client: ApiClient? = null
     private var eventStream: EventStream? = null
+
+    // Generation tokens for the first-page request and for "load more". A
+    // response whose token is stale belongs to a previous category (or to an
+    // older snapshot) and must not touch items, cursor, error or spinner state.
+    private var requestSeq = 0
+    private var loadMoreSeq = 0
+
+    // Items announced while a first-page snapshot is in flight. The snapshot
+    // may predate them, so they are re-fetched once it lands.
+    private val snapshotting = java.util.concurrent.atomic.AtomicBoolean(false)
+    private val pendingCreates = ConcurrentHashMap.newKeySet<String>()
 
     // Registered/removed by each transfer's own coroutine and cleared from Main,
     // so they must be thread-safe and are never iterated live (see cancelTransfers).
@@ -591,6 +608,11 @@ class AppViewModel(
         container.dropActiveClient()
         client = null
         images.clear()
+        // Invalidate in-flight first-page/load-more responses of the old session.
+        requestSeq += 1
+        loadMoreSeq += 1
+        pendingCreates.clear()
+        snapshotting.set(false)
     }
 
     /**
@@ -693,10 +715,19 @@ class AppViewModel(
             scope = viewModelScope,
             clientProvider = { client },
             onEvent = { type, id ->
-                when (type) {
-                    "resync" -> resync()
-                    "item.created" -> if (id.isNotEmpty()) fetchAndInsert(id)
-                    "item.deleted" -> _state.update { s -> s.copy(items = s.items.filterNot { it.id == id }) }
+                // Socket callbacks arrive on the OkHttp dispatcher thread, while
+                // category switches and resync bookkeeping run on Main. Hop to
+                // Main so the request generation tokens and the snapshotting
+                // window are only ever touched from one thread.
+                viewModelScope.launch {
+                    when (type) {
+                        "resync" -> resync()
+                        "item.created" -> if (id.isNotEmpty()) onItemCreated(id)
+                        "item.deleted" -> {
+                            pendingCreates.remove(id)
+                            _state.update { s -> s.copy(items = s.items.filterNot { it.id == id }) }
+                        }
+                    }
                 }
             },
             onState = { conn -> _state.update { it.copy(conn = conn) } },
@@ -743,11 +774,20 @@ class AppViewModel(
 
     fun resync() {
         val api = client ?: return
-        if (_state.value.loading) return
+        // No "already loading" early return: a category switch must be able to
+        // replace the first page that is still in flight. The generation token
+        // makes the newest request win instead.
+        val token = ++requestSeq
+        val wanted = _state.value.category
+        snapshotting.set(true)
         _state.update { it.copy(loading = true) }
         viewModelScope.launch {
             try {
-                val page = withContext(Dispatchers.IO) { api.list(null, ApiClient.PAGE_SIZE) }
+                val page = withContext(Dispatchers.IO) {
+                    api.list(null, ApiClient.PAGE_SIZE, wanted)
+                }
+                if (requestSeq != token) return@launch
+                val known = page.items.mapTo(HashSet()) { it.id }
                 _state.update {
                     it.copy(
                         items = page.items,
@@ -757,7 +797,14 @@ class AppViewModel(
                         maxUploadBytes = api.maxUploadBytes,
                     )
                 }
+                snapshotting.set(false)
+                // Items created while the snapshot was in flight may be missing
+                // from it; they are re-fetched once the page has landed.
+                val missed = pendingCreates.filterNot { it in known }
+                pendingCreates.clear()
+                for (id in missed) fetchAndInsert(id)
             } catch (e: ApiException) {
+                if (requestSeq != token) return@launch
                 if (e.isUnauthorized) {
                     onUnauthorized()
                 } else {
@@ -767,19 +814,59 @@ class AppViewModel(
                     if (e.isNetwork) requestReselect(ConnectTrigger.NETWORK_LOST)
                 }
             } catch (e: Exception) {
+                if (requestSeq != token) return@launch
                 _state.update { it.copy(loading = false, error = friendly(e)) }
+            } finally {
+                // A newer request owns the flags now; never clear its spinner.
+                if (requestSeq == token) {
+                    snapshotting.set(false)
+                    _state.update { if (it.loading) it.copy(loading = false) else it }
+                }
             }
         }
+    }
+
+    /**
+     * Switches the visible file-type filter. The Hub filters before paging, so
+     * the old page and its cursor are dropped and the first page is re-fetched
+     * for the new category.
+     */
+    fun selectCategory(category: String) {
+        if (category !in ItemCategory.filters) return
+        if (_state.value.category == category) return
+        // Invalidate every in-flight request (snapshot, load more, single item)
+        // so no response for the previous category can be written into this one.
+        requestSeq += 1
+        loadMoreSeq += 1
+        pendingCreates.clear()
+        snapshotting.set(false)
+        _state.update {
+            it.copy(
+                category = category,
+                items = emptyList(),
+                nextCursor = "",
+                loading = false,
+                loadingMore = false,
+                error = null,
+            )
+        }
+        resync()
     }
 
     fun loadMore() {
         val api = client ?: return
         val snapshot = _state.value
         if (snapshot.loadingMore || snapshot.nextCursor.isEmpty()) return
+        val token = requestSeq
+        val loadToken = ++loadMoreSeq
+        val wanted = snapshot.category
         _state.update { it.copy(loadingMore = true) }
         viewModelScope.launch {
             try {
-                val page = withContext(Dispatchers.IO) { api.list(snapshot.nextCursor, ApiClient.PAGE_SIZE) }
+                val page = withContext(Dispatchers.IO) {
+                    api.list(snapshot.nextCursor, ApiClient.PAGE_SIZE, wanted)
+                }
+                if (requestSeq != token) return@launch
                 _state.update { s ->
                     val seen = s.items.mapTo(HashSet()) { it.id }
                     s.copy(
@@ -789,11 +876,27 @@ class AppViewModel(
                     )
                 }
             } catch (e: Exception) {
+                if (requestSeq != token) return@launch
                 if (e is ApiException && e.isUnauthorized) onUnauthorized()
                 _state.update { it.copy(loadingMore = false) }
                 toast(friendly(e), error = true)
+            } finally {
+                // A category switch bumps loadMoreSeq: its spinner must survive
+                // the finally block of the abandoned page.
+                if (loadMoreSeq == loadToken) {
+                    _state.update { if (it.loadingMore) it.copy(loadingMore = false) else it }
+                }
             }
         }
+    }
+
+    /** A realtime `item.created`: defer while a snapshot is in flight. */
+    private fun onItemCreated(id: String) {
+        if (snapshotting.get()) {
+            pendingCreates.add(id)
+            return
+        }
+        fetchAndInsert(id)
     }
 
     private fun fetchAndInsert(id: String) {
@@ -801,14 +904,54 @@ class AppViewModel(
         viewModelScope.launch {
             try {
                 val item = withContext(Dispatchers.IO) { api.getItem(id) }
+                // The Hub decides the category and it may have changed while this
+                // single-item fetch was open, so match against the live state.
                 _state.update { s ->
-                    if (s.items.any { it.id == item.id }) s else s.copy(items = listOf(item) + s.items)
+                    when {
+                        s.items.any { it.id == item.id } -> s
+                        !ItemCategory.matches(item, s.category) -> s
+                        else -> s.copy(items = listOf(item) + s.items)
+                    }
                 }
             } catch (_: Exception) {
                 // A later resync repairs the list.
             }
         }
     }
+
+    /**
+     * Merges an item this device just created (composer, upload, share) into the
+     * list, but only when it belongs to the visible category. Nothing is ever
+     * classified on the client: the category comes from the Hub's response.
+     */
+    private fun adoptCreatedItem(item: Item) {
+        val current = _state.value
+        if (!ItemCategory.matches(item, current.category)) {
+            toast(app.getString(R.string.category_sent_elsewhere, categoryLabel(current.category)))
+            return
+        }
+        _state.update { s ->
+            when {
+                s.items.any { it.id == item.id } -> s
+                !ItemCategory.matches(item, s.category) -> s
+                else -> s.copy(items = listOf(item) + s.items)
+            }
+        }
+    }
+
+    private fun categoryLabel(category: String): String = app.getString(
+        when (category) {
+            ItemCategory.TEXT -> R.string.category_text
+            ItemCategory.LINK -> R.string.category_link
+            ItemCategory.IMAGE -> R.string.category_image
+            ItemCategory.VIDEO -> R.string.category_video
+            ItemCategory.AUDIO -> R.string.category_audio
+            ItemCategory.DOCUMENT -> R.string.category_document
+            ItemCategory.ARCHIVE -> R.string.category_archive
+            ItemCategory.OTHER -> R.string.category_other
+            else -> R.string.category_all
+        },
+    )
 
     fun sendText() {
         val api = client ?: return
@@ -822,12 +965,8 @@ class AppViewModel(
                 val item = withContext(Dispatchers.IO) {
                     api.createText(type, value, _state.value.deviceName)
                 }
-                _state.update { s ->
-                    s.copy(
-                        sendingText = false,
-                        items = if (s.items.any { it.id == item.id }) s.items else listOf(item) + s.items,
-                    )
-                }
+                _state.update { it.copy(sendingText = false) }
+                adoptCreatedItem(item)
                 composerText.value = ""
             } catch (e: Exception) {
                 _state.update { it.copy(sendingText = false) }
@@ -846,6 +985,7 @@ class AppViewModel(
 
     fun deleteItem(id: String) {
         val api = client ?: return
+        val token = requestSeq
         val snapshot = _state.value.items
         _state.update { s -> s.copy(items = s.items.filterNot { it.id == id }) }
         viewModelScope.launch {
@@ -853,8 +993,9 @@ class AppViewModel(
                 withContext(Dispatchers.IO) { api.delete(id) }
                 toast("已删除")
             } catch (e: Exception) {
-                // Restore and tell the user; a resync would also fix it.
-                _state.update { s -> s.copy(items = snapshot) }
+                // Restoring the snapshot would resurrect the previous category's
+                // list, so only the category that owns it may roll back.
+                if (requestSeq == token) _state.update { s -> s.copy(items = snapshot) }
                 if (e is ApiException && e.isUnauthorized) onUnauthorized() else toast(friendly(e), true)
             }
         }
@@ -915,9 +1056,7 @@ class AppViewModel(
                             return@launch
                         }
                         updateUpload(key) { it.copy(status = TaskStatus.DONE, loaded = it.size) }
-                        _state.update { s ->
-                            s.copy(items = if (s.items.any { it.id == item.id }) s.items else listOf(item) + s.items)
-                        }
+                        adoptCreatedItem(item)
                         _state.update { s -> s.copy(uploads = s.uploads.filterNot { it.key == key }) }
                     } catch (e: CancellationException) {
                         _state.update { s -> s.copy(uploads = s.uploads.filterNot { it.key == key }) }
@@ -1080,9 +1219,7 @@ class AppViewModel(
                     val item = withContext(Dispatchers.IO) {
                         api.createText(type, text, _state.value.deviceName)
                     }
-                    _state.update { s ->
-                        s.copy(items = if (s.items.any { it.id == item.id }) s.items else listOf(item) + s.items)
-                    }
+                    adoptCreatedItem(item)
                     toast(app.getString(R.string.share_done))
                 } catch (e: Exception) {
                     if (e is ApiException && e.isUnauthorized) onUnauthorized() else toast(friendly(e), true)

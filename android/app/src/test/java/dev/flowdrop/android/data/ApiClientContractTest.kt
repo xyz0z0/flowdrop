@@ -152,7 +152,7 @@ class ApiClientContractTest {
             MockResponse().setResponseCode(201)
                 .addHeader("Content-Type", "application/json")
                 .setBody(
-                    """{"id":"item-1","type":"link","text":"https://example.com",
+                    """{"id":"item-1","type":"link","category":"link","text":"https://example.com",
                        "sender_device":"Android","created_at":1700000000000}""",
                 ),
         )
@@ -181,7 +181,8 @@ class ApiClientContractTest {
             MockResponse().setResponseCode(200)
                 .addHeader("Content-Type", "application/json")
                 .setBody(
-                    """{"items":[{"id":"a","type":"text","text":"hi","sender_device":"PC","created_at":1}],
+                    """{"items":[{"id":"a","type":"text","category":"text","text":"hi",
+                       "sender_device":"PC","created_at":1}],
                        "next_cursor":"Y3Vyc29y"}""",
                 ),
         )
@@ -203,6 +204,51 @@ class ApiClientContractTest {
     }
 
     @Test
+    fun `list always sends category and defaults to all`() = runBlocking {
+        server.enqueue(pairResponse())
+        pairDevice()
+        server.enqueue(
+            MockResponse().setResponseCode(200)
+                .addHeader("Content-Type", "application/json")
+                .setBody("""{"items":[],"next_cursor":""}"""),
+        )
+
+        client.list()
+
+        server.takeRequest(1, TimeUnit.SECONDS)
+        val list = server.takeRequest(1, TimeUnit.SECONDS)!!
+        assertTrue(list.path!!.startsWith("/api/v1/items?"))
+        assertTrue("default must be all: ${list.path}", list.path!!.contains("category=all"))
+    }
+
+    @Test
+    fun `list sends the selected category and parses the server category`() = runBlocking {
+        server.enqueue(pairResponse())
+        pairDevice()
+        server.enqueue(
+            MockResponse().setResponseCode(200)
+                .addHeader("Content-Type", "application/json")
+                .setBody(
+                    """{"items":[{"id":"v1","type":"file","category":"video",
+                       "sender_device":"PC","created_at":5,
+                       "blob":{"id":"b1","name":"clip.mp4","content_type":"video/mp4",
+                       "size_bytes":10,"sha256":"ff","created_at":5}}],
+                       "next_cursor":"c1"}""",
+                ),
+        )
+
+        val page = client.list(cursor = "prev", limit = 30, category = "video")
+
+        assertEquals("video", page.items.single().category)
+        assertEquals("c1", page.nextCursor)
+        server.takeRequest(1, TimeUnit.SECONDS)
+        val list = server.takeRequest(1, TimeUnit.SECONDS)!!
+        assertTrue(list.path!!.contains("category=video"))
+        assertTrue(list.path!!.contains("limit=30"))
+        assertTrue(list.path!!.contains("cursor=prev"))
+    }
+
+    @Test
     fun `upload streams the file with multipart and csrf`() = runBlocking {
         server.enqueue(pairResponse())
         pairDevice()
@@ -210,7 +256,7 @@ class ApiClientContractTest {
             MockResponse().setResponseCode(201)
                 .addHeader("Content-Type", "application/json")
                 .setBody(
-                    """{"id":"item-2","type":"file","sender_device":"Android","created_at":2,
+                    """{"id":"item-2","type":"file","category":"other","sender_device":"Android","created_at":2,
                        "blob":{"id":"b1","name":"app.apk","content_type":"application/octet-stream",
                        "size_bytes":11,"sha256":"deadbeef","created_at":2}}""",
                 ),

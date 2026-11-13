@@ -38,12 +38,19 @@ func (b *Blob) IsPreviewableImage() bool {
 }
 
 type Item struct {
-	ID           string `json:"id"`
-	Type         string `json:"type"`
-	Text         string `json:"text,omitempty"`
-	SenderDevice string `json:"sender_device"`
-	CreatedAt    int64  `json:"created_at"`
-	Blob         *Blob  `json:"blob,omitempty"`
+	ID           string   `json:"id"`
+	Type         string   `json:"type"`
+	Category     Category `json:"category"`
+	Text         string   `json:"text,omitempty"`
+	SenderDevice string   `json:"sender_device"`
+	CreatedAt    int64    `json:"created_at"`
+	Blob         *Blob    `json:"blob,omitempty"`
+}
+
+// fillCategory sets the derived category; every read and write path goes
+// through it so the value can never disagree with CategoryOf.
+func (it *Item) fillCategory() {
+	it.Category = CategoryOf(it.Type, it.Blob)
 }
 
 type Store struct{ db *sql.DB }
@@ -81,6 +88,7 @@ func scanItem(s interface{ Scan(...any) error }) (Item, error) {
 			CreatedAt:    bCreated.Int64,
 		}
 	}
+	it.fillCategory()
 	return it, nil
 }
 
@@ -92,7 +100,9 @@ func (s *Store) CreateTextItem(id, itemType, text, senderDevice string) (Item, e
 	if err != nil {
 		return Item{}, err
 	}
-	return Item{ID: id, Type: itemType, Text: text, SenderDevice: senderDevice, CreatedAt: now}, nil
+	it := Item{ID: id, Type: itemType, Text: text, SenderDevice: senderDevice, CreatedAt: now}
+	it.fillCategory()
+	return it, nil
 }
 
 // CreateBlobItem inserts a blob row and its item in one transaction.
@@ -117,7 +127,9 @@ func (s *Store) CreateBlobItem(blob Blob, itemType, senderDevice string) (Item, 
 		return Item{}, err
 	}
 	blob.CreatedAt = now
-	return Item{ID: itemID, Type: itemType, SenderDevice: senderDevice, CreatedAt: now, Blob: &blob}, nil
+	it := Item{ID: itemID, Type: itemType, SenderDevice: senderDevice, CreatedAt: now, Blob: &blob}
+	it.fillCategory()
+	return it, nil
 }
 
 // GetItem returns one item or ErrNotFound.
@@ -161,37 +173,54 @@ func DecodeCursor(s string) (Cursor, error) {
 // ListItems returns items strictly older than cursor (created_at DESC, id DESC),
 // plus the cursor for the next page if more rows exist.
 func (s *Store) ListItems(cursor *Cursor, limit int) ([]Item, *Cursor, error) {
-	var rows *sql.Rows
-	var err error
-	if cursor == nil {
-		rows, err = s.db.Query(itemSelect+` ORDER BY i.created_at DESC, i.id DESC LIMIT ?`, limit+1)
-	} else {
-		rows, err = s.db.Query(itemSelect+`
-			WHERE (i.created_at < ?) OR (i.created_at = ? AND i.id < ?)
-			ORDER BY i.created_at DESC, i.id DESC LIMIT ?`,
-			cursor.CreatedAt, cursor.CreatedAt, cursor.ID, limit+1)
+	return s.ListItemsByCategory(cursor, CategoryAll, limit)
+}
+
+// ListItemsByCategory is ListItems restricted to one category. CategoryAll
+// behaves exactly like ListItems.
+//
+// The category is derived, not stored, so filtering happens while streaming the
+// keyset-ordered rows: memory stays at limit+1 items and no schema change or
+// extra index is needed. Cost is one index scan that may visit rows outside the
+// category; a page of a sparse category therefore reads more rows than it
+// returns.
+func (s *Store) ListItemsByCategory(cursor *Cursor, category Category, limit int) ([]Item, *Cursor, error) {
+	query := itemSelect
+	args := []any{}
+	if cursor != nil {
+		query += `
+			WHERE (i.created_at < ?) OR (i.created_at = ? AND i.id < ?)`
+		args = append(args, cursor.CreatedAt, cursor.CreatedAt, cursor.ID)
 	}
+	query += `
+			ORDER BY i.created_at DESC, i.id DESC`
+	rows, err := s.db.Query(query, args...)
 	if err != nil {
 		return nil, nil, err
 	}
 	defer rows.Close()
 
 	items := make([]Item, 0, limit)
+	var next *Cursor
 	for rows.Next() {
 		it, err := scanItem(rows)
 		if err != nil {
 			return nil, nil, err
 		}
+		if category != CategoryAll && it.Category != category {
+			continue
+		}
+		if len(items) == limit {
+			// One extra match: report the position of the last returned item
+			// so the next page starts right after it.
+			last := items[len(items)-1]
+			next = &Cursor{CreatedAt: last.CreatedAt, ID: last.ID}
+			break
+		}
 		items = append(items, it)
 	}
 	if err := rows.Err(); err != nil {
 		return nil, nil, err
-	}
-	var next *Cursor
-	if len(items) > limit {
-		items = items[:limit]
-		last := items[len(items)-1]
-		next = &Cursor{CreatedAt: last.CreatedAt, ID: last.ID}
 	}
 	return items, next, nil
 }

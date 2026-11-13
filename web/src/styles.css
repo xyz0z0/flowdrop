@@ -650,6 +650,51 @@ button:disabled {
   border-radius: var(--radius-pill);
 }
 
+/* ---- category filters ---- */
+.filters {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 14px 0 2px;
+  padding-bottom: 2px;
+  /* 窄屏不换行而是横滚，避免九个标签吃掉半屏高度。 */
+  overflow-x: auto;
+  overscroll-behavior-x: contain;
+  scrollbar-width: none;
+  -webkit-overflow-scrolling: touch;
+}
+.filters::-webkit-scrollbar {
+  display: none;
+}
+.chip {
+  flex: 0 0 auto;
+  height: 30px;
+  padding: 0 14px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-pill);
+  background: var(--card);
+  color: var(--muted-strong);
+  font-size: 13px;
+}
+.chip:hover:not(:disabled) {
+  background: var(--card-2);
+  color: var(--fg);
+}
+.chip[aria-pressed='true'] {
+  background: var(--accent-soft);
+  border-color: transparent;
+  color: var(--accent-deep);
+  font-weight: 600;
+}
+.chip[aria-pressed='true']:hover {
+  background: var(--accent-soft);
+  color: var(--accent-deep);
+}
+.empty .ghost {
+  margin-top: 10px;
+  border: 1px solid var(--line);
+}
+
 /* ---- inbox ---- */
 .inbox {
   margin-top: 16px;

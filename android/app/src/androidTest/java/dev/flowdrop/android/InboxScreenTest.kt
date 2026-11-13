@@ -2,6 +2,8 @@ package dev.flowdrop.android
 
 import androidx.compose.ui.test.assertIsDisplayed
 import androidx.compose.ui.test.assertIsNotEnabled
+import androidx.compose.ui.test.assertIsNotSelected
+import androidx.compose.ui.test.assertIsSelected
 import androidx.compose.ui.test.hasText
 import androidx.compose.ui.test.junit4.createComposeRule
 import androidx.compose.ui.test.onNodeWithText
@@ -32,9 +34,11 @@ class InboxScreenTest {
         text: String? = null,
         blobName: String? = null,
         blobSize: Long = 0,
+        category: String = if (type == "file") "other" else type,
     ) = Item(
         id = id,
         type = type,
+        category = category,
         text = text,
         senderDevice = "Kubuntu",
         createdAt = 1_700_000_000_000,
@@ -57,6 +61,7 @@ class InboxScreenTest {
         onSave: (Item) -> Unit = {},
         onInstall: (Item) -> Unit = {},
         onLogout: () -> Unit = {},
+        onCategoryChange: (String) -> Unit = {},
     ) {
         compose.setContent {
             FlowDropTheme {
@@ -79,6 +84,7 @@ class InboxScreenTest {
                     onDeviceNameChange = {},
                     onLogout = onLogout,
                     onNotify = { _, _ -> },
+                    onCategoryChange = onCategoryChange,
                 )
             }
         }
@@ -250,6 +256,54 @@ class InboxScreenTest {
         assertEquals("first tap must not delete", null, deleted)
         compose.onNodeWithText("确认删除").performScrollTo().performClick()
         assertEquals("8", deleted?.id)
+    }
+
+    @Test
+    fun categoryChipsAreVisibleAndDefaultToAll() {
+        show(baseState())
+        compose.onNodeWithText("全部").assertIsDisplayed()
+        compose.onNodeWithText("文字").assertIsDisplayed()
+        compose.onNodeWithText("图片").assertIsDisplayed()
+        compose.onNodeWithText("压缩包").assertIsDisplayed()
+        compose.onNodeWithText("全部").assertIsSelected()
+    }
+
+    @Test
+    fun categoryChipClickReportsValue() {
+        var picked = ""
+        show(baseState(), onCategoryChange = { picked = it })
+        compose.onNodeWithText("视频").performClick()
+        assertEquals("video", picked)
+    }
+
+    @Test
+    fun selectedCategoryIsMarkedSelected() {
+        show(baseState().copy(category = "document"))
+        compose.onNodeWithText("文档").assertIsSelected()
+        compose.onNodeWithText("全部").assertIsNotSelected()
+    }
+
+    @Test
+    fun emptyCategoryShowsFilteredHintAndShowAll() {
+        var picked = ""
+        show(
+            baseState().copy(category = "archive", items = emptyList()),
+            onCategoryChange = { picked = it },
+        )
+        compose.onNodeWithText("该分类暂无内容").assertIsDisplayed()
+        compose.onNodeWithText("收件箱里还没有「压缩包」类型的条目。").assertIsDisplayed()
+        compose.onNodeWithText("查看全部").performClick()
+        assertEquals("all", picked)
+    }
+
+    @Test
+    fun emptyAllCategoryKeepsOriginalHint() {
+        show(baseState())
+        compose.onNodeWithText("收件箱是空的").assertIsDisplayed()
+        assertEquals(
+            0,
+            compose.onAllNodes(hasText("该分类暂无内容")).fetchSemanticsNodes().size,
+        )
     }
 
     @Test

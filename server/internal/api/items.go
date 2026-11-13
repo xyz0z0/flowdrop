@@ -128,7 +128,17 @@ func (s *Server) handleListItems(w http.ResponseWriter, r *http.Request) {
 		}
 		cursor = &c
 	}
-	items, next, err := s.store.ListItems(cursor, limit)
+	category := store.CategoryAll
+	if v := r.URL.Query().Get("category"); v != "" {
+		c, ok := store.ParseCategory(v)
+		if !ok {
+			writeError(w, http.StatusBadRequest, "bad_request",
+				"category must be one of: "+categoryList())
+			return
+		}
+		category = c
+	}
+	items, next, err := s.store.ListItemsByCategory(cursor, category, limit)
 	if err != nil {
 		s.log.Error("list items", "err", err)
 		writeError(w, http.StatusInternalServerError, "internal", "could not list items")
@@ -142,6 +152,15 @@ func (s *Server) handleListItems(w http.ResponseWriter, r *http.Request) {
 		"items":       items,
 		"next_cursor": nextCursor,
 	})
+}
+
+// categoryList renders the accepted category values for error messages.
+func categoryList() string {
+	names := make([]string, 0, len(store.Categories()))
+	for _, c := range store.Categories() {
+		names = append(names, string(c))
+	}
+	return strings.Join(names, ", ")
 }
 
 func (s *Server) handleGetItem(w http.ResponseWriter, r *http.Request) {
