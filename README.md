@@ -21,6 +21,7 @@
 > 分阶段计划：[docs/PLAN.md](docs/PLAN.md)
 > 部署运维：[docs/DEPLOY.md](docs/DEPLOY.md)
 > 验证记录：[docs/VERIFICATION.md](docs/VERIFICATION.md)
+> 命令行用法（给 agent / 脚本 / LLM）：[docs/CLI_AGENT.md](docs/CLI_AGENT.md)
 
 ## 功能范围（MVP / P0）
 
