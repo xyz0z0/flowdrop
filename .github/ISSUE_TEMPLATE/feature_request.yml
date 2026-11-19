@@ -1,0 +1,55 @@
+name: Feature request
+description: Suggest a capability or improvement for FlowDrop
+title: "feat: "
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        FlowDrop stays deliberately small: a self-hosted inbox between your own
+        devices. Requests that fit that scope (no accounts, no cloud, no extra
+        server-side services) are most likely to be accepted.
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem
+      description: What are you trying to do, and what gets in the way today?
+      placeholder: "I want to ... but currently ..."
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed solution
+      description: Describe the behaviour you would like, including UI or protocol changes if relevant.
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+      description: Existing workarounds, other apps, or simpler options you rejected.
+    validations:
+      required: false
+  - type: dropdown
+    id: component
+    attributes:
+      label: Area
+      options:
+        - Hub server / API
+        - Web UI
+        - Desktop app
+        - Android app
+        - Packaging, install or release
+        - Documentation
+    validations:
+      required: true
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Checklist
+      options:
+        - label: I searched existing issues and did not find a duplicate.
+          required: true
+        - label: This request does not require an account system, cloud service or third-party backend.
+          required: true

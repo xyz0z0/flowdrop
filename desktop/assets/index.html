@@ -1,0 +1,263 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>FlowDrop 设置</title>
+  <link rel="stylesheet" href="/style.css" />
+</head>
+<body>
+  <div class="titlebar" id="titlebar">
+    <span class="tb-mark" aria-hidden="true">
+      <svg viewBox="0 0 16 16" fill="none" stroke="#ffffff" stroke-width="1.9"
+           stroke-linecap="round" stroke-linejoin="round">
+        <path d="M3.2 6.2h9.1l-2.1-2.1" />
+        <path d="M12.8 9.8H3.7l2.1 2.1" />
+      </svg>
+    </span>
+    <span class="tb-spacer"></span>
+    <div class="tb-btns">
+      <button id="tb-min" type="button" title="最小化" aria-label="最小化">
+        <svg width="12" height="12" viewBox="0 0 12 12"><path d="M2.5 6h7" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" /></svg>
+      </button>
+      <button id="tb-max" type="button" title="最大化" aria-label="最大化">
+        <svg width="12" height="12" viewBox="0 0 12 12"><rect x="2.6" y="2.6" width="6.8" height="6.8" rx="1.4" fill="none" stroke="currentColor" stroke-width="1.3" /></svg>
+      </button>
+      <button id="tb-close" class="tb-close" type="button" title="关闭" aria-label="关闭">
+        <svg width="12" height="12" viewBox="0 0 12 12"><path d="M3 3l6 6M9 3l-6 6" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" /></svg>
+      </button>
+    </div>
+  </div>
+  <main class="app">
+    <header class="head">
+      <div class="brand">
+        <img src="/icon.png" alt="" width="40" height="40" />
+        <div>
+          <h1>FlowDrop 流转</h1>
+          <p class="sub">本机桌面 Hub 设置</p>
+        </div>
+      </div>
+      <span id="status-badge" class="badge badge-off">未运行</span>
+    </header>
+
+    <p id="startup-error" class="banner banner-error" hidden></p>
+    <p id="proxy-warning" class="banner banner-warn" hidden></p>
+    <p id="a11y-warning" class="banner banner-warn" hidden></p>
+
+    <section id="run-mode-card" class="card">
+      <h2>运行模式</h2>
+      <p class="hint">默认由这台电脑启动 Hub，也可改为连接局域网或 Tailscale 上的远程 Hub；保存后立即生效。</p>
+      <div class="mode-list" role="radiogroup" aria-label="运行模式">
+        <label class="mode">
+          <input id="run-local" type="radio" name="run-mode" value="local" />
+          <span class="mode-body">
+            <span class="mode-title">本机 Hub（默认）</span>
+            <span class="mode-desc">在这台电脑上启动 Hub，手机直接访问本机地址。</span>
+          </span>
+        </label>
+        <label class="mode">
+          <input id="run-remote" type="radio" name="run-mode" value="remote" />
+          <span class="mode-body">
+            <span class="mode-title">连接远程 Hub</span>
+            <span class="mode-desc">不启动本机 Hub，改为连接另一台机器上的 Hub。</span>
+          </span>
+        </label>
+      </div>
+      <div id="remote-pane" hidden>
+        <div class="row">
+          <label for="remote-url">远程 Hub 地址</label>
+          <input id="remote-url" type="text" placeholder="http://192.168.1.184:8080" />
+        </div>
+        <details class="more-hint">
+          <summary>地址填写与跨网说明</summary>
+          <p class="hint">
+            填局域网或 Tailscale 地址，不含路径；配对在收件箱页里输入该 Hub 生成的 4 位码。
+            对端在 Tailscale 上时请填它的 100.x 地址；两台机器都用 192.168.x.x 但不在同一局域网时，LAN 地址不可达。
+          </p>
+        </details>
+        <div class="row">
+          <label for="discover-hubs">发现的 Hub</label>
+          <button id="discover-hubs" class="ghost" type="button">扫描</button>
+        </div>
+        <div id="discovered-hubs" class="hub-urls" hidden></div>
+        <p id="discover-empty" class="hint hint-inline" hidden>
+          没有发现可用的 Hub。局域网发现（mDNS）只能看到同一局域网内的 Hub；
+          Tailscale 地址靠本机的 tailscale 命令探测，需要已安装并登录。两者都看不到时请手动填写地址。
+        </p>
+        <p id="discover-error" class="banner banner-error" hidden></p>
+      </div>
+      <div class="row">
+        <button id="run-mode-save" class="primary" type="button">保存</button>
+      </div>
+      <p id="run-mode-error" class="banner banner-error" hidden></p>
+      <p id="run-mode-ok" class="banner banner-ok" hidden></p>
+    </section>
+
+    <section id="remote-status-card" class="card" hidden>
+      <h2>远程 Hub</h2>
+      <p id="remote-current" class="remote-current">—</p>
+      <p id="remote-warning" class="banner banner-warn" hidden></p>
+      <div class="row">
+        <button id="remote-open-inbox" class="primary" type="button">打开收件箱</button>
+        <button id="remote-open-browser" class="ghost" type="button">在浏览器中打开</button>
+      </div>
+      <p class="hint">
+        本机 Hub 未启用：下面的本机绑定、配对码与已配对设备列表在远程模式下不可用，
+        配对与设备管理请在该 Hub 的收件箱页完成。切回「本机 Hub」并保存后即可恢复。
+      </p>
+    </section>
+
+    <section id="status-card" class="card">
+      <h2>运行状态</h2>
+      <dl class="kv">
+        <dt>可供手机访问的地址</dt>
+        <dd>
+          <div id="hub-urls" class="hub-urls"><code>—</code></div>
+          <p id="hub-urls-hint" class="hint hint-inline" hidden>
+            自动绑定会同时监听多个地址；手机用局域网那一行，装了 Tailscale 的设备用 100.x 那一行，容器用 172.x 那一行。
+          </p>
+          <button id="copy-url" class="ghost" type="button">复制</button>
+          <button id="open-browser" class="ghost" type="button">在浏览器打开</button>
+        </dd>
+        <dt>实际绑定</dt>
+        <dd><code id="listen">—</code></dd>
+        <dt>系统托盘</dt>
+        <dd id="tray-state">—</dd>
+      </dl>
+      <p id="last-error" class="banner banner-error" hidden></p>
+      <details class="more-hint">
+        <summary>窗口关闭与退出说明</summary>
+        <p class="hint">
+          关闭窗口只会把它收进托盘，Hub 继续运行；请使用托盘菜单的「退出 FlowDrop（停止 Hub）」彻底退出并释放端口。
+        </p>
+      </details>
+    </section>
+
+    <section id="pairing-card" class="card">
+      <h2>设备配对</h2>
+      <p class="hint">在手机 FlowDrop 里扫码或输入一次性四位配对码（120 秒内有效，单次使用）。</p>
+      <div class="row">
+        <button id="pair-add" class="primary" type="button">添加设备</button>
+      </div>
+      <p id="pairing-unavailable" class="hint hint-warn" hidden></p>
+      <div id="pairing-code" class="pairing-code" hidden>
+        <img
+          id="pairing-qr"
+          class="pairing-qr"
+          alt="配对二维码：用手机 FlowDrop 扫描可自动填入四位配对码"
+          hidden
+        />
+        <div class="pairing-code-meta">
+          <span class="pairing-code-label">一次性配对码</span>
+          <p id="pairing-code-value" class="pairing-code-value"></p>
+          <p id="pairing-code-expiry" class="hint"></p>
+        </div>
+      </div>
+      <p id="pairing-status" class="banner banner-ok" hidden></p>
+      <p id="pairing-error" class="banner banner-error" hidden></p>
+
+      <h3 class="subhead">已配对设备</h3>
+      <p id="local-device" class="hint" hidden></p>
+      <ul id="device-list" class="device-list"></ul>
+      <p id="device-empty" class="hint" hidden>还没有已配对设备；点「添加设备」生成四位码。</p>
+      <p id="device-error" class="banner banner-error" hidden></p>
+      <details class="more-hint">
+        <summary>配对安全与解除配对说明</summary>
+        <p class="hint">
+          码只在本窗口显示，不会写入配置、日志或网络请求；成功配对一次或重新生成都会作废旧码。
+          解除配对会立即失效该设备的登录状态和事件流；设备本机保存的记录需在设备上退出。
+        </p>
+      </details>
+    </section>
+
+    <section id="network-card" class="card">
+      <h2>网络绑定</h2>
+      <p class="hint">
+        选择 Hub 监听的<b>具体本机 IPv4 地址</b>（不监听 0.0.0.0）；需要手机在 Wi-Fi 和 Tailscale 下都能直接访问时，
+        选择「同时使用内网和 Tailscale」，同一个 Hub 会在两个地址的<b>同一端口</b>上提供服务。
+      </p>
+
+      <label class="check" id="auto-bind-row">
+        <input id="autoBind" type="checkbox" />
+        <span>自动绑定本机所有可用地址（局域网 + Tailscale，端口同上）</span>
+      </label>
+
+      <div id="manual-bind">
+        <div class="mode-list" role="radiogroup" aria-label="网络绑定方式">
+          <label class="mode">
+            <input id="mode-single" type="radio" name="bind-mode" value="single" />
+            <span class="mode-body">
+              <span class="mode-title">只使用一个地址</span>
+              <span class="mode-desc">下面任选一个本机地址：内网、Tailscale 或回环。</span>
+            </span>
+          </label>
+          <label id="mode-dual-label" class="mode">
+            <input id="mode-dual" type="radio" name="bind-mode" value="dual" />
+            <span class="mode-body">
+              <span class="mode-title">同时使用内网和 Tailscale</span>
+              <span class="mode-desc">一个内网地址 + 一个 Tailscale 地址，同端口、同一 Hub、同一数据库。</span>
+            </span>
+          </label>
+        </div>
+        <p id="dual-hint" class="hint hint-warn" hidden></p>
+
+        <div id="single-pane">
+          <p class="hint">在这个列表中选择一个要绑定的地址：</p>
+          <div id="iface-list" class="iface-list"></div>
+          <p id="tailscale-hint" class="hint hint-warn" hidden>
+            未检测到 Tailscale 网卡：不能选择双模式，但仍可使用内网单地址模式正常收发。
+            跨网络访问需要你在系统里自行安装并登录 Tailscale；本应用不会要求或自动安装它。
+          </p>
+        </div>
+
+        <div id="dual-pane" hidden>
+          <div class="row">
+            <label for="dual-lan">内网（LAN）地址</label>
+            <select id="dual-lan"></select>
+          </div>
+          <div class="row">
+            <label for="dual-ts">Tailscale 地址</label>
+            <select id="dual-ts"></select>
+          </div>
+        </div>
+      </div>
+
+      <div id="auto-pane" hidden>
+        <p class="hint">当前实际绑定（每 3 秒刷新，取消勾选不影响已选的单地址/双模式设置）：</p>
+        <ul id="auto-url-list" class="url-list"></ul>
+        <p id="auto-url-empty" class="hint" hidden>Hub 未运行：勾选并保存后会列出真实监听的地址。</p>
+      </div>
+
+      <div class="row">
+        <label for="port">端口（两个地址共用）</label>
+        <input id="port" type="number" min="1" max="65535" step="1" value="8080" />
+        <button id="apply" class="primary" type="button">保存并重启 Hub</button>
+      </div>
+      <p id="apply-error" class="banner banner-error" hidden></p>
+      <p id="apply-ok" class="banner banner-ok" hidden></p>
+      <details class="more-hint">
+        <summary>绑定机制与故障恢复说明</summary>
+        <p class="hint">
+          双地址的两处必须是本机当前真实存在的地址，且不能相同；保存后 Hub 会同时绑定这两个 IP 的同一端口，
+          任一地址绑定失败则整体失败并恢复原配置，不会只启动一半。
+          勾选自动绑定后不需要再选地址：Hub 会在该端口上绑定本机当前所有可用的局域网和 Tailscale 地址，
+          网络变化（例如换 Wi-Fi 或连上 Tailscale）后会自动跟上，不用重启。
+          更换地址/端口会先停止旧 Hub（撤回 mDNS、释放全部端口），再以同一数据目录启动新实例；
+          若新地址失效、端口被占用或只绑定成功一部分，会明确报错并自动尝试恢复原配置。
+        </p>
+      </details>
+
+      <h3 class="subhead">当前实际绑定（仅列出真正监听的地址）</h3>
+      <ul id="url-list" class="url-list"></ul>
+      <p id="url-empty" class="hint" hidden>Hub 未运行：上方显示的是已保存的设置，不是当前可用地址。</p>
+    </section>
+
+
+    <footer class="foot">
+      <button id="quit" class="danger" type="button">退出 FlowDrop（停止 Hub）</button>
+      <span id="cfg-path" class="cfg"></span>
+    </footer>
+  </main>
+  <script type="module" src="/app.js"></script>
+</body>
+</html>

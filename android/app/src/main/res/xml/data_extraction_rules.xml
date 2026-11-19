@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="utf-8"?>
+<data-extraction-rules>
+    <!-- Session cookies stay on this device: no cloud backup, no device transfer. -->
+    <cloud-backup>
+        <exclude domain="sharedpref" />
+        <exclude domain="file" />
+        <exclude domain="database" />
+    </cloud-backup>
+    <device-transfer>
+        <exclude domain="sharedpref" />
+        <exclude domain="file" />
+        <exclude domain="database" />
+    </device-transfer>
+</data-extraction-rules>

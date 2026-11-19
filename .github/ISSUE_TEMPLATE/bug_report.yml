@@ -1,0 +1,91 @@
+name: Bug report
+description: Report a reproducible problem with FlowDrop
+title: "bug: "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for the report. Please search existing issues first.
+
+        **Do not report security vulnerabilities here** — use
+        [private vulnerability reporting](../security/advisories/new) as
+        described in SECURITY.md.
+
+        Redact device tokens, pairing codes, cookies, IP addresses and any other
+        secrets from logs and screenshots.
+  - type: dropdown
+    id: component
+    attributes:
+      label: Component
+      options:
+        - Hub server (Go, CLI)
+        - Web UI
+        - Desktop app (Linux)
+        - Desktop app (Windows)
+        - Android app
+        - Build, packaging or release artifacts
+        - Documentation
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: FlowDrop version
+      description: Release tag, `flowdrop --version`, or commit SHA; include the artifact name for packaged builds.
+      placeholder: "0.0.3 / commit abc1234 / flowdrop-desktop-linux-amd64.tar.gz"
+    validations:
+      required: true
+  - type: textarea
+    id: environment
+    attributes:
+      label: Environment
+      description: OS and version, device model and Android version, Hub URL scheme (HTTP/Tailscale/HTTPS), browser or WebView version.
+      placeholder: |
+        Hub: Linux, KDE, Go 1.26, single instance on port 8080
+        Client: Android 15, Pixel 8
+        Browser: Firefox 140
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      description: Minimal numbered steps; say whether the Hub was restarted, whether devices were re-paired, and whether the problem is intermittent.
+      placeholder: |
+        1. ...
+        2. ...
+        3. ...
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behaviour
+    validations:
+      required: true
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual behaviour
+      description: Include the exact error message and relevant logs (redacted).
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs, screenshots or recordings
+      description: Optional. Paste text rather than attaching large files where possible.
+    validations:
+      required: false
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Checklist
+      options:
+        - label: I searched existing issues and did not find a duplicate.
+          required: true
+        - label: I removed secrets (tokens, pairing codes, cookies, IPs) from this report.
+          required: true
+        - label: This is not a security vulnerability.
+          required: true

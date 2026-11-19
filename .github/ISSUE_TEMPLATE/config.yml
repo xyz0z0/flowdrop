@@ -1,0 +1,8 @@
+blank_issues_enabled: true
+contact_links:
+  - name: Security vulnerability
+    url: https://github.com/xyz0z0/flowdrop/security/advisories/new
+    about: Report vulnerabilities privately (see SECURITY.md); never in a public issue.
+  - name: Usage and deployment questions
+    url: https://github.com/xyz0z0/flowdrop#readme
+    about: Check the README and docs/ (deployment, pairing, CLI) before opening an issue.

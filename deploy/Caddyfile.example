@@ -1,0 +1,58 @@
+# FlowDrop 局域网 HTTPS 入口（Caddy，internal CA）
+#
+# 用途：手机不安装 Tailscale、仅在同一 Wi-Fi 时，通过受信任的局域网 HTTPS
+# 访问 Hub。Caddy 在这里终结 TLS，并反代到只监听回环的 FlowDrop Hub。
+#
+# 重要：Caddy 会使用本地 CA 签发证书，手机必须导入并信任该 CA，否则浏览器
+# 会拦截。忽略证书警告 **不是** 可接受的方案。
+#
+# 使用方法（详见 docs/DEPLOY.md）：
+#   1. 把本文件复制为 /etc/caddy/Caddyfile.d/flowdrop.caddy（或并入主 Caddyfile）
+#   2. 把 flowdrop.lan 换成你的主机名，把 192.168.1.10 换成 Hub 的局域网 IP
+#   3. sudo systemctl reload caddy
+#   4. sudo caddy trust 不适用于手机；导出 root CA 后按文档导入手机
+#
+# Hub 侧需要：
+#   FLOWDROP_LISTEN=127.0.0.1:8080
+#   FLOWDROP_ALLOWED_HOSTS=flowdrop.lan
+#   FLOWDROP_TRUSTED_PROXIES=127.0.0.1
+#   FLOWDROP_COOKIE_SECURE=true
+
+{
+	# 本地 CA：证书由 Caddy 自行签发，需要设备信任。
+	# 已有真实域名与证书时，删除 local_certs 并改成正常 HTTPS 配置。
+	local_certs
+	# 不要把内部域名提交到公共证书透明日志。
+	skip_install_trust
+}
+
+# 主机名与局域网 IP 都绑定，方便用 IP 直连。
+# 使用 IP 时证书 SAN 需包含该 IP，浏览器才不报警。
+flowdrop.lan, 192.168.1.10 {
+	# 明确只接受这两个 Host，避免 DNS rebinding。
+	# （Caddy 已按站点匹配，这里再加一层显式约束）
+	@allowed host flowdrop.lan 192.168.1.10
+	handle @allowed {
+		encode zstd gzip
+
+		# 安全响应头由 Hub 自己发送（含 HSTS、CSP、nosniff 等），这里不再重复，
+		# 只去掉 Server 标识。
+		header -Server
+
+		reverse_proxy 127.0.0.1:8080 {
+			# Caddy 默认就会发送 X-Forwarded-Proto / -Host / -For，无需重复配置。
+			# Hub 仅在直连 IP 属于 trusted_proxies 时才采信这些头。
+
+			# 大文件上传不做缓冲，避免 512 MiB 附件写满内存/磁盘临时区。
+			flush_interval -1
+			# 上传与下载都可能较慢；放宽单请求超时。
+			transport http {
+				read_timeout 30m
+				write_timeout 30m
+				dial_timeout 10s
+			}
+		}
+	}
+
+	respond "Host not allowed" 421
+}

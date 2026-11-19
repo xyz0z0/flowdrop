@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- Matches ui/Theme.kt DarkColors.background, so the launch window cannot
+         flash a lighter colour before Compose draws its first frame. -->
+    <color name="window_background">#1A1A1E</color>
+</resources>

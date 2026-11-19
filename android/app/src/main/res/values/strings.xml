@@ -1,0 +1,168 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">FlowDrop</string>
+
+    <string name="login_title">FlowDrop</string>
+    <string name="login_subtitle">配对电脑上的 FlowDrop，收件箱自动同步</string>
+    <string name="label_hub_address">电脑地址</string>
+    <string name="label_pairing_code">配对码</string>
+    <string name="pairing_code_hint">四位数字</string>
+    <string name="action_pair">配对</string>
+    <string name="pairing_busy">配对中…</string>
+    <string name="hub_address_hint">例如：http://192.168.1.50:8080 或 Tailscale 地址</string>
+    <string name="action_scan_qr">扫描二维码</string>
+    <string name="action_close">关闭</string>
+    <string name="scan_title">扫描配对二维码</string>
+    <string name="scan_hint">把电脑上的 FlowDrop 配对二维码放入取景框。</string>
+    <string name="scan_no_result">未识别到二维码</string>
+    <string name="scan_camera_unavailable">无法打开相机，请改用手动输入。</string>
+    <string name="scan_no_auto_pair">识别后只填入配对码和候选地址，仍需你自己点击配对。</string>
+    <string name="scan_camera_denied">没有相机权限，扫码不可用；手动地址与配对码仍然可用。</string>
+    <string name="pairing_qr_filled">已从二维码填入配对码</string>
+    <string name="pairing_qr_invalid">二维码无效，请手动输入配对码</string>
+
+    <string name="pairing_help">在电脑上的 FlowDrop 设置里点「添加设备」获取四位配对码：120 秒内有效，只能用一次。</string>
+    <string name="login_http_warning">家庭局域网 HTTP 为明文传输，仅用于可信网络；跨网请使用 Tailscale 地址。配对码只用于换取本机设备凭证，随后立即失效。</string>
+    <string name="stored_pairing_title">已配对的电脑</string>
+    <string name="stored_pairing_unnamed">（名称未知）</string>
+    <string name="stored_pairing_hint">这台电脑离线时可以直接重连，不需要重新取码。</string>
+    <string name="stored_pairing_another">或在下方输入配对码，配对另一台电脑</string>
+    <string name="action_reconnect">重连</string>
+    <string name="address_change_needs_pairing">手动输入另一台电脑的地址后，需要在电脑上重新获取配对码。</string>
+    <string name="not_initialized_hint">这台电脑还没有开启配对。请在电脑上的 FlowDrop 设置里点「添加设备」获取配对码。</string>
+
+    <string name="inbox_title">收件箱</string>
+
+    <!-- Multiple paired computers: inbox entry, picker, add mode and share target. -->
+    <string name="hub_switch_entry">切换</string>
+    <string name="hub_list_title">选择电脑</string>
+    <string name="hub_current">当前</string>
+    <string name="hub_add">添加电脑</string>
+    <string name="hub_back">返回</string>
+    <string name="hub_unnamed">未命名电脑</string>
+    <string name="share_target_title">发送到哪台电脑？</string>
+    <string name="share_target_to">将发送到：%1$s</string>
+    <string name="share_target_choose">请选择一台电脑</string>
+    <string name="share_target_send">发送</string>
+    <string name="action_logout">解除配对</string>
+    <string name="action_retry">重试</string>
+    <string name="action_cancel">取消</string>
+    <string name="action_delete">删除</string>
+    <string name="action_confirm_delete">确认删除</string>
+    <string name="action_copy">复制</string>
+    <string name="action_expand_text">展开</string>
+    <string name="action_collapse_text">收起</string>
+    <string name="action_copied">已复制</string>
+    <string name="action_open_link">打开链接</string>
+    <string name="action_download">下载</string>
+    <string name="action_install_apk">安装</string>
+    <string name="action_load_more">加载更早的内容</string>
+    <string name="action_refresh">刷新</string>
+
+    <string name="composer_hint">输入文字或粘贴链接…</string>
+    <string name="composer_send">发送</string>
+    <string name="composer_pick_file">选择文件</string>
+    <string name="composer_pick_image">选择图片</string>
+    <string name="composer_empty_hint">收件箱是空的。发送文字、链接、图片或文件，登录同一 Hub 的其他设备即可看到。</string>
+    <string name="device_name_label">本机名称</string>
+
+    <!-- Unpair confirmation. -->
+    <string name="unpair_title">解除配对？</string>
+    <string name="unpair_message">解除后需要重新配对才能连接此 Hub。</string>
+
+    <!-- Online device list: names + "本机" only; a stale list never shows a count. -->
+    <string name="presence_title">在线设备</string>
+    <string name="presence_entry">在线设备</string>
+    <string name="presence_count">在线 %1$d</string>
+    <string name="presence_current">本机</string>
+    <string name="presence_empty">暂无设备在线</string>
+    <string name="presence_unknown">状态待更新</string>
+    <string name="presence_stale_hint">连接已断开或最近一次刷新失败，名单可能已过期；恢复连接后会自动更新。</string>
+    <string name="presence_refresh_failed">刷新失败：%1$s</string>
+    <string name="presence_unnamed">未命名设备</string>
+    <string name="action_presence_refresh">刷新状态</string>
+
+    <string name="empty_inbox">收件箱是空的</string>
+    <string name="empty_category">该分类暂无内容</string>
+    <string name="empty_category_hint">收件箱里还没有「%1$s」类型的条目。</string>
+    <string name="category_show_all">查看全部</string>
+    <string name="category_sent_elsewhere">已发送，但不在当前分类「%1$s」下</string>
+
+    <string name="category_all">全部</string>
+    <string name="category_text">文字</string>
+    <string name="category_link">链接</string>
+    <string name="category_image">图片</string>
+    <string name="category_video">视频</string>
+    <string name="category_audio">音频</string>
+    <string name="category_document">文档</string>
+    <string name="category_archive">压缩包</string>
+    <string name="category_installer">安装包</string>
+    <string name="category_other">其他</string>
+    <string name="loading">正在加载…</string>
+
+    <!-- Boot screen: says what it is doing instead of showing a bare spinner. -->
+    <string name="boot_subtitle">正在连接你的电脑，收件箱随后自动同步</string>
+    <string name="boot_reading_session">正在读取本机配对…</string>
+    <string name="boot_selecting_address">正在连接电脑…</string>
+    <string name="boot_restoring_session">已连上，正在同步收件箱…</string>
+    <string name="boot_kind_lan">局域网</string>
+    <string name="boot_kind_tailscale">Tailscale</string>
+    <string name="boot_kind_other">其他网络</string>
+    <string name="boot_slow_hint">如果一直停在这里，请检查手机网络；用 Tailscale 地址时确认它已连接。</string>
+    <string name="conn_open">实时同步中</string>
+    <string name="conn_connecting">连接中…</string>
+    <string name="conn_closed">已离线，重连中</string>
+    <string name="conn_paused">后台已暂停</string>
+
+    <string name="tag_text">文字</string>
+    <string name="tag_link">链接</string>
+    <string name="tag_image">图片</string>
+    <string name="tag_file">文件</string>
+    <string name="tag_apk">Android 安装包</string>
+    <string name="share_done">已发送到收件箱</string>
+    <string name="error_network">无法连接 Hub，请检查地址、网络与 Hub 是否运行</string>
+    <string name="error_unauthorized">与电脑的连接已失效，请重新配对</string>
+    <string name="error_bad_address">Hub 地址格式不正确</string>
+    <string name="error_upload_too_large">文件超过 Hub 允许的大小上限</string>
+    <string name="error_save_failed">保存失败</string>
+    <string name="error_download_failed">下载失败</string>
+    <string name="error_apk_install">无法启动系统安装程序</string>
+
+    <string name="discovery_title">附近的 Hub</string>
+    <string name="discovery_search">搜索</string>
+    <string name="discovery_refresh">刷新</string>
+    <string name="discovery_stop">停止</string>
+    <string name="discovery_searching">正在搜索附近的 Hub…</string>
+    <string name="discovery_idle">可搜索同一 Wi-Fi 下的 Hub，或手动输入地址。</string>
+    <string name="discovery_empty">未发现 Hub。部分 Wi-Fi 会限制组播或开启 AP 隔离，Android 模拟器也不转发 mDNS；请手动输入地址。</string>
+    <string name="discovery_found">发现 %1$d 个 Hub</string>
+    <string name="discovery_error">自动发现不可用：%1$s。仍可手动输入地址。</string>
+    <string name="discovery_hint">点选只填写地址，不会自动登录；发现结果不代表 Hub 已通过验证。</string>
+
+    <string name="download_progress">下载中 %1$d%%</string>
+    <string name="upload_progress">上传中 %1$d%%</string>
+    <string name="saved_to_downloads">已保存到 Downloads：%1$s</string>
+
+    <!--
+      Offline queue (待发送). Items keep the computer they were written for and
+      survive app restarts; nothing here sends on its own without a connection.
+    -->
+    <string name="outbox_entry">待发送（%1$d）</string>
+    <string name="outbox_title">待发送</string>
+    <string name="outbox_hint">这些内容保存在本机，目标电脑不会改变；连上原电脑后自动发送。</string>
+    <string name="outbox_empty">没有待发送内容。</string>
+    <string name="outbox_target">发往 %1$s</string>
+    <string name="outbox_target_unknown">已解除配对的电脑</string>
+    <string name="outbox_target_unpaired">原电脑已解除配对，重新配对后才能发送。</string>
+    <string name="outbox_status_pending">等待发送</string>
+    <string name="outbox_status_sending">发送中…</string>
+    <string name="outbox_status_unconfirmed">投递未确认</string>
+    <string name="outbox_status_failed">发送失败</string>
+    <string name="outbox_failure">原因：%1$s</string>
+    <string name="outbox_unnamed_content">（无名称）</string>
+    <string name="outbox_remove">移除</string>
+    <string name="outbox_remove_title">移除待发送内容？</string>
+    <string name="outbox_remove_message">移除后不会再发送，内容也无法恢复；已暂存的文件会一并删除。</string>
+    <string name="outbox_retry_unconfirmed_title">再次发送？</string>
+    <string name="outbox_retry_unconfirmed_message">这条内容可能已送达原电脑；重试可能会重复发送。</string>
+</resources>

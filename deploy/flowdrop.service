@@ -1,0 +1,37 @@
+[Unit]
+Description=FlowDrop Hub (personal cross-device inbox)
+Documentation=file://%h/.local/share/flowdrop
+# The hub only listens on loopback; reachability is provided by Tailscale Serve
+# or a TLS reverse proxy, so we do not wait for the network to be "online".
+After=network.target
+
+[Service]
+Type=simple
+# Adjust if you installed the binary elsewhere.
+ExecStart=%h/.local/bin/flowdrop serve
+Environment=FLOWDROP_LISTEN=127.0.0.1:8080
+Environment=FLOWDROP_DATA_DIR=%h/.local/share/flowdrop
+Environment=FLOWDROP_LOG_LEVEL=info
+Restart=on-failure
+RestartSec=2s
+# Hardening. PrivateTmp is fine: we never need another process's /tmp.
+NoNewPrivileges=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=%h/.local/share/flowdrop
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictNamespaces=true
+RestrictSUIDSGID=true
+LockPersonality=true
+MemoryDenyWriteExecute=false
+SystemCallArchitectures=native
+# Graceful shutdown so SQLite WAL is checkpointed cleanly.
+KillSignal=SIGTERM
+TimeoutStopSec=15
+
+[Install]
+WantedBy=default.target

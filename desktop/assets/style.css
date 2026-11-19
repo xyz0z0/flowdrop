@@ -1,0 +1,945 @@
+/* FlowDrop desktop settings window.
+   Design baseline: light grey page, white cards, follows the system colour
+   scheme. All colours come from the tokens below; dark mode redeclares the
+   same names so no rule needs its own light/dark branch. */
+
+:root {
+  color-scheme: light;
+
+  --bg: #f4f4f6;
+  --card: #ffffff;
+  --card-2: #f9f9fb;
+  --line: #e3e3e8;
+  --line-2: #ececf0;
+  --fg: #1c1c21;
+  --fg-2: #4b4b53;
+  --muted: #85858d;
+  --accent: #2563eb;
+  --accent-soft: #eaf1fe;
+  --accent-fg: #ffffff;
+  --ok: #189a58;
+  --ok-soft: #e4f6ec;
+  --danger: #d64545;
+  --danger-soft: #fbe9e9;
+  --warn: #b45309;
+  --warn-soft: #fbf0df;
+  --shadow: 0 1px 2px rgba(20, 22, 30, .06), 0 0 0 .5px rgba(20, 22, 30, .06);
+
+  --font: -apple-system, BlinkMacSystemFont, "Segoe UI Variable Text", "Segoe UI",
+    "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei UI", "Microsoft YaHei",
+    system-ui, sans-serif;
+  --mono: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+
+  --r-card: 12px;
+  --r-ctl: 9px;
+  --t: 140ms ease;
+
+  /* Window scrollbar: the text tone at a few translucencies, one set per theme
+     so no rule needs its own light/dark branch. */
+  --sc-thumb: rgba(28, 28, 33, .20);
+  --sc-thumb-hover: rgba(28, 28, 33, .34);
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    color-scheme: dark;
+
+    --bg: #1a1a1e;
+    --card: #232327;
+    --card-2: #1f1f23;
+    --line: #333339;
+    --line-2: #2c2c32;
+    --fg: #ededf1;
+    --fg-2: #b9b9c1;
+    --muted: #8b8b94;
+    --accent: #7aa2f7;
+    --accent-soft: #22304d;
+    --accent-fg: #14142a;
+    --ok: #6fd99b;
+    --ok-soft: #1e3a2b;
+    --danger: #f28b82;
+    --danger-soft: #45272a;
+    --warn: #f2b544;
+    --warn-soft: #3f3220;
+    --shadow: 0 1px 2px rgba(0, 0, 0, .4);
+
+    --sc-thumb: rgba(237, 237, 241, .22);
+    --sc-thumb-hover: rgba(237, 237, 241, .36);
+  }
+}
+
+* { box-sizing: border-box; }
+
+/* app.js and the Go side toggle element.hidden; keep that authoritative even
+   where a component sets its own display value. */
+[hidden] { display: none !important; }
+
+html, body {
+  margin: 0;
+  padding: 0;
+  background: var(--bg);
+  color: var(--fg);
+}
+
+body {
+  min-height: 100vh;
+  font-family: var(--font);
+  font-size: 14px;
+  line-height: 1.6;
+  -webkit-font-smoothing: antialiased;
+}
+
+.app {
+  max-width: 720px;
+  margin: 0 auto;
+  padding: 28px;
+}
+
+/* --- header -------------------------------------------------------------- */
+
+.head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  margin-bottom: 24px;
+}
+
+.brand {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  min-width: 0;
+}
+
+.brand img {
+  display: block;
+  border-radius: var(--r-ctl);
+  flex: 0 0 auto;
+}
+
+.brand h1 {
+  margin: 0;
+  font-size: 18px;
+  font-weight: 600;
+  line-height: 1.3;
+}
+
+.brand .sub {
+  margin: 2px 0 0;
+  font-size: 12px;
+  line-height: 1.4;
+  color: var(--muted);
+}
+
+.badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: 24px;
+  padding: 0 11px;
+  border: 1px solid transparent;
+  border-radius: 999px;
+  font-size: 12px;
+  font-weight: 500;
+  line-height: 1;
+  white-space: nowrap;
+  flex: 0 0 auto;
+}
+
+.badge::before {
+  content: "";
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: currentColor;
+  flex: 0 0 auto;
+}
+
+.badge-on {
+  background: var(--ok-soft);
+  color: var(--ok);
+}
+
+.badge-off {
+  background: var(--card);
+  border-color: var(--line);
+  color: var(--muted);
+}
+
+/* --- cards --------------------------------------------------------------- */
+
+section.card {
+  background: var(--card);
+  border: 1px solid var(--line);
+  border-radius: var(--r-card);
+  box-shadow: var(--shadow);
+  padding: 20px;
+  margin: 0 0 16px;
+}
+
+section.card h2 {
+  margin: 0 0 12px;
+  font-size: 15px;
+  font-weight: 600;
+  line-height: 1.3;
+  color: var(--fg);
+}
+
+.subhead {
+  margin: 20px 0 8px;
+  font-size: 12px;
+  font-weight: 600;
+  line-height: 1.4;
+  color: var(--muted);
+}
+
+/* --- text helpers -------------------------------------------------------- */
+
+.hint {
+  margin: 10px 0 0;
+  font-size: 12px;
+  line-height: 1.6;
+  color: var(--muted);
+}
+
+.hint-warn { color: var(--warn); }
+
+/* --- progressive disclosure ---------------------------------------------- */
+
+.more-hint {
+  margin-top: 8px;
+}
+
+.more-hint > summary {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--muted);
+  cursor: pointer;
+  user-select: none;
+  list-style: none;
+  transition: color var(--t);
+}
+
+.more-hint > summary::-webkit-details-marker { display: none; }
+
+.more-hint > summary::before {
+  content: "▸";
+  font-size: 10px;
+  line-height: 1;
+  transition: transform var(--t);
+}
+
+.more-hint > summary:hover { color: var(--fg); }
+
+.more-hint[open] > summary::before { transform: rotate(90deg); }
+
+.more-hint > .hint {
+  margin: 6px 0 0;
+  padding: 8px 12px;
+  background: var(--card-2);
+  border-left: 2px solid var(--line);
+  border-radius: 0 6px 6px 0;
+  font-size: 12px;
+  line-height: 1.55;
+  color: var(--muted);
+}
+
+code {
+  font-family: var(--mono);
+  font-size: 13px;
+  color: var(--fg-2);
+  background: var(--card-2);
+  border: 1px solid var(--line-2);
+  border-radius: 6px;
+  padding: 2px 6px;
+  word-break: break-all;
+}
+
+/* --- banners ------------------------------------------------------------- */
+
+.banner {
+  margin: 12px 0 0;
+  padding: 10px 12px;
+  border: 1px solid transparent;
+  border-radius: var(--r-ctl);
+  font-size: 13px;
+  line-height: 1.55;
+  white-space: pre-wrap;
+}
+
+.banner-error { background: var(--danger-soft); color: var(--danger); }
+.banner-warn { background: var(--warn-soft); color: var(--warn); }
+.banner-ok { background: var(--ok-soft); color: var(--ok); }
+
+/* --- buttons ------------------------------------------------------------- */
+
+button {
+  height: 32px;
+  padding: 0 14px;
+  font: inherit;
+  font-size: 13px;
+  font-weight: 500;
+  line-height: 1;
+  color: var(--fg-2);
+  background: var(--card);
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  cursor: pointer;
+  flex: 0 0 auto;
+  transition: background var(--t), border-color var(--t), color var(--t), opacity var(--t);
+}
+
+button:hover { background: var(--card-2); color: var(--fg); }
+
+button.primary {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: var(--accent-fg);
+}
+
+button.primary:hover { background: var(--accent); color: var(--accent-fg); opacity: .9; }
+
+button.ghost {
+  background: transparent;
+  border-color: transparent;
+  color: var(--fg-2);
+}
+
+button.ghost:hover { background: var(--card-2); color: var(--fg); }
+
+button.danger {
+  background: var(--danger-soft);
+  border-color: transparent;
+  color: var(--danger);
+}
+
+button.danger:hover { background: var(--danger-soft); color: var(--danger); opacity: .9; }
+
+button:disabled { opacity: .55; cursor: default; }
+
+button:focus-visible,
+select:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+/* --- form controls ------------------------------------------------------- */
+
+input[type="text"],
+input[type="password"],
+input[type="number"],
+select {
+  height: 34px;
+  min-width: 0;
+  flex: 1 1 auto;
+  padding: 0 10px;
+  font: inherit;
+  font-size: 13px;
+  color: var(--fg);
+  background: var(--card);
+  border: 1px solid var(--line);
+  border-radius: var(--r-ctl);
+  outline: none;
+  transition: border-color var(--t), box-shadow var(--t);
+}
+
+input[type="text"]:focus,
+input[type="password"]:focus,
+input[type="number"]:focus,
+select:focus {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 2px var(--accent-soft);
+}
+
+input[type="radio"] {
+  appearance: none;
+  -webkit-appearance: none;
+  flex: 0 0 auto;
+  width: 16px;
+  height: 16px;
+  margin: 0;
+  padding: 0;
+  background: var(--card);
+  border: 1.5px solid var(--line);
+  border-radius: 50%;
+  cursor: pointer;
+  transition: border-color var(--t), background var(--t), box-shadow var(--t);
+}
+
+input[type="radio"]:checked {
+  background: var(--accent);
+  border-color: var(--accent);
+  box-shadow: inset 0 0 0 3px var(--card);
+}
+
+input[type="radio"]:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+.row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px;
+  margin-top: 12px;
+}
+
+.row label {
+  min-width: 84px;
+  font-size: 12px;
+  color: var(--muted);
+}
+
+/* --- mode / interface choice rows ---------------------------------------- */
+
+.mode-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin: 12px 0;
+}
+
+/* The radio dot sits inside the left padding of .mode-body via absolute
+   positioning on .mode, so the card spans the full width while keeping the
+   plain `input:checked + .mode-body` sibling selector for older WebKitGTK. */
+.mode {
+  position: relative;
+  display: flex;
+  align-items: stretch;
+  cursor: pointer;
+}
+
+.mode > input[type="radio"] {
+  position: absolute;
+  left: 14px;
+  top: 16px;
+  z-index: 1;
+}
+
+.mode-body {
+  flex: 1 1 auto;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  padding: 13px 14px 13px 40px;
+  background: var(--card-2);
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  transition: background var(--t), border-color var(--t), box-shadow var(--t);
+}
+
+.mode:hover .mode-body {
+  background: var(--card);
+  border-color: color-mix(in srgb, var(--accent) 30%, var(--line));
+}
+
+.mode input:checked + .mode-body {
+  background: var(--accent-soft);
+  border-color: var(--accent);
+  box-shadow: 0 0 0 1px color-mix(in srgb, var(--accent) 25%, transparent);
+}
+
+.mode input:disabled + .mode-body { opacity: .55; }
+
+.mode input:disabled ~ .mode-body { cursor: not-allowed; }
+
+/* Progressive enhancement only: older WebKitGTK (before :has()) keeps the
+   default cursor, everything else above still works. */
+@supports selector(:has(*)) {
+  .mode:has(input:disabled) { cursor: not-allowed; }
+}
+
+.mode-title { font-size: 14px; font-weight: 500; line-height: 1.35; color: var(--fg); }
+.mode-desc { font-size: 12px; line-height: 1.5; color: var(--muted); }
+
+.iface-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin: 12px 0;
+}
+
+.iface {
+  position: relative;
+  display: flex;
+  align-items: stretch;
+  cursor: pointer;
+}
+
+.iface > input[type="radio"] {
+  position: absolute;
+  left: 14px;
+  top: 50%;
+  transform: translateY(-50%);
+  z-index: 1;
+}
+
+.iface-body {
+  flex: 1 1 auto;
+  min-width: 0;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 14px 10px 40px;
+  font-size: 13px;
+  background: var(--card-2);
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  transition: background var(--t), border-color var(--t), box-shadow var(--t);
+}
+
+.iface:hover .iface-body {
+  background: var(--card);
+  border-color: color-mix(in srgb, var(--accent) 30%, var(--line));
+}
+
+.iface input:checked + .iface-body {
+  background: var(--accent-soft);
+  border-color: var(--accent);
+  box-shadow: 0 0 0 1px color-mix(in srgb, var(--accent) 25%, transparent);
+}
+
+.iface input:disabled ~ .iface-body { cursor: not-allowed; }
+
+@supports selector(:has(*)) {
+  .iface:has(input:disabled) { cursor: not-allowed; }
+}
+
+.iface-muted { opacity: .62; }
+.iface-label { min-width: 200px; color: var(--fg-2); }
+
+.tag {
+  font-style: normal;
+  font-size: 12px;
+  line-height: 1;
+  padding: 4px 8px;
+  border-radius: 999px;
+  background: var(--accent-soft);
+  border: 1px solid transparent;
+  color: var(--accent);
+}
+
+/* --- key/value rows ------------------------------------------------------ */
+
+.kv {
+  display: grid;
+  grid-template-columns: 168px minmax(0, 1fr);
+  margin: 0;
+}
+
+.kv dt {
+  padding: 10px 0;
+  font-size: 13px;
+  color: var(--muted);
+  border-top: 1px solid var(--line-2);
+}
+
+/* Multi-address block in 运行状态: one line per listener, primary first. The
+   buttons after it act on the primary only, so the lines are not clickable. */
+.hub-urls {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  min-width: 0;
+  width: 100%;
+}
+
+.hub-url {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+
+.hub-url-primary code {
+  font-weight: 600;
+}
+
+.hint-inline {
+  flex-basis: 100%;
+  margin: 0;
+}
+
+.kv dd {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  margin: 0;
+  padding: 9px 0;
+  font-size: 14px;
+  color: var(--fg);
+  border-top: 1px solid var(--line-2);
+  min-width: 0;
+}
+
+.kv dt:first-of-type,
+.kv dd:first-of-type {
+  padding-top: 0;
+  border-top: 0;
+}
+
+.kv button.ghost {
+  height: 26px;
+  padding: 0 10px;
+  font-size: 12px;
+}
+
+/* --- run mode / remote Hub ---------------------------------------------- */
+
+.remote-current {
+  margin: 0;
+  font-size: 14px;
+  color: var(--fg);
+  word-break: break-all;
+}
+
+.remote-current code { font-size: 13px; }
+
+/* --- pairing code and paired devices ------------------------------------ */
+
+.pairing-code {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: center;
+  gap: 24px;
+  margin-top: 14px;
+  padding: 20px;
+  background: var(--card-2);
+  border: 1px solid var(--line);
+  border-radius: 12px;
+}
+
+.pairing-code-meta {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 10px;
+  text-align: center;
+}
+
+.pairing-code-label {
+  font-size: 12px;
+  font-weight: 600;
+  letter-spacing: .5px;
+  color: var(--muted);
+}
+
+.pairing-code-value {
+  margin: 0;
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  font-family: var(--mono);
+  font-size: 26px;
+  font-weight: 600;
+  line-height: 1;
+  font-variant-numeric: tabular-nums;
+  color: var(--accent);
+}
+
+.pairing-digit {
+  display: inline-grid;
+  place-items: center;
+  width: 44px;
+  height: 52px;
+  background: var(--card);
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  box-shadow: var(--shadow);
+  color: var(--accent);
+}
+
+.pairing-code .hint { margin-top: 0; }
+
+/* The QR code is only shown while a code is live. A white plate keeps it
+   scannable in the dark theme, and the size is capped so the card does not
+   jump around between addresses that carry a URL and those that do not. */
+.pairing-qr {
+  display: block;
+  width: 152px;
+  height: 152px;
+  margin: 0;
+  padding: 8px;
+  background: #fff;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  box-shadow: var(--shadow);
+  image-rendering: pixelated;
+  flex: 0 0 auto;
+}
+
+.pairing-qr[hidden] { display: none; }
+
+.device-list {
+  list-style: none;
+  margin: 12px 0 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.device-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 10px 12px;
+  background: var(--card-2);
+  border: 1px solid var(--line-2);
+  border-radius: 10px;
+}
+
+.device-body {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.device-name {
+  font-size: 14px;
+  color: var(--fg);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.device-meta {
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.device-item button {
+  height: 26px;
+  padding: 0 12px;
+  font-size: 12px;
+  border-radius: 999px;
+}
+
+/* --- bound URLs --------------------------------------------------------- */
+
+.url-list {
+  list-style: none;
+  margin: 12px 0 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.url-item {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 12px;
+  font-size: 13px;
+  background: var(--card-2);
+  border: 1px solid var(--line-2);
+  border-radius: 10px;
+}
+
+.url-label {
+  font-size: 12px;
+  color: var(--muted);
+}
+
+/* --- footer ------------------------------------------------------------- */
+
+.foot {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px;
+  margin-top: 24px;
+}
+
+.cfg {
+  margin-left: auto;
+  max-width: 100%;
+  font-size: 12px;
+  line-height: 1.6;
+  color: var(--muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* --- narrow windows ----------------------------------------------------- */
+
+@media (max-width: 560px) {
+  .app { padding: 20px 16px 32px; }
+  .head { flex-wrap: wrap; }
+
+  .kv { grid-template-columns: minmax(0, 1fr); }
+
+  .kv dt {
+    padding-bottom: 0;
+    border-top: 1px solid var(--line-2);
+  }
+
+  .kv dd {
+    padding-top: 0;
+    border-top: 0;
+  }
+
+  .kv dt:first-of-type { border-top: 0; }
+
+  .iface-label { min-width: 0; }
+  .cfg { margin-left: 0; }
+}
+
+/* Also stops the scrollbar colour transition, which is declared on body. */
+@media (prefers-reduced-motion: reduce) {
+  * { transition: none !important; }
+}
+
+/* ---- window chrome: the settings window is frameless, so this bar is the
+   only title bar it has (drag region + the three window buttons) ---- */
+.titlebar {
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  height: 36px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 0 6px 0 12px;
+  /* Page tone, not card tone: the bar and the page below it are one surface. */
+  background: var(--bg);
+  border-bottom: 1px solid var(--line-2);
+  z-index: 100;
+  --wails-draggable: drag;
+  user-select: none;
+  -webkit-user-select: none;
+}
+
+/* The bar above is fixed, so the page must scroll in its own box that starts
+   below it. While the document itself scrolled, the scrollbar was painted
+   across the window buttons and swallowed their clicks. */
+html {
+  height: 100%;
+  overflow: hidden;
+}
+
+body {
+  /* 36px is the bar; `* { box-sizing: border-box }` above keeps the scroll box
+     at “viewport − bar”, so its bottom edge lands on the viewport bottom. */
+  height: calc(100% - 36px);
+  min-height: 0;
+  margin-top: 36px;
+  overflow-x: hidden;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  scrollbar-gutter: stable;
+}
+
+/* Scrollbar: the standard properties give the window a native thin bar in the
+   theme's text tone, easing to the hover tone. */
+body {
+  scrollbar-width: thin;
+  scrollbar-color: var(--sc-thumb) transparent;
+  transition: scrollbar-color var(--t);
+}
+
+body:hover {
+  scrollbar-color: var(--sc-thumb-hover) transparent;
+}
+
+.tb-mark {
+  width: 18px;
+  height: 18px;
+  border-radius: 5px;
+  background: var(--accent);
+  display: grid;
+  place-items: center;
+  flex: 0 0 auto;
+}
+
+.tb-mark svg {
+  width: 12px;
+  height: 12px;
+  display: block;
+}
+
+.tb-spacer {
+  flex: 1 1 auto;
+}
+
+.tb-btns {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  --wails-draggable: none;
+}
+
+.tb-btns button {
+  width: 34px;
+  height: 28px;
+  padding: 0;
+  display: grid;
+  place-items: center;
+  border: 0;
+  border-radius: 7px;
+  background: transparent;
+  color: inherit;
+  cursor: default;
+  --wails-draggable: none;
+}
+
+.tb-btns button:hover {
+  background: var(--card-2);
+}
+
+.tb-btns button.tb-close:hover {
+  background: var(--danger);
+  color: #ffffff;
+}
+
+/* --- auto bind switch ---------------------------------------------------- */
+
+/* One checkbox row above the manual single/dual choice. It keeps the native
+   checkbox (the one control whose state is obviously binary) and borrows the
+   .mode-body card look so it reads as part of the same choice block. */
+.check {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  margin: 12px 0;
+  padding: 14px;
+  font-size: 14px;
+  line-height: 1.35;
+  color: var(--fg);
+  background: var(--card-2);
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  cursor: pointer;
+  transition: background var(--t), border-color var(--t);
+}
+
+.check:hover { background: var(--card); }
+
+.check input[type="checkbox"] {
+  flex: 0 0 auto;
+  width: 16px;
+  height: 16px;
+  margin: 1px 0 0;
+  accent-color: var(--accent);
+  cursor: pointer;
+}
+
+.check input[type="checkbox"]:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}

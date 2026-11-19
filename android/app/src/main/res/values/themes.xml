@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <style name="Theme.FlowDrop" parent="android:Theme.Material.Light.NoActionBar">
+        <item name="android:statusBarColor">@android:color/transparent</item>
+        <item name="android:windowLightStatusBar">true</item>
+        <!-- The process-start window and the Android 12+ splash use this colour,
+             so the app never shows an unstyled white gap before the boot
+             spinner. It is also the Compose background. -->
+        <item name="android:windowBackground">@color/window_background</item>
+    </style>
+</resources>

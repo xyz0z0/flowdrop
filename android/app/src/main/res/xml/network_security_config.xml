@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="utf-8"?>
+<network-security-config>
+    <!-- Cleartext HTTP is deliberately permitted so the app can talk to a Hub
+         on a trusted home Wi-Fi without TLS. The app never disables TLS
+         certificate validation: HTTPS Hubs are always verified normally. -->
+    <base-config cleartextTrafficPermitted="true">
+        <trust-anchors>
+            <certificates src="system" />
+        </trust-anchors>
+    </base-config>
+</network-security-config>

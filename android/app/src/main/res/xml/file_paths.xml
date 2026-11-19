@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="utf-8"?>
+<paths>
+    <!-- Downloaded attachments the user explicitly saves, and APKs handed to the
+         system package installer. Never the app's private session storage. -->
+    <cache-path name="downloads" path="downloads/" />
+    <files-path name="exports" path="exports/" />
+    <external-files-path name="external_downloads" path="Downloads/" />
+</paths>
