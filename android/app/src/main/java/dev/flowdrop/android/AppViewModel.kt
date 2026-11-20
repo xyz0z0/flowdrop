@@ -40,6 +40,7 @@ import dev.flowdrop.android.io.DownloadTarget
 import dev.flowdrop.android.io.UriSources
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.NonCancellable
@@ -51,6 +52,7 @@ import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.io.File
+import java.io.IOException
 import java.util.UUID
 import java.util.concurrent.ConcurrentHashMap
 
@@ -93,6 +95,15 @@ data class UploadTask(
     val fraction: Float get() = if (size > 0) (loaded.toFloat() / size).coerceIn(0f, 1f) else 0f
 }
 
+/**
+ * Which action a download belongs to.
+ *
+ * Saving to Downloads and staging an APK for the installer are separate
+ * downloads even when they stream the same item, so neither one's state can
+ * stand in for the other's.
+ */
+enum class DownloadKind { SAVE, INSTALL }
+
 data class DownloadTask(
     val key: String,
     val itemId: String,
@@ -103,6 +114,7 @@ data class DownloadTask(
     val error: String? = null,
     /** Computer this transfer was started for; its rows stay with that Hub. */
     val hubId: String = "",
+    val kind: DownloadKind = DownloadKind.SAVE,
 ) {
     val fraction: Float
         get() = total?.takeIf { it > 0 }?.let { (loaded.toFloat() / it).coerceIn(0f, 1f) } ?: 0f
@@ -1232,7 +1244,10 @@ class AppViewModel(
         val pending = uploadJobs.entries.filter { it.value.hubId == hubId }.map { it.key }
         pending.forEach { key -> uploadJobs.remove(key)?.job?.cancel() }
         val pendingDownloads = downloadJobs.entries.filter { it.value.hubId == hubId }.map { it.key }
-        pendingDownloads.forEach { key -> downloadJobs.remove(key)?.job?.cancel() }
+        // Only cancel: each job's own finally releases its slot, the same rule
+        // cancelDownload follows, so a cancelled transfer never leaves a key
+        // pointing at a job that is no longer running.
+        pendingDownloads.forEach { key -> downloadJobs[key]?.job?.cancel() }
         publishTransfers()
         if (pending.isNotEmpty() || pendingDownloads.isNotEmpty()) {
             notice?.let { toast(it, error = true) }
@@ -2151,16 +2166,23 @@ class AppViewModel(
         val api = client ?: return
         val token = requestSeq
         val snapshot = _state.value.items
+        val index = snapshot.indexOfFirst { it.id == id }
+        // A second tap on a row that is already gone must not send another
+        // delete: the optimistic removal below is what makes it gone, so a
+        // missing row means this id is already being deleted.
+        if (index < 0) return
         _state.update { s -> s.copy(items = s.items.filterNot { it.id == id }) }
         viewModelScope.launch {
             try {
                 withContext(Dispatchers.IO) { api.delete(id) }
-                toast("已删除")
+                // Deleting several rows one after another is one action from the
+                // user's point of view, so its notice replaces itself.
+                toast("已删除", replaceLastSame = true)
             } catch (e: Exception) {
-                // Restoring the snapshot would resurrect the previous category's
-                // list, so only the category that owns it may roll back.
+                // Only the category that owns this row may roll back, and never
+                // the whole list: a delete that succeeded in parallel stays gone.
                 if (requestSeq == token && isLive(hubId, api)) {
-                    _state.update { s -> s.copy(items = snapshot) }
+                    restoreDeletedItem(id, index, snapshot)
                 }
                 if (e is ApiException && e.isUnauthorized) {
                     onUnauthorized(hubId, api)
@@ -2168,6 +2190,28 @@ class AppViewModel(
                     toast(friendly(e), true)
                 }
             }
+        }
+    }
+
+    /**
+     * Puts back the single row whose delete failed.
+     *
+     * [snapshot] is the list the row was removed from and [index] its position
+     * there. The row is re-inserted after the neighbour that preceded it, so an
+     * optimistic list keeps its order without resurrecting rows removed by other
+     * deletes that did succeed.
+     */
+    private fun restoreDeletedItem(id: String, index: Int, snapshot: List<Item>) {
+        val removed = snapshot.getOrNull(index)?.takeIf { it.id == id } ?: return
+        _state.update { s ->
+            if (s.items.any { it.id == id }) return@update s
+            val previousId = snapshot.getOrNull(index - 1)?.id
+            val afterPrevious = previousId
+                ?.let { prev -> s.items.indexOfFirst { it.id == prev }.takeIf { at -> at >= 0 }?.plus(1) }
+                ?: index.coerceIn(0, s.items.size)
+            val items = s.items.toMutableList()
+            items.add(afterPrevious.coerceIn(0, items.size), removed)
+            s.copy(items = items)
         }
     }
 
@@ -2261,22 +2305,35 @@ class AppViewModel(
         val hubId = activeHubId ?: return
         val api = client ?: return
         val blob = item.blob ?: return
-        val key = "save:${item.id}"
+        val key = "save:$hubId:${item.id}"
         if (downloadJobs.containsKey(key)) return
+        // A finished save is terminal for this item on this computer: the row is
+        // already in Downloads and the button says so. A failed or cancelled one
+        // left no row behind, so those stay retryable.
+        if (downloadTasks.of(hubId).any { it.key == key && it.status == TaskStatus.DONE }) return
         val task = DownloadTask(
             key = key,
             itemId = item.id,
             name = blob.name,
             total = blob.sizeBytes,
             hubId = hubId,
+            kind = DownloadKind.SAVE,
         )
         downloadTasks.put(task)
         publishTransfers()
-        val job = viewModelScope.launch {
-            val target = DownloadTarget.create(app, blob.name, blob.contentType)
+        // Started only after its slot is registered: the main dispatcher may run
+        // the body up to its first suspension inside this call, and a body that
+        // fails immediately (destination creation) would otherwise reach its
+        // finally before the registration below and leave a dead job behind.
+        val job = viewModelScope.launch(start = CoroutineStart.LAZY) {
+            var target: DownloadTarget? = null
             try {
+                // Creating the destination is part of the transfer: if it fails,
+                // the task fails instead of reporting a file that never existed.
+                val created = DownloadTarget.create(app, blob.name, blob.contentType)
+                target = created
                 withContext(Dispatchers.IO) {
-                    target.openSink().use { sink ->
+                    created.openSink().use { sink ->
                         api.download(item.id, sink) { loaded, total ->
                             // Called from the IO dispatcher; updateDownload hops
                             // through the thread-safe transfer book.
@@ -2284,18 +2341,19 @@ class AppViewModel(
                         }
                     }
                 }
-                (target as? DownloadTarget.MediaStoreTarget)?.finish(true)
+                // Closing the stream only flushed the bytes; MediaStore still has
+                // to accept the row before the file is visible in Downloads.
+                val published = (created as? DownloadTarget.MediaStoreTarget)?.finish(true) ?: true
+                if (!published) throw IOException("cannot publish Downloads entry")
                 updateDownload(key) { it.copy(status = TaskStatus.DONE) }
-                toast(app.getString(R.string.saved_to_downloads, target.location))
+                toast(app.getString(R.string.saved_to_downloads, created.location))
             } catch (e: CancellationException) {
-                (target as? DownloadTarget.MediaStoreTarget)?.finish(false)
-                (target as? DownloadTarget.AppFileTarget)?.file()?.delete()
+                discardTarget(target)
                 downloadTasks.remove(key)
                 publishTransfers()
                 throw e
             } catch (e: Exception) {
-                (target as? DownloadTarget.MediaStoreTarget)?.finish(false)
-                (target as? DownloadTarget.AppFileTarget)?.file()?.delete()
+                discardTarget(target)
                 if (e is ApiException && e.isUnauthorized) onUnauthorized(hubId, api)
                 updateDownload(key) { it.copy(status = TaskStatus.FAILED, error = friendly(e)) }
                 toast("${app.getString(R.string.error_save_failed)}：${friendly(e)}", true)
@@ -2304,6 +2362,7 @@ class AppViewModel(
             }
         }
         downloadJobs[key] = HubJob(hubId, job)
+        job.start()
     }
 
     /**
@@ -2314,7 +2373,7 @@ class AppViewModel(
         val hubId = activeHubId ?: return
         val api = client ?: return
         val blob = item.blob ?: return
-        val key = "apk:${item.id}"
+        val key = "apk:$hubId:${item.id}"
         if (downloadJobs.containsKey(key)) return
         val task = DownloadTask(
             key = key,
@@ -2322,10 +2381,13 @@ class AppViewModel(
             name = blob.name,
             total = blob.sizeBytes,
             hubId = hubId,
+            kind = DownloadKind.INSTALL,
         )
         downloadTasks.put(task)
         publishTransfers()
-        val job = viewModelScope.launch {
+        // Same ordering as a save: register the job before it can run, so an
+        // immediately failing body cannot clear its own slot too early.
+        val job = viewModelScope.launch(start = CoroutineStart.LAZY) {
             val dir = File(app.cacheDir, "downloads").apply { mkdirs() }
             val file = File(dir, DownloadTarget.sanitize(blob.name))
             try {
@@ -2355,12 +2417,31 @@ class AppViewModel(
             }
         }
         downloadJobs[key] = HubJob(hubId, job)
+        job.start()
     }
 
     fun cancelDownload(key: String) {
-        downloadJobs.remove(key)?.job?.cancel()
+        // The job keeps its slot registered until its own finally releases it: a
+        // retry started here could publish a task that the cancelled transfer's
+        // cleanup would then delete. Only the task row drops immediately, so the
+        // user still sees the cancel at once.
+        downloadJobs[key]?.job?.cancel()
         downloadTasks.remove(key)
         publishTransfers()
+    }
+
+    /**
+     * Releases a download destination that never produced a finished file.
+     *
+     * A MediaStore row is deleted so its pending entry does not linger as a
+     * broken zero-byte file, and an app-storage export is removed the same way.
+     */
+    private fun discardTarget(target: DownloadTarget?) {
+        when (target) {
+            is DownloadTarget.MediaStoreTarget -> target.finish(false)
+            is DownloadTarget.AppFileTarget -> target.file()?.delete()
+            null -> Unit
+        }
     }
 
     fun dismissDownload(key: String) {
@@ -2550,9 +2631,23 @@ class AppViewModel(
 
     // ---------- toasts ----------
 
-    fun toast(message: String, error: Boolean = false) {
+    /**
+     * Shows a transient notice.
+     *
+     * [replaceLastSame] makes a repeated identical outcome (deleting several rows
+     * in a row) take the place of every notice it repeats, wherever those sit in
+     * the visible stack; notices with other text or another severity keep their
+     * own slot.
+     */
+    fun toast(message: String, error: Boolean = false, replaceLastSame: Boolean = false) {
         _state.update { s ->
-            s.copy(toasts = (s.toasts + Toast(System.nanoTime(), message, error)).takeLast(4))
+            val repeated = replaceLastSame && s.toasts.any { it.text == message && it.error == error }
+            val kept = if (repeated) {
+                s.toasts.filterNot { it.text == message && it.error == error }
+            } else {
+                s.toasts
+            }
+            s.copy(toasts = (kept + Toast(System.nanoTime(), message, error)).takeLast(4))
         }
     }
 

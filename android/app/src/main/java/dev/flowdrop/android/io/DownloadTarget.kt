@@ -51,13 +51,22 @@ sealed interface DownloadTarget {
                 ?: throw java.io.IOException("cannot open Downloads output")
         }
 
-        fun finish(success: Boolean) {
-            if (!::uri.isInitialized) return
-            val values = ContentValues().apply {
-                put(MediaStore.Downloads.IS_PENDING, if (success) 0 else 1)
+        /**
+         * Finalises the pending MediaStore row.
+         *
+         * Returns whether the store actually published the row: an update that
+         * touched no row means the file is not visible in Downloads, so the
+         * caller must not report it as saved. A discarded transfer has nothing
+         * to publish and always returns true.
+         */
+        fun finish(success: Boolean): Boolean {
+            if (!::uri.isInitialized) return success
+            if (!success) {
+                runCatching { resolver.delete(uri, null, null) }
+                return true
             }
-            resolver.update(uri, values, null, null)
-            if (!success) runCatching { resolver.delete(uri, null, null) }
+            val values = ContentValues().apply { put(MediaStore.Downloads.IS_PENDING, 0) }
+            return runCatching { resolver.update(uri, values, null, null) > 0 }.getOrDefault(false)
         }
     }
 

@@ -1064,6 +1064,24 @@ button:disabled {
   color: var(--danger-deep);
 }
 
+/* 已发起下载：原生下载不回报落盘结果，主入口禁用，重试走次级入口。 */
+.item-actions .download-started,
+.lightbox-bar .download-started {
+  opacity: 0.55;
+  cursor: default;
+  pointer-events: none;
+}
+.item-actions .download-retry,
+.lightbox-bar .download-retry {
+  color: var(--accent-deep);
+}
+.item-actions .download-retry:hover,
+.lightbox-bar .download-retry:hover {
+  background: var(--card-2);
+  color: var(--accent-deep);
+  text-decoration: underline;
+}
+
 .confirm {
   display: inline-flex;
   gap: 8px;

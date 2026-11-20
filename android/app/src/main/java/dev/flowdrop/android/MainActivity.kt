@@ -12,9 +12,14 @@ import androidx.activity.enableEdgeToEdge
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.activity.viewModels
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.WindowInsets
+import androidx.compose.foundation.layout.WindowInsetsSides
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.only
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.safeDrawing
+import androidx.compose.foundation.layout.windowInsetsPadding
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
@@ -178,7 +183,7 @@ private fun FlowDropRoot(viewModel: AppViewModel) {
     var scannerOpen by rememberSaveable { mutableStateOf(false) }
     var cameraPermissionDenied by rememberSaveable { mutableStateOf(false) }
     // Computer list opened from the pairing or boot screen; the inbox hosts its
-    // own copy because its top bar owns that entry.
+    // own copy because its device bar owns that entry.
     var hubPickerOpen by rememberSaveable { mutableStateOf(false) }
     // Offline queue, reachable from the pairing screen too: queued items belong
     // to computers that may not be paired (or reachable) at all right now.
@@ -221,13 +226,27 @@ private fun FlowDropRoot(viewModel: AppViewModel) {
                     if (state.savedHubs.size > 1) {
                         TextButton(
                             onClick = { hubPickerOpen = true },
-                            modifier = Modifier.align(Alignment.TopEnd).padding(top = 32.dp, end = 12.dp),
+                            // Below the real status bar / cutout instead of a
+                            // fixed offset: the boot screen itself applies no
+                            // top inset, so this is the only one on that edge.
+                            modifier = Modifier
+                                .align(Alignment.TopEnd)
+                                .windowInsetsPadding(WindowInsets.safeDrawing.only(WindowInsetsSides.Top))
+                                .padding(top = 8.dp, end = 12.dp),
                         ) {
                             Text(stringResource(R.string.hub_switch_entry))
                         }
                     }
                 }
-                Phase.LOGIN -> Column(modifier = Modifier.fillMaxSize()) {
+                // The pairing screen runs edge to edge: the whole column (hub
+                // strip, queue entry and form) starts below the real top system
+                // area. Its own IME handling stays inside LoginScreen, so the
+                // keyboard inset is not applied twice.
+                Phase.LOGIN -> Column(
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .windowInsetsPadding(WindowInsets.safeDrawing.only(WindowInsetsSides.Top)),
+                ) {
                     if (state.savedHubs.isNotEmpty()) {
                         // Also covers the offline case: pairing is shown for the
                         // selected computer, other paired computers stay one tap

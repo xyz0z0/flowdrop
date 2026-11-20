@@ -66,8 +66,11 @@ fun HubConnDot(state: ConnState) {
 
 /**
  * Current computer entry: name, optional connection state and the "switch"
- * affordance. The inbox top bar, the pairing screen and the boot screen all use
- * it, so tapping a computer name always opens the same computer list.
+ * affordance. The inbox device bar, the pairing screen and the boot screen all
+ * use it, so tapping a computer name always opens the same computer list.
+ *
+ * [secondaryContent] adds inline detail to the state line (the inbox shows the
+ * local device name there) without giving the entry a second owner.
  */
 @Composable
 fun CurrentHubEntry(
@@ -75,6 +78,7 @@ fun CurrentHubEntry(
     conn: ConnState? = null,
     onOpen: (() -> Unit)? = null,
     modifier: Modifier = Modifier,
+    secondaryContent: (@Composable () -> Unit)? = null,
 ) {
     val open = if (onOpen != null) Modifier.clickable(onClick = onOpen) else Modifier
     Row(
@@ -88,15 +92,18 @@ fun CurrentHubEntry(
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis,
             )
-            if (conn != null) {
+            if (conn != null || secondaryContent != null) {
                 Row(verticalAlignment = Alignment.CenterVertically) {
-                    HubConnDot(conn)
-                    Spacer(Modifier.width(5.dp))
-                    Text(
-                        ConnLabel.text(conn),
-                        style = MaterialTheme.typography.labelMedium,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    )
+                    if (conn != null) {
+                        HubConnDot(conn)
+                        Spacer(Modifier.width(5.dp))
+                        Text(
+                            ConnLabel.text(conn),
+                            style = MaterialTheme.typography.labelMedium,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    }
+                    secondaryContent?.invoke()
                 }
             }
         }
@@ -188,8 +195,8 @@ fun HubChoiceList(
 }
 
 /**
- * Computer list opened from the inbox top bar, the pairing screen or the boot
- * screen. "添加电脑" reuses the existing QR/manual pairing form.
+ * Computer list opened from the inbox device bar, the pairing screen or the
+ * boot screen. "添加电脑" reuses the existing QR/manual pairing form.
  */
 @Composable
 fun HubPickerDialog(

@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   api,
   ApiError,
@@ -45,6 +45,11 @@ interface Toast {
   tone: 'ok' | 'error';
 }
 
+const TOAST_MS = 3500;
+// A double-click dispatches two clicks. A second download request for the same
+// item inside this window is treated as the second half of that double-click.
+const DOUBLE_CLICK_MS = 1200;
+
 export function App() {
   const [session, setSession] = useState<SessionInfo | null>(null);
   const [booting, setBooting] = useState(true);
@@ -83,11 +88,39 @@ export function App() {
   const [presenceOpen, setPresenceOpen] = useState(false);
   const presenceSeq = useRef(0);
 
-  const notify = (text: string, tone: Toast['tone'] = 'ok') => {
+  // `merge` replaces a toast with the same text and tone instead of stacking a
+  // duplicate (used for consecutive deletes); other toasts are left alone and
+  // every toast still dismisses on its own timer.
+  const notify = (text: string, tone: Toast['tone'] = 'ok', merge = false) => {
     const id = Date.now() + Math.random();
-    setToasts((t) => [...t, { id, text, tone }]);
-    window.setTimeout(() => setToasts((t) => t.filter((x) => x.id !== id)), 3500);
+    setToasts((t) => {
+      if (merge && t.some((x) => x.text === text && x.tone === tone)) return t;
+      return [...t, { id, text, tone }];
+    });
+    // A no-op filter when this toast was merged into the existing one.
+    window.setTimeout(() => setToasts((t) => t.filter((x) => x.id !== id)), TOAST_MS);
   };
+
+  // Native downloads never report whether the file landed, so an item only
+  // records "started". Kept for this page identity: survives filter/category
+  // changes, dropped on logout or a Hub switch. List and preview share it.
+  const [downloadsStarted, setDownloadsStarted] = useState<ReadonlySet<string>>(new Set());
+  const downloadClaims = useRef(new Map<string, number>());
+
+  /** Claims a download attempt; a repeat inside [DOUBLE_CLICK_MS] is refused. */
+  const claimDownload = useCallback((id: string): boolean => {
+    const now = Date.now();
+    const last = downloadClaims.current.get(id);
+    if (last !== undefined && now - last < DOUBLE_CLICK_MS) return false;
+    downloadClaims.current.set(id, now);
+    // Swap the native anchor for the disabled entry one task later, so the
+    // browser's default download action still runs on the attached anchor. The
+    // ref above already blocks a second click before this state lands.
+    window.setTimeout(() => {
+      setDownloadsStarted((prev) => (prev.has(id) ? prev : new Set(prev).add(id)));
+    }, 0);
+    return true;
+  }, []);
 
   useEffect(() => {
     let alive = true;
@@ -211,6 +244,9 @@ export function App() {
     setOnline(null);
     setPresenceStale(false);
     setPresenceOpen(false);
+    // Started-download state belongs to the identity that started it.
+    downloadClaims.current.clear();
+    setDownloadsStarted((prev) => (prev.size === 0 ? prev : new Set<string>()));
   }, [identity]);
 
   // First authenticated load. Socket open/reconnect/foreground arrive through
@@ -324,7 +360,7 @@ export function App() {
     setItems((prev) => prev.filter((it) => it.id !== id));
     try {
       await api.remove(id);
-      notify('已删除');
+      notify('已删除', 'ok', true);
     } catch (err) {
       // Restoring the snapshot would resurrect the previous category's list.
       if (requestSeq.current === token) setItems(snapshot);
@@ -345,6 +381,9 @@ export function App() {
     setOnline(null);
     setPresenceStale(false);
     setPresenceOpen(false);
+    // Downloads belonged to the session that is ending.
+    downloadClaims.current.clear();
+    setDownloadsStarted(new Set<string>());
     setSession({ authenticated: false });
   };
 
@@ -528,6 +567,8 @@ export function App() {
                   item={item}
                   onDelete={onDelete}
                   notify={notify}
+                  downloadStarted={downloadsStarted.has(item.id)}
+                  onDownload={claimDownload}
                 />
               ))}
             </ul>

@@ -1,4 +1,4 @@
-import { memo, useEffect, useRef, useState, type RefObject } from 'react';
+import { memo, useEffect, useRef, useState, type MouseEvent, type RefObject } from 'react';
 import { api, type Item } from './api';
 import { copyFailureHint, copyText, type CopyFailureReason } from './clipboard';
 import { formatBytes } from './Composer';
@@ -8,6 +8,82 @@ interface Props {
   item: Item;
   onDelete: (id: string) => Promise<void> | void;
   notify: (text: string, tone?: 'ok' | 'error') => void;
+  /** Shared per-item download state; the list card and the preview both read it. */
+  downloadStarted: boolean;
+  /** Claims a download attempt; false means this click is a repeat and is dropped. */
+  onDownload: (id: string) => boolean;
+}
+
+function DownloadIcon() {
+  return (
+    <svg
+      width="13"
+      height="13"
+      viewBox="0 0 16 16"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="1.6"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      aria-hidden="true"
+    >
+      <path d="M8 2.2v8.2" />
+      <path d="m4.8 7.4 3.2 3.2 3.2-3.2" />
+      <path d="M2.6 13.4h10.8" />
+    </svg>
+  );
+}
+
+interface DownloadActionProps {
+  url: string;
+  fileName: string;
+  started: boolean;
+  /** "下载" / "下载原图" — the untouched native anchor's label. */
+  label: string;
+  /** Base classes for the primary entry (idle anchor and started state). */
+  primaryClassName: string;
+  icon?: boolean;
+  onDownload: () => boolean;
+}
+
+/**
+ * Native `<a href download>` keeps the browser/WebView download and its
+ * filename. Once started, the entry is disabled and "重试下载" stays available.
+ */
+function DownloadAction({
+  url,
+  fileName,
+  started,
+  label,
+  primaryClassName,
+  icon = false,
+  onDownload,
+}: DownloadActionProps) {
+  const click = (e: MouseEvent<HTMLAnchorElement>) => {
+    // Only a repeated click (the second half of a double-click) is swallowed;
+    // the first one always reaches the browser's native download.
+    if (!onDownload()) e.preventDefault();
+  };
+  return (
+    <>
+      {started ? (
+        <span className={`${primaryClassName} download-started`} aria-disabled="true">
+          {icon && <DownloadIcon />}
+          已发起下载
+        </span>
+      ) : (
+        <a className={primaryClassName} href={url} download={fileName} onClick={click}>
+          {icon && <DownloadIcon />}
+          {label}
+        </a>
+      )}
+      {started && (
+        <a className="ghost button download-retry" href={url} download={fileName} onClick={click}>
+          重试下载
+        </a>
+      )}
+    </>
+  );
 }
 
 function hostOf(raw: string): string {
@@ -107,7 +183,13 @@ function useFoldState(
   return fold;
 }
 
-export const ItemCard = memo(function ItemCard({ item, onDelete, notify }: Props) {
+export const ItemCard = memo(function ItemCard({
+  item,
+  onDelete,
+  notify,
+  downloadStarted,
+  onDownload,
+}: Props) {
   const [previewOpen, setPreviewOpen] = useState(false);
   // Per-item: survives re-renders and event-stream updates of the same item.
   const [textExpanded, setTextExpanded] = useState(false);
@@ -337,28 +419,15 @@ export const ItemCard = memo(function ItemCard({ item, onDelete, notify }: Props
           </a>
         )}
         {item.blob && (
-          <a
-            className="ghost button action-primary"
-            href={api.downloadUrl(item.id)}
-            download={item.blob.name}
-          >
-            <svg
-              width="13"
-              height="13"
-              viewBox="0 0 16 16"
-              fill="none"
-              stroke="currentColor"
-              strokeWidth="1.6"
-              strokeLinecap="round"
-              strokeLinejoin="round"
-              aria-hidden="true"
-            >
-              <path d="M8 2.2v8.2" />
-              <path d="m4.8 7.4 3.2 3.2 3.2-3.2" />
-              <path d="M2.6 13.4h10.8" />
-            </svg>
-            下载
-          </a>
+          <DownloadAction
+            url={api.downloadUrl(item.id)}
+            fileName={item.blob.name}
+            started={downloadStarted}
+            label="下载"
+            primaryClassName="ghost button action-primary"
+            icon
+            onDownload={() => onDownload(item.id)}
+          />
         )}
         {item.blob && (
           <button
@@ -430,9 +499,14 @@ export const ItemCard = memo(function ItemCard({ item, onDelete, notify }: Props
           <img src={api.previewUrl(item.id)} alt={item.blob.name} />
           <div className="lightbox-bar" onClick={(e) => e.stopPropagation()}>
             <span className="muted small">{item.blob.name}</span>
-            <a className="ghost button" href={api.downloadUrl(item.id)} download={item.blob.name}>
-              下载原图
-            </a>
+            <DownloadAction
+              url={api.downloadUrl(item.id)}
+              fileName={item.blob.name}
+              started={downloadStarted}
+              label="下载原图"
+              primaryClassName="ghost button"
+              onDownload={() => onDownload(item.id)}
+            />
             <button type="button" className="ghost" onClick={() => setPreviewOpen(false)}>
               关闭
             </button>

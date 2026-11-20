@@ -70,7 +70,8 @@ import java.util.Date
 fun ItemCard(
     item: Item,
     imageStore: AuthenticatedImageStore,
-    download: DownloadTask?,
+    saveDownload: DownloadTask?,
+    installDownload: DownloadTask?,
     onDelete: (Item) -> Unit,
     onSave: (Item) -> Unit,
     onInstallApk: (Item) -> Unit,
@@ -232,11 +233,18 @@ fun ItemCard(
                 }
             }
 
-            if (download != null && download.status == TaskStatus.RUNNING) {
+            // The two transfers of one attachment are shown independently: a
+            // running one takes the progress row, a failed one its error text.
+            val runningDownload = saveDownload?.takeIf { it.status == TaskStatus.RUNNING }
+                ?: installDownload?.takeIf { it.status == TaskStatus.RUNNING }
+            val failedDownload = saveDownload?.takeIf { it.status == TaskStatus.FAILED }
+                ?: installDownload?.takeIf { it.status == TaskStatus.FAILED }
+
+            if (runningDownload != null) {
                 Spacer(Modifier.height(8.dp))
-                if (download.total != null && download.total!! > 0) {
+                if (runningDownload.total != null && runningDownload.total!! > 0) {
                     LinearProgressIndicator(
-                        progress = { download.fraction },
+                        progress = { runningDownload.fraction },
                         modifier = Modifier.fillMaxWidth().height(4.dp),
                         drawStopIndicator = {}, // M3 1.3.0 默认在末端画主色圆点
                     )
@@ -245,19 +253,19 @@ fun ItemCard(
                 }
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     Text(
-                        stringResource(R.string.download_progress, (download.fraction * 100).toInt()),
+                        stringResource(R.string.download_progress, (runningDownload.fraction * 100).toInt()),
                         style = MaterialTheme.typography.labelMedium,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                         modifier = Modifier.weight(1f),
                     )
-                    TextButton(onClick = { onCancelDownload(download.key) }) {
+                    TextButton(onClick = { onCancelDownload(runningDownload.key) }) {
                         Text(stringResource(R.string.action_cancel))
                     }
                 }
             }
-            if (download != null && download.status == TaskStatus.FAILED) {
+            if (failedDownload != null) {
                 Text(
-                    download.error ?: stringResource(R.string.error_download_failed),
+                    failedDownload.error ?: stringResource(R.string.error_download_failed),
                     style = MaterialTheme.typography.labelMedium,
                     color = MaterialTheme.colorScheme.error,
                     modifier = Modifier.padding(top = 4.dp),
@@ -288,15 +296,28 @@ fun ItemCard(
                     ) { Text(stringResource(R.string.action_open_link)) }
                 }
                 if (item.blob != null) {
+                    // A finished save already put this file in Downloads, so the
+                    // entry becomes a label instead of a second copy. Any running
+                    // transfer of this item still blocks both actions, as before.
+                    val saved = saveDownload?.status == TaskStatus.DONE
                     PillAction(
                         onClick = { onSave(item) },
-                        enabled = download?.status != TaskStatus.RUNNING,
-                        primary = true,
-                    ) { Text(stringResource(R.string.action_download)) }
+                        enabled = !saved && runningDownload == null,
+                        primary = !saved,
+                    ) {
+                        Text(
+                            stringResource(
+                                if (saved) R.string.action_downloaded else R.string.action_download,
+                            ),
+                        )
+                    }
                     if (item.isApk) {
+                        // Installing keeps its original behaviour: it stages the
+                        // APK and opens the system installer, which is a separate
+                        // task from saving and does not change the save state.
                         PillAction(
                             onClick = { onInstallApk(item) },
-                            enabled = download?.status != TaskStatus.RUNNING,
+                            enabled = runningDownload == null,
                             primary = true,
                         ) { Text(stringResource(R.string.action_install_apk)) }
                     }

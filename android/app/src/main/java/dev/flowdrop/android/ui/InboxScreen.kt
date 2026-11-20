@@ -42,7 +42,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
-import dev.flowdrop.android.ConnLabel
+import dev.flowdrop.android.DownloadKind
 import dev.flowdrop.android.R
 import dev.flowdrop.android.UiState
 import dev.flowdrop.android.data.Item
@@ -93,53 +93,15 @@ fun InboxScreen(
     Scaffold(
         containerColor = MaterialTheme.colorScheme.background,
         topBar = {
+            // The title bar keeps the screen name and its actions: the current
+            // computer, its link state and "切换" live on the device bar below.
             TopAppBar(
                 title = {
-                    Column {
-                        // The current computer is always named here: its inbox
-                        // is what the list below shows, and a tap switches it.
-                        Row(
-                            modifier = Modifier.fillMaxWidth().clickable { hubListOpen = true },
-                            verticalAlignment = Alignment.CenterVertically,
-                        ) {
-                            Text(
-                                state.hubName.ifBlank { stringResource(R.string.hub_unnamed) },
-                                maxLines = 1,
-                                overflow = TextOverflow.Ellipsis,
-                                modifier = Modifier.weight(1f),
-                            )
-                            Spacer(Modifier.width(6.dp))
-                            Text(
-                                stringResource(R.string.hub_switch_entry),
-                                style = MaterialTheme.typography.labelMedium,
-                                color = MaterialTheme.colorScheme.primary,
-                            )
-                        }
-                        Row(verticalAlignment = Alignment.CenterVertically) {
-                            HubConnDot(state.conn)
-                            Spacer(Modifier.width(5.dp))
-                            Text(
-                                ConnLabel.text(state.conn),
-                                style = MaterialTheme.typography.labelMedium,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                            )
-                            if (state.deviceName.isNotBlank()) {
-                                Text(
-                                    " · ",
-                                    style = MaterialTheme.typography.labelMedium,
-                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                                )
-                                Text(
-                                    state.deviceName,
-                                    style = MaterialTheme.typography.labelMedium,
-                                    color = MaterialTheme.colorScheme.primary,
-                                    maxLines = 1,
-                                    overflow = TextOverflow.Ellipsis,
-                                    modifier = Modifier.clickable { editingDevice = true },
-                                )
-                            }
-                        }
-                    }
+                    Text(
+                        stringResource(R.string.inbox_title),
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                    )
                 },
                 actions = {
                     TextButton(
@@ -193,6 +155,14 @@ fun InboxScreen(
                 .padding(padding)
                 .imePadding(),
         ) {
+            // Device bar: one row for the computer being shown, its state and
+            // the switch entry, instead of crowding them into the title bar.
+            InboxDeviceBar(
+                state = state,
+                onOpenHubs = { hubListOpen = true },
+                onEditDeviceName = { editingDevice = true },
+            )
+
             if (state.error != null) {
                 Surface(color = MaterialTheme.colorScheme.errorContainer) {
                     Row(
@@ -312,13 +282,16 @@ fun InboxScreen(
                     }
 
                     items(items = state.items, key = { it.id }) { item ->
-                        val download = remember(item.id, state.downloads) {
-                            state.downloads.firstOrNull { it.itemId == item.id }
+                        val downloads = remember(item.id, state.downloads) {
+                            state.downloads.filter { it.itemId == item.id }
                         }
                         ItemCard(
                             item = item,
                             imageStore = imageStore,
-                            download = download,
+                            // Saving and installing are separate transfers of the
+                            // same attachment; keep their states apart.
+                            saveDownload = downloads.firstOrNull { it.kind == DownloadKind.SAVE },
+                            installDownload = downloads.firstOrNull { it.kind == DownloadKind.INSTALL },
                             onDelete = onDelete,
                             onSave = onSave,
                             onInstallApk = onInstallApk,
@@ -390,6 +363,48 @@ fun InboxScreen(
                 onLogout()
             },
             onDismiss = { unpairOpen = false },
+        )
+    }
+}
+
+/**
+ * Strip under the inbox title bar: the current computer (tap to switch), its
+ * connection state and the editable local device name.
+ *
+ * The long name keeps one line and ellipsizes, so a narrow screen still shows
+ * the switch affordance; the device name stays next to the state it qualifies.
+ */
+@Composable
+private fun InboxDeviceBar(
+    state: UiState,
+    onOpenHubs: () -> Unit,
+    onEditDeviceName: () -> Unit,
+) {
+    Surface(color = MaterialTheme.colorScheme.surface, modifier = Modifier.fillMaxWidth()) {
+        CurrentHubEntry(
+            hubName = state.hubName,
+            conn = state.conn,
+            onOpen = onOpenHubs,
+            modifier = Modifier.fillMaxWidth().padding(horizontal = 8.dp),
+            secondaryContent = {
+                if (state.deviceName.isNotBlank()) {
+                    Text(
+                        " · ",
+                        style = MaterialTheme.typography.labelMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                    Text(
+                        state.deviceName,
+                        style = MaterialTheme.typography.labelMedium,
+                        color = MaterialTheme.colorScheme.primary,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                        modifier = Modifier
+                            .clickable(onClick = onEditDeviceName)
+                            .padding(horizontal = 2.dp, vertical = 2.dp),
+                    )
+                }
+            },
         )
     }
 }
