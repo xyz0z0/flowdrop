@@ -1,6 +1,9 @@
 package dev.flowdrop.android.ui
 
 import android.net.Uri
+import androidx.compose.animation.core.LinearEasing
+import androidx.compose.animation.core.LinearOutSlowInEasing
+import androidx.compose.animation.core.tween
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -285,19 +288,32 @@ fun InboxScreen(
                         val downloads = remember(item.id, state.downloads) {
                             state.downloads.filter { it.itemId == item.id }
                         }
-                        ItemCard(
-                            item = item,
-                            imageStore = imageStore,
-                            // Saving and installing are separate transfers of the
-                            // same attachment; keep their states apart.
-                            saveDownload = downloads.firstOrNull { it.kind == DownloadKind.SAVE },
-                            installDownload = downloads.firstOrNull { it.kind == DownloadKind.INSTALL },
-                            onDelete = onDelete,
-                            onSave = onSave,
-                            onInstallApk = onInstallApk,
-                            onCancelDownload = onCancelDownload,
-                            onNotify = onNotify,
-                        )
+                        Box(
+                            modifier = Modifier.animateItem(
+                                fadeInSpec = tween(
+                                    durationMillis = 120,
+                                    easing = LinearOutSlowInEasing,
+                                ),
+                                fadeOutSpec = tween(
+                                    durationMillis = 120,
+                                    easing = LinearEasing,
+                                ),
+                            ),
+                        ) {
+                            ItemCard(
+                                item = item,
+                                imageStore = imageStore,
+                                // Saving and installing are separate transfers of the
+                                // same attachment; keep their states apart.
+                                saveDownload = downloads.firstOrNull { it.kind == DownloadKind.SAVE },
+                                installDownload = downloads.firstOrNull { it.kind == DownloadKind.INSTALL },
+                                onDelete = onDelete,
+                                onSave = onSave,
+                                onInstallApk = onInstallApk,
+                                onCancelDownload = onCancelDownload,
+                                onNotify = onNotify,
+                            )
+                        }
                     }
 
                     if (state.nextCursor.isNotEmpty()) {
