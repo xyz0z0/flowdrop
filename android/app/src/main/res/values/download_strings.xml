@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Inbox download-progress labels, kept out of the shared strings.xml. -->
+<resources>
+    <string name="download_progress_loaded">已下载 %1$s</string>
+    <!-- %1$s is human readable bytes; the per-second unit is added here. -->
+    <string name="download_speed">%1$s/s</string>
+    <string name="download_speed_measuring">测速中…</string>
+    <string name="action_reinstall_apk">重新安装</string>
+</resources>

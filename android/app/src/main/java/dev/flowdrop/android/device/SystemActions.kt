@@ -5,6 +5,8 @@ import android.content.ClipboardManager
 import android.content.Context
 import android.content.Intent
 import android.net.Uri
+import android.os.Build
+import android.provider.Settings
 import android.widget.Toast
 
 /**
@@ -32,6 +34,34 @@ object SystemActions {
                 Intent(Intent.ACTION_VIEW, Uri.parse(url))
                     .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK),
             )
+            true
+        } catch (_: Exception) {
+            false
+        }
+    }
+
+    /**
+     * Whether this app may ask the system installer to open a package.
+     *
+     * Android 8+ requires the user to grant "install unknown apps" per app;
+     * without it the installer activity refuses the package, which looks like
+     * a broken download unless the app says what is missing.
+     */
+    fun canInstallPackages(context: Context): Boolean =
+        Build.VERSION.SDK_INT < Build.VERSION_CODES.O ||
+            context.packageManager.canRequestPackageInstalls()
+
+    /**
+     * Opens the system page where the user grants this app the install
+     * permission. Returns false when no settings activity handled it.
+     */
+    fun openInstallPermissionSettings(context: Context): Boolean {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) return false
+        val intent = Intent(Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES)
+            .setData(Uri.parse("package:" + context.packageName))
+            .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+        return try {
+            context.startActivity(intent)
             true
         } catch (_: Exception) {
             false

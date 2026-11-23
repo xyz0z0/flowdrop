@@ -9,6 +9,7 @@ import dev.flowdrop.android.connection.PairedConnector
 import dev.flowdrop.android.connection.SavedPairing
 import dev.flowdrop.android.data.ApiClient
 import dev.flowdrop.android.data.ApiException
+import dev.flowdrop.android.data.Blob
 import dev.flowdrop.android.data.ConnState
 import dev.flowdrop.android.data.DEFAULT_MAX_UPLOAD_BYTES
 import dev.flowdrop.android.data.EVENT_PRESENCE_CHANGED
@@ -35,8 +36,11 @@ import dev.flowdrop.android.data.pairingPrefill
 import dev.flowdrop.android.discovery.DiscoveredHub
 import dev.flowdrop.android.discovery.DiscoveryController
 import dev.flowdrop.android.discovery.DiscoveryState
+import dev.flowdrop.android.device.SystemActions
 import dev.flowdrop.android.io.ApkInstaller
+import dev.flowdrop.android.io.ApkPackageCache
 import dev.flowdrop.android.io.DownloadTarget
+import dev.flowdrop.android.io.TransferRateMeter
 import dev.flowdrop.android.io.UriSources
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CompletableDeferred
@@ -98,9 +102,10 @@ data class UploadTask(
 /**
  * Which action a download belongs to.
  *
- * Saving to Downloads and staging an APK for the installer are separate
- * downloads even when they stream the same item, so neither one's state can
- * stand in for the other's.
+ * Saving to Downloads and handing an APK to the installer keep independent
+ * rows and labels even though they share one cached package: a finished save
+ * must not make the install button look done, and an installer that failed to
+ * open must not make the save look failed.
  */
 enum class DownloadKind { SAVE, INSTALL }
 
@@ -110,6 +115,11 @@ data class DownloadTask(
     val name: String,
     val loaded: Long = 0,
     val total: Long? = null,
+    /**
+     * Measured throughput in bytes/second, null until the first window closes.
+     * The UI shows a placeholder meanwhile instead of a fake number.
+     */
+    val bytesPerSecond: Long? = null,
     val status: TaskStatus = TaskStatus.RUNNING,
     val error: String? = null,
     /** Computer this transfer was started for; its rows stay with that Hub. */
@@ -278,6 +288,14 @@ class AppViewModel(
     // computer's transfers never touches another's.
     private val uploadJobs = ConcurrentHashMap<String, HubJob>()
     private val downloadJobs = ConcurrentHashMap<String, HubJob>()
+
+    /**
+     * Complete APK packages shared by the save and install actions, keyed by
+     * Hub, item and the Hub's SHA-256. A package downloaded for one action is
+     * reused by the other instead of a second transfer, and persists across an
+     * installer prompt the user cancelled or that failed to open.
+     */
+    private val apkCache = ApkPackageCache(File(app.cacheDir, "downloads/apk"))
 
     /**
      * Transfers of every paired computer. Only the active computer's entries are
@@ -2306,7 +2324,11 @@ class AppViewModel(
         val api = client ?: return
         val blob = item.blob ?: return
         val key = "save:$hubId:${item.id}"
-        if (downloadJobs.containsKey(key)) return
+        // Both actions of one item must not transfer at the same time: they share
+        // one staged package, and the UI's disabled buttons are not the only way
+        // to call these methods. Waiting is unnecessary because either action
+        // reuses the other's completed package.
+        if (downloadJobs.containsKey(key) || downloadJobs.containsKey("apk:$hubId:${item.id}")) return
         // A finished save is terminal for this item on this computer: the row is
         // already in Downloads and the button says so. A failed or cancelled one
         // left no row behind, so those stay retryable.
@@ -2332,20 +2354,29 @@ class AppViewModel(
                 // the task fails instead of reporting a file that never existed.
                 val created = DownloadTarget.create(app, blob.name, blob.contentType)
                 target = created
-                withContext(Dispatchers.IO) {
-                    created.openSink().use { sink ->
-                        api.download(item.id, sink) { loaded, total ->
-                            // Called from the IO dispatcher; updateDownload hops
-                            // through the thread-safe transfer book.
-                            updateDownload(key) { it.copy(loaded = loaded, total = total ?: it.total) }
+                val downloaded = if (item.isApk) {
+                    // An APK also goes through the shared package cache first, so
+                    // installing it afterwards reuses these bytes instead of
+                    // downloading the same file a second time.
+                    val cached = stagedApk(hubId, item.id, blob, api, key)
+                    withContext(Dispatchers.IO) {
+                        cached.inputStream().buffered().use { input ->
+                            created.openSink().use { sink -> input.copyTo(sink) }
                         }
+                        cached.length()
+                    }
+                } else {
+                    withContext(Dispatchers.IO) {
+                        created.openSink().use { sink ->
+                            api.download(item.id, sink, progressReporter(key))
+                        }.bytes
                     }
                 }
                 // Closing the stream only flushed the bytes; MediaStore still has
                 // to accept the row before the file is visible in Downloads.
                 val published = (created as? DownloadTarget.MediaStoreTarget)?.finish(true) ?: true
                 if (!published) throw IOException("cannot publish Downloads entry")
-                updateDownload(key) { it.copy(status = TaskStatus.DONE) }
+                updateDownload(key) { it.copy(status = TaskStatus.DONE, loaded = downloaded, total = downloaded) }
                 toast(app.getString(R.string.saved_to_downloads, created.location))
             } catch (e: CancellationException) {
                 discardTarget(target)
@@ -2366,15 +2397,18 @@ class AppViewModel(
     }
 
     /**
-     * Downloads an APK into app cache and hands it to the system installer.
-     * The app never installs silently; Android shows its own confirmation.
+     * Downloads an APK into the shared package cache and hands it to the system
+     * installer. The app never installs silently; Android shows its own
+     * confirmation.
      */
     fun installApk(item: Item) {
         val hubId = activeHubId ?: return
         val api = client ?: return
         val blob = item.blob ?: return
         val key = "apk:$hubId:${item.id}"
-        if (downloadJobs.containsKey(key)) return
+        // Same mutual exclusion as a save: a second request for either action of
+        // this item must not start another GET over the shared package.
+        if (downloadJobs.containsKey(key) || downloadJobs.containsKey("save:$hubId:${item.id}")) return
         val task = DownloadTask(
             key = key,
             itemId = item.id,
@@ -2388,27 +2422,20 @@ class AppViewModel(
         // Same ordering as a save: register the job before it can run, so an
         // immediately failing body cannot clear its own slot too early.
         val job = viewModelScope.launch(start = CoroutineStart.LAZY) {
-            val dir = File(app.cacheDir, "downloads").apply { mkdirs() }
-            val file = File(dir, DownloadTarget.sanitize(blob.name))
             try {
-                withContext(Dispatchers.IO) {
-                    file.outputStream().use { sink ->
-                        api.download(item.id, sink) { loaded, total ->
-                            updateDownload(key) { it.copy(loaded = loaded, total = total ?: it.total) }
-                        }
-                    }
+                val file = stagedApk(hubId, item.id, blob, api, key)
+                // DONE means the package is on disk and can be handed over again;
+                // the installer prompt is not part of the download, so a cancelled
+                // or failed prompt keeps this state instead of deleting the APK.
+                updateDownload(key) {
+                    it.copy(status = TaskStatus.DONE, loaded = file.length(), total = file.length())
                 }
-                updateDownload(key) { it.copy(status = TaskStatus.DONE) }
-                val uri = ApkInstaller.contentUriFor(app, file)
-                val started = dev.flowdrop.android.device.SystemActions.installApk(app, uri)
-                if (!started) toast(app.getString(R.string.error_apk_install), true)
+                handOverApk(file)
             } catch (e: CancellationException) {
-                file.delete()
                 downloadTasks.remove(key)
                 publishTransfers()
                 throw e
             } catch (e: Exception) {
-                file.delete()
                 if (e is ApiException && e.isUnauthorized) onUnauthorized(hubId, api)
                 updateDownload(key) { it.copy(status = TaskStatus.FAILED, error = friendly(e)) }
                 toast("${app.getString(R.string.error_download_failed)}：${friendly(e)}", true)
@@ -2418,6 +2445,84 @@ class AppViewModel(
         }
         downloadJobs[key] = HubJob(hubId, job)
         job.start()
+    }
+
+    /**
+     * Resolves a complete local APK for [itemId], reusing the shared cache when
+     * it already holds one and otherwise streaming a fresh copy into a staging
+     * file that only becomes visible after a size check.
+     *
+     * The Hub's own SHA-256 is verified by [ApiClient.download]; the length check
+     * here catches a Hub that sent no checksum header. A cancelled or failed
+     * transfer deletes its staging file, so nothing partial is ever reused.
+     */
+    private suspend fun stagedApk(
+        hubId: String,
+        itemId: String,
+        blob: Blob,
+        api: ApiClient,
+        key: String,
+    ): File = withContext(Dispatchers.IO) {
+        // Cache probing, directory creation, publishing and cleanup are all
+        // filesystem work: they belong on IO together with the transfer itself.
+        apkCache.complete(hubId, itemId, blob.sha256, blob.sizeBytes)?.let { cached ->
+            // A reused package was not downloaded in this attempt; show its real
+            // size so the row does not look empty while it is handed over.
+            updateDownload(key) { it.copy(loaded = cached.length(), total = cached.length()) }
+            return@withContext cached
+        }
+        val part = apkCache.start(hubId, itemId, blob.sha256, blob.sizeBytes)
+        val onProgress = progressReporter(key)
+        try {
+            val result = part.file.outputStream().buffered().use { sink ->
+                api.download(itemId, sink, onProgress)
+            }
+            // Keep the final totals even when the transfer ends between two
+            // throttled samples: leaving the last sample's bytes would show a
+            // file smaller than it is.
+            updateDownload(key) { it.copy(loaded = result.bytes, total = result.bytes) }
+            part.publish()
+        } catch (e: Throwable) {
+            part.discard()
+            throw e
+        }
+    }
+
+    /**
+     * One progress callback per transfer: [TransferRateMeter] throttles the
+     * speed to one value per window on a monotonic clock, and the counts are
+     * always applied so a closed window never drops bytes.
+     */
+    private fun progressReporter(key: String): (Long, Long?) -> Unit {
+        val meter = TransferRateMeter()
+        return { loaded, total ->
+            val rate = meter.sample(loaded)
+            updateDownload(key) {
+                it.copy(
+                    loaded = loaded,
+                    total = total ?: it.total,
+                    bytesPerSecond = rate ?: it.bytesPerSecond,
+                )
+            }
+        }
+    }
+
+    /**
+     * Hands a complete local package to the system installer.
+     *
+     * Deliberately never throws: a missing installer or a revoked "install
+     * unknown apps" grant is not a download failure, so the task stays DONE and
+     * the user can retry without downloading the APK again.
+     */
+    private fun handOverApk(file: File) {
+        if (!SystemActions.canInstallPackages(app)) {
+            toast(app.getString(R.string.error_apk_install_permission), true)
+            SystemActions.openInstallPermissionSettings(app)
+            return
+        }
+        val uri = runCatching { ApkInstaller.contentUriFor(app, file) }.getOrNull()
+        val started = uri != null && SystemActions.installApk(app, uri)
+        if (!started) toast(app.getString(R.string.error_apk_install), true)
     }
 
     fun cancelDownload(key: String) {

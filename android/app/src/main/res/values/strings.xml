@@ -128,6 +128,8 @@
     <string name="error_save_failed">保存失败</string>
     <string name="error_download_failed">下载失败</string>
     <string name="error_apk_install">无法启动系统安装程序</string>
+    <!-- The APK is already downloaded; only the per-app system grant is missing. -->
+    <string name="error_apk_install_permission">安装包已下载，请先在系统设置中允许 FlowDrop 安装应用</string>
 
     <string name="discovery_title">附近的 Hub</string>
     <string name="discovery_search">搜索</string>

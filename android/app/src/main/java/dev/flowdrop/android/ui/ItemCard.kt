@@ -242,21 +242,57 @@ fun ItemCard(
 
             if (runningDownload != null) {
                 Spacer(Modifier.height(8.dp))
-                if (runningDownload.total != null && runningDownload.total!! > 0) {
+                val knownTotal = runningDownload.total?.takeIf { it > 0 }
+                // M3 1.3.0 的 Round cap 会在 gapSize 之外再补一个 strokeWidth 的缝，
+                // 所以显式用 Butt cap，外轮廓改用 2.dp 圆角裁切。
+                val barModifier = Modifier
+                    .fillMaxWidth()
+                    .height(4.dp)
+                    .clip(RoundedCornerShape(2.dp))
+                if (knownTotal != null) {
                     LinearProgressIndicator(
                         progress = { runningDownload.fraction },
-                        modifier = Modifier.fillMaxWidth().height(4.dp),
-                        drawStopIndicator = {}, // M3 1.3.0 默认在末端画主色圆点
+                        modifier = barModifier,
+                        strokeCap = StrokeCap.Butt,
+                        gapSize = 0.dp,
+                        drawStopIndicator = {},
                     )
                 } else {
-                    LinearProgressIndicator(modifier = Modifier.fillMaxWidth().height(4.dp))
+                    // 总量未知时保留 M3 的不定态动画。
+                    LinearProgressIndicator(
+                        modifier = barModifier,
+                        strokeCap = StrokeCap.Butt,
+                        gapSize = 0.dp,
+                    )
                 }
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     Text(
-                        stringResource(R.string.download_progress, (runningDownload.fraction * 100).toInt()),
+                        if (knownTotal != null) {
+                            stringResource(
+                                R.string.download_progress,
+                                (runningDownload.fraction * 100).toInt(),
+                            )
+                        } else {
+                            // 总量未知时不猜百分比，只报已收到的字节。
+                            stringResource(
+                                R.string.download_progress_loaded,
+                                formatBytes(runningDownload.loaded),
+                            )
+                        },
                         style = MaterialTheme.typography.labelMedium,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
                         modifier = Modifier.weight(1f),
+                    )
+                    Text(
+                        // null = 还没测出速度，先占住这一格避免整行跳动。
+                        runningDownload.bytesPerSecond?.let { speed ->
+                            stringResource(R.string.download_speed, formatBytes(speed.coerceAtLeast(0)))
+                        } ?: stringResource(R.string.download_speed_measuring),
+                        style = MaterialTheme.typography.labelMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        maxLines = 1,
                     )
                     TextButton(onClick = { onCancelDownload(runningDownload.key) }) {
                         Text(stringResource(R.string.action_cancel))
@@ -315,11 +351,20 @@ fun ItemCard(
                         // Installing keeps its original behaviour: it stages the
                         // APK and opens the system installer, which is a separate
                         // task from saving and does not change the save state.
+                        // INSTALL DONE 说明缓存里的 APK 还在，按钮改为可重试的重新安装。
+                        val staged = installDownload?.status == TaskStatus.DONE
                         PillAction(
                             onClick = { onInstallApk(item) },
                             enabled = runningDownload == null,
                             primary = true,
-                        ) { Text(stringResource(R.string.action_install_apk)) }
+                        ) {
+                            Text(
+                                stringResource(
+                                    if (staged) R.string.action_reinstall_apk
+                                    else R.string.action_install_apk,
+                                ),
+                            )
+                        }
                     }
                 }
                 Spacer(Modifier.weight(1f))
