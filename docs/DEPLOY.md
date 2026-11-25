@@ -448,8 +448,9 @@ curl -fsS http://100.100.100.63:8080/api/v1/health
 
 **适用**：会在不同 Wi-Fi、家里/公司网络、Tailscale 之间移动的 Hub。开启后 Hub 在
 **主监听的同一端口**上，额外绑定本机当前所有符合条件的 IPv4：物理网卡上的 RFC1918
-局域网地址和 Tailscale CGNAT（`100.64/10`）。回环、链路本地、通配 `0.0.0.0`/`::`，
-以及 docker/`br-*`/veth/`wg*`/`tun*` 等容器与虚拟网桥接口上的地址都不会被自动绑定。
+局域网地址和 Tailscale CGNAT（`100.64/10`）。回环、链路本地、通配 `0.0.0.0`/`::` 与公网地址
+不会被自动绑定；地址本身是 RFC1918 的容器/虚拟网桥（`docker0`、`br-*`、virbr 等）会绑定，
+但不参与 mDNS 广播（见下表与 §5.7）。
 它仍然只是**一个** Hub 进程、一个数据库、一个 handler、一把数据目录锁。
 
 配置（示例，端口与路径按实际替换）：
@@ -751,7 +752,7 @@ sudo ufw allow 443/tcp
 | `max_upload_bytes` | `FLOWDROP_MAX_UPLOAD_BYTES` | `536870912` (512 MiB) | 单文件上限 |
 | `max_concurrent_uploads` | `FLOWDROP_MAX_CONCURRENT_UPLOADS` | `4` | 并发上传数 |
 | `min_free_bytes` | `FLOWDROP_MIN_FREE_BYTES` | `1073741824` (1 GiB) | 磁盘保留量 |
-| `session_ttl_hours` | `FLOWDROP_SESSION_TTL_HOURS` | `168` (7 天) | 会话有效期（滑动续期） |
+| `session_ttl_hours` | `FLOWDROP_SESSION_TTL_HOURS` | `168` (7 天) | 会话 Cookie 有效期；到期需重新配对（设备令牌本身直到在本机撤销仍有效） |
 | `cookie_secure` | `FLOWDROP_COOKIE_SECURE` | `true` | Cookie 仅 HTTPS 发送 |
 | `discovery_enabled` | `FLOWDROP_DISCOVERY_ENABLED` | 空 = 自动（满足 §5.7 条件时发布） | mDNS/DNS-SD 局域网自动发现；`false` 明确关闭 |
 | `pair_limit_per_minute` | `FLOWDROP_PAIR_LIMIT_PER_MINUTE` | `5` | 每个来源 IP 的配对请求限制（固定窗口，非令牌桶；与全 Hub 5 次错误上限是两件事） |
