@@ -4,13 +4,20 @@ import { copyFailureHint, copyText, type CopyFailureReason } from './clipboard';
 import { formatBytes } from './Composer';
 import { splitTextLinks } from './textLinks';
 
+/**
+ * Per-item download state. "downloading"/"done" come from the native desktop
+ * tracker (real WebKit outcome); "started" is the plain-browser fallback, where
+ * no outcome is ever reported.
+ */
+export type DownloadStatus = 'downloading' | 'done' | 'started';
+
 interface Props {
   item: Item;
   onDelete: (id: string) => Promise<void> | void;
   notify: (text: string, tone?: 'ok' | 'error') => void;
   /** Shared per-item download state; the list card and the preview both read it. */
-  downloadStarted: boolean;
-  /** Claims a download attempt; false means this click is a repeat and is dropped. */
+  downloadStatus: DownloadStatus | 'idle';
+  /** Runs on every download click; false means this click must not download. */
   onDownload: (id: string) => boolean;
 }
 
@@ -37,10 +44,10 @@ function DownloadIcon() {
 interface DownloadActionProps {
   url: string;
   fileName: string;
-  started: boolean;
+  status: DownloadStatus | 'idle';
   /** "下载" / "下载原图" — the untouched native anchor's label. */
   label: string;
-  /** Base classes for the primary entry (idle anchor and started state). */
+  /** Base classes for the primary entry (idle anchor and in-flight states). */
   primaryClassName: string;
   icon?: boolean;
   onDownload: () => boolean;
@@ -48,41 +55,65 @@ interface DownloadActionProps {
 
 /**
  * Native `<a href download>` keeps the browser/WebView download and its
- * filename. Once started, the entry is disabled and "重试下载" stays available.
+ * filename. The desktop WebView reports the real outcome, so the entry shows
+ * "下载中…" while WebKit writes and "已下载" after a successful download; both
+ * states keep answering clicks (feedback, never a second file). In a plain
+ * browser the outcome is unknowable, so the entry falls back to "已发起下载"
+ * with an explicit "重试下载".
  */
 function DownloadAction({
   url,
   fileName,
-  started,
+  status,
   label,
   primaryClassName,
   icon = false,
   onDownload,
 }: DownloadActionProps) {
   const click = (e: MouseEvent<HTMLAnchorElement>) => {
-    // Only a repeated click (the second half of a double-click) is swallowed;
-    // the first one always reaches the browser's native download.
+    // A click the page refuses (already downloading) must not reach WebKit.
     if (!onDownload()) e.preventDefault();
   };
-  return (
-    <>
-      {started ? (
+  if (status === 'started') {
+    return (
+      <>
         <span className={`${primaryClassName} download-started`} aria-disabled="true">
           {icon && <DownloadIcon />}
           已发起下载
         </span>
-      ) : (
-        <a className={primaryClassName} href={url} download={fileName} onClick={click}>
-          {icon && <DownloadIcon />}
-          {label}
-        </a>
-      )}
-      {started && (
         <a className="ghost button download-retry" href={url} download={fileName} onClick={click}>
           重试下载
         </a>
-      )}
-    </>
+      </>
+    );
+  }
+  if (status === 'downloading') {
+    return (
+      <button
+        type="button"
+        className={`${primaryClassName} download-pending`}
+        title="正在下载，完成后会显示结果"
+        onClick={() => onDownload()}
+      >
+        {icon && <DownloadIcon />}
+        下载中…
+      </button>
+    );
+  }
+  // Idle or already saved. A saved entry stays an anchor on purpose: the native
+  // tracker re-checks its record, so a deleted file can be downloaded again and
+  // a repeat never writes a second copy.
+  return (
+    <a
+      className={status === 'done' ? `${primaryClassName} download-done` : primaryClassName}
+      href={url}
+      download={fileName}
+      title={status === 'done' ? '已下载；再点一次只确认状态，不会覆盖现有文件' : undefined}
+      onClick={click}
+    >
+      {icon && <DownloadIcon />}
+      {status === 'done' ? '已下载' : label}
+    </a>
   );
 }
 
@@ -187,7 +218,7 @@ export const ItemCard = memo(function ItemCard({
   item,
   onDelete,
   notify,
-  downloadStarted,
+  downloadStatus,
   onDownload,
 }: Props) {
   const [previewOpen, setPreviewOpen] = useState(false);
@@ -422,7 +453,7 @@ export const ItemCard = memo(function ItemCard({
           <DownloadAction
             url={api.downloadUrl(item.id)}
             fileName={item.blob.name}
-            started={downloadStarted}
+            status={downloadStatus}
             label="下载"
             primaryClassName="ghost button action-primary"
             icon
@@ -502,7 +533,7 @@ export const ItemCard = memo(function ItemCard({
             <DownloadAction
               url={api.downloadUrl(item.id)}
               fileName={item.blob.name}
-              started={downloadStarted}
+              status={downloadStatus}
               label="下载原图"
               primaryClassName="ghost button"
               onDownload={() => onDownload(item.id)}

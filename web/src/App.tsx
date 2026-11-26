@@ -11,7 +11,7 @@ import {
 import { isSecureContext } from './clipboard';
 import { Login } from './Login';
 import { Composer } from './Composer';
-import { ItemCard } from './ItemCard';
+import { ItemCard, type DownloadStatus } from './ItemCard';
 import { useEventStream, type ConnState } from './useEventStream';
 import { getDeviceName, setDeviceName } from './device';
 
@@ -46,9 +46,32 @@ interface Toast {
 }
 
 const TOAST_MS = 3500;
-// A double-click dispatches two clicks. A second download request for the same
-// item inside this window is treated as the second half of that double-click.
+
+// Linux GTK3 desktop only: the native WebKit context reports the real outcome of
+// an inbox item download (finished without failed). The page then mirrors that
+// state instead of guessing. Read at click time, not at module load: the bridge
+// script is injected by the native window and may land after the bundle starts.
+function nativeDownloadReports(): boolean {
+  return typeof window !== 'undefined' && window.__flowdropDesktopDownloads === true;
+}
+
+// A click marks the item as downloading before WebKit's own signal can leave the
+// native side. If that signal never comes (bridge missing, a request the native
+// tracker does not own), the mark is dropped after this long: an unconfirmed
+// status must never lock the entry.
+const DOWNLOAD_ACK_MS = 8000;
+
+// Plain-browser fallback (no download outcome is ever reported there): a
+// double-click dispatches two clicks, so a second request inside this window is
+// treated as the second half of that double-click.
 const DOUBLE_CLICK_MS = 1200;
+
+declare global {
+  interface Window {
+    /** Set by the injected Linux GTK3 bridge (desktop/downloads_track.go). */
+    __flowdropDesktopDownloads?: boolean;
+  }
+}
 
 export function App() {
   const [session, setSession] = useState<SessionInfo | null>(null);
@@ -91,7 +114,7 @@ export function App() {
   // `merge` replaces a toast with the same text and tone instead of stacking a
   // duplicate (used for consecutive deletes); other toasts are left alone and
   // every toast still dismisses on its own timer.
-  const notify = (text: string, tone: Toast['tone'] = 'ok', merge = false) => {
+  const notify = useCallback((text: string, tone: Toast['tone'] = 'ok', merge = false) => {
     const id = Date.now() + Math.random();
     setToasts((t) => {
       if (merge && t.some((x) => x.text === text && x.tone === tone)) return t;
@@ -99,28 +122,132 @@ export function App() {
     });
     // A no-op filter when this toast was merged into the existing one.
     window.setTimeout(() => setToasts((t) => t.filter((x) => x.id !== id)), TOAST_MS);
-  };
-
-  // Native downloads never report whether the file landed, so an item only
-  // records "started". Kept for this page identity: survives filter/category
-  // changes, dropped on logout or a Hub switch. List and preview share it.
-  const [downloadsStarted, setDownloadsStarted] = useState<ReadonlySet<string>>(new Set());
-  const downloadClaims = useRef(new Map<string, number>());
-
-  /** Claims a download attempt; a repeat inside [DOUBLE_CLICK_MS] is refused. */
-  const claimDownload = useCallback((id: string): boolean => {
-    const now = Date.now();
-    const last = downloadClaims.current.get(id);
-    if (last !== undefined && now - last < DOUBLE_CLICK_MS) return false;
-    downloadClaims.current.set(id, now);
-    // Swap the native anchor for the disabled entry one task later, so the
-    // browser's default download action still runs on the attached anchor. The
-    // ref above already blocks a second click before this state lands.
-    window.setTimeout(() => {
-      setDownloadsStarted((prev) => (prev.has(id) ? prev : new Set(prev).add(id)));
-    }, 0);
-    return true;
   }, []);
+
+  // Per-item download state. `downloadStatusRef` is the same state read at click
+  // time: a double click can be dispatched before React has rendered the state
+  // from the first click. Kept for this page identity (survives filter and
+  // category changes, dropped on logout or a Hub switch); the list card and the
+  // image preview both read it.
+  const [downloadStatus, setDownloadStatus] = useState<ReadonlyMap<string, DownloadStatus>>(
+    new Map(),
+  );
+  const downloadStatusRef = useRef(new Map<string, DownloadStatus>());
+  // Timers for the optimistic "downloading" mark, keyed by item.
+  const downloadTimersRef = useRef(new Map<string, number>());
+  // Plain-browser fallback: last click time per item (double-click guard).
+  const browserClicksRef = useRef(new Map<string, number>());
+
+  const clearDownloadTimer = useCallback((id: string) => {
+    const timer = downloadTimersRef.current.get(id);
+    if (timer === undefined) return;
+    window.clearTimeout(timer);
+    downloadTimersRef.current.delete(id);
+  }, []);
+
+  const setDownloadState = useCallback((id: string, status: DownloadStatus | null) => {
+    if (status === null) {
+      if (!downloadStatusRef.current.delete(id)) return;
+    } else {
+      if (downloadStatusRef.current.get(id) === status) return;
+      downloadStatusRef.current.set(id, status);
+    }
+    setDownloadStatus((prev) => {
+      const next = new Map(prev);
+      if (status === null) next.delete(id);
+      else next.set(id, status);
+      return next;
+    });
+  }, []);
+
+  /** Drops every per-item download record and timer (identity change, logout). */
+  const resetDownloads = useCallback(() => {
+    for (const timer of downloadTimersRef.current.values()) window.clearTimeout(timer);
+    downloadTimersRef.current.clear();
+    browserClicksRef.current.clear();
+    downloadStatusRef.current.clear();
+    setDownloadStatus((prev) => (prev.size === 0 ? prev : new Map()));
+  }, []);
+
+  // Native outcomes for the desktop WebView. The event carries only {id, status}
+  // — the saved path never leaves the native side.
+  useEffect(() => {
+    const onDownload = (event: Event) => {
+      const detail = (
+        event as CustomEvent<{ id?: unknown; status?: unknown; existing?: unknown }>
+      ).detail;
+      if (!detail || typeof detail.id !== 'string') return;
+      const id = detail.id;
+      // Any native event is the acknowledgement this entry was waiting for.
+      clearDownloadTimer(id);
+      switch (detail.status) {
+        case 'downloading':
+          // News only when this page did not raise the mark itself, e.g. after a
+          // reload while WebKit is still writing the same item.
+          if (downloadStatusRef.current.get(id) !== 'downloading') {
+            notify('正在下载，请稍候');
+          }
+          setDownloadState(id, 'downloading');
+          break;
+        case 'done':
+          setDownloadState(id, 'done');
+          notify(detail.existing === true ? '已下载，不重复保存' : '下载已完成');
+          break;
+        case 'failed':
+          // A failed attempt is retryable: the entry is a normal download again.
+          setDownloadState(id, null);
+          notify('下载失败，可重试', 'error');
+          break;
+      }
+    };
+    window.addEventListener('flowdrop:download', onDownload);
+    return () => window.removeEventListener('flowdrop:download', onDownload);
+  }, [clearDownloadTimer, notify, setDownloadState]);
+
+  /**
+   * Decides what one download click does. Returning false swallows the click, so
+   * no second download request reaches WebKit. The desktop answers from native
+   * state (which survives reloads); a plain browser keeps the old behaviour.
+   */
+  const onDownload = useCallback(
+    (id: string): boolean => {
+      if (!nativeDownloadReports()) {
+        const now = Date.now();
+        const last = browserClicksRef.current.get(id);
+        if (last !== undefined && now - last < DOUBLE_CLICK_MS) return false;
+        browserClicksRef.current.set(id, now);
+        // Let the anchor's native download run first, then swap the entry: a
+        // browser never reports whether the file landed, so this only says the
+        // download was started and keeps an explicit retry.
+        window.setTimeout(() => setDownloadState(id, 'started'), 0);
+        return true;
+      }
+      const current = downloadStatusRef.current.get(id);
+      if (current === 'downloading') {
+        notify('正在下载，请稍候');
+        return false;
+      }
+      if (current === 'done') {
+        // The saved file may have been deleted since, so the click is passed to
+        // WebKit: the native tracker re-checks its record and cancels the request
+        // before any second file is written.
+        return true;
+      }
+      // Optimistic mark until WebKit's own signal confirms it.
+      setDownloadState(id, 'downloading');
+      clearDownloadTimer(id);
+      const timer = window.setTimeout(() => {
+        downloadTimersRef.current.delete(id);
+        if (downloadStatusRef.current.get(id) === 'downloading') {
+          // No native signal: never keep an unconfirmed status.
+          setDownloadState(id, null);
+        }
+      }, DOWNLOAD_ACK_MS);
+      downloadTimersRef.current.set(id, timer);
+      return true;
+    },
+    [clearDownloadTimer, notify, setDownloadState],
+  );
 
   useEffect(() => {
     let alive = true;
@@ -244,10 +371,9 @@ export function App() {
     setOnline(null);
     setPresenceStale(false);
     setPresenceOpen(false);
-    // Started-download state belongs to the identity that started it.
-    downloadClaims.current.clear();
-    setDownloadsStarted((prev) => (prev.size === 0 ? prev : new Set<string>()));
-  }, [identity]);
+    // Download state belongs to the identity that started it.
+    resetDownloads();
+  }, [identity, resetDownloads]);
 
   // First authenticated load. Socket open/reconnect/foreground arrive through
   // onResync above, and opening the list refreshes again.
@@ -382,8 +508,7 @@ export function App() {
     setPresenceStale(false);
     setPresenceOpen(false);
     // Downloads belonged to the session that is ending.
-    downloadClaims.current.clear();
-    setDownloadsStarted(new Set<string>());
+    resetDownloads();
     setSession({ authenticated: false });
   };
 
@@ -567,8 +692,8 @@ export function App() {
                   item={item}
                   onDelete={onDelete}
                   notify={notify}
-                  downloadStarted={downloadsStarted.has(item.id)}
-                  onDownload={claimDownload}
+                  downloadStatus={downloadStatus.get(item.id) ?? 'idle'}
+                  onDownload={onDownload}
                 />
               ))}
             </ul>

@@ -41,8 +41,14 @@ func TestInboxInjectedJSBootstrapsLoginFirst(t *testing.T) {
 	if !(boot < chrome && boot < entry) {
 		t.Fatalf("bootstrap must come before chrome and the settings entry (boot=%d chrome=%d entry=%d)", boot, chrome, entry)
 	}
-	if strings.Count(js, "flowdrop: isolated snippet") != 5 {
-		t.Fatalf("expected five isolated snippets (bootstrap + four page scripts), got %d", strings.Count(js, "flowdrop: isolated snippet"))
+	// The native download status bridge is only injected by the Linux GTK3
+	// build (downloadStatusBridgeEnabled), so the count follows that tag.
+	bridge := 0
+	if downloadStatusBridgeEnabled {
+		bridge = 1
+	}
+	if got, want := strings.Count(js, "flowdrop: isolated snippet"), 5+bridge; got != want {
+		t.Fatalf("expected %d isolated snippets (bootstrap + four page scripts + %d bridge), got %d", want, bridge, got)
 	}
 	if strings.Count(js, token) != 1 {
 		t.Fatalf("the device token must appear exactly once (inside the bootstrap)")
@@ -52,7 +58,7 @@ func TestInboxInjectedJSBootstrapsLoginFirst(t *testing.T) {
 	if strings.Contains(unpaired, "__flowdropDesktopBootstrap") {
 		t.Fatalf("an unpaired shell must inject no bootstrap")
 	}
-	if strings.Count(unpaired, "flowdrop: isolated snippet") != 4 {
-		t.Fatalf("expected four isolated snippets without a token, got %d", strings.Count(unpaired, "flowdrop: isolated snippet"))
+	if got, want := strings.Count(unpaired, "flowdrop: isolated snippet"), 4+bridge; got != want {
+		t.Fatalf("expected %d isolated snippets without a token, got %d", want, got)
 	}
 }

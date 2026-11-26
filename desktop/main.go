@@ -554,6 +554,9 @@ func (d *desktopState) openInbox(hubURL string) {
 		d.inbox.SetURL(hubURL + "/")
 	}
 	d.hubOrigin = originOf(hubURL)
+	// Native download status is tracked per Hub origin: records of the previous
+	// Hub must never deduplicate (or answer for) an item on this one.
+	setDownloadInboxOrigin(d.hubOrigin)
 	if d.tray != nil {
 		d.tray.SetTooltip("FlowDrop — 收件箱运行中")
 	}
@@ -803,11 +806,18 @@ func joinInjectedScripts(snippets ...string) string {
 // bootstrap comes first: without it the page sits on the pairing screen, so it
 // must not depend on any other snippet running.
 func inboxInjectedJS(token string) string {
-	return joinInjectedScripts(
+	scripts := []string{
 		desktopInboxBootstrapJS(token),
 		desktopWindowChromeJS,
 		desktopLinkInterceptionJS,
 		desktopSettingsEntryJS,
 		desktopFileDropGuardJS,
-	)
+	}
+	// Only the Linux GTK3 build has a WebKit context that reports real download
+	// outcomes. Without it the page keeps its browser fallback instead of
+	// waiting for a status that will never arrive.
+	if downloadStatusBridgeEnabled {
+		scripts = append(scripts, desktopDownloadStatusJS)
+	}
+	return joinInjectedScripts(scripts...)
 }

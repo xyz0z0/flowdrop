@@ -1064,12 +1064,25 @@ button:disabled {
   color: var(--danger-deep);
 }
 
-/* 已发起下载：原生下载不回报落盘结果，主入口禁用，重试走次级入口。 */
+/* 已发起下载（普通浏览器无落盘反馈）：主入口禁用，重试走次级入口。 */
 .item-actions .download-started,
 .lightbox-bar .download-started {
   opacity: 0.55;
   cursor: default;
   pointer-events: none;
+}
+
+/* 桌面原生下载：进行中与已下载仍可点击，只给反馈，不会另存。 */
+.item-actions .download-pending,
+.lightbox-bar .download-pending,
+.item-actions .download-done,
+.lightbox-bar .download-done {
+  opacity: 0.7;
+  color: var(--accent-deep);
+}
+.item-actions .download-pending,
+.lightbox-bar .download-pending {
+  cursor: default;
 }
 .item-actions .download-retry,
 .lightbox-bar .download-retry {
